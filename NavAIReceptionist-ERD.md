@@ -191,7 +191,7 @@ agent config, Twilio credentials AND transfer settings in one row.)*
 | `twilio_auth_token` | Char(128), blank — **encrypted at rest, write-only in forms** (see the security note below) |
 | `transfer_enabled` | Bool, default `False` |
 | `transfer_phone_number` | Char(32), E.164 — the human-handoff destination |
-| `transfer_secondary_number` | Char(32), E.164 — the secondary/second-language line |
+| `transfer_secondary_number` | Char(32), E.164 — the secondary/second-language line (OraOps `spanish_transfer_number`, generalized: the second destination need not be Spanish) |
 | `transfer_timezone` | Char(100), IANA, default `"America/Chicago"` |
 | `transfer_working_hours` | JSON — `{weekday: {"enabled": bool, "start": "HH:MM", "end": "HH:MM"}}` for monday…sunday; empty = no restriction |
 | `transfer_keywords` | JSON list — extra lowercased caller phrases that trigger a handoff, **added to** the runtime's built-in keyword set; empty = just the built-ins |
@@ -279,12 +279,19 @@ The calendar reads this index; every calendar query carries both `tenant` and `l
 `ai_phone`), `notes` (Text, blank).
 Index `(tenant, location, status)`. Ordering `["-created_at"]`.
 
+Deltas from the reference: `metadata` is **dropped** (nothing writes it here — `CallSession.metadata` already
+carries the call-level detail, and the callback links to that session), `location` is **non-null** (a callback is
+always about one location's calendar), and `source` is harmonized to `ai_phone` / `manual` / `web`.
+
 ### 3.4 Call logs — `calls`
 
 #### `calls.CallSession` — the one call log
 
 *(OraOps `AgentSession`, line 9470 — reproduced faithfully, because the owner asked for OraOps' call logs
-exactly.)*
+exactly. Three deliberate deltas: `patient_id` becomes the `contact` FK; the registration-form fields
+`form_id` and `submission_snapshot` are **dropped** (there are no registration forms in this product); and
+`from_number` / `to_number` / `provider_call_sid` are **added** as real columns, where OraOps carried them
+inside `metadata` — `provider_call_sid` is the webhook idempotency key and needs a unique constraint.)*
 
 | Field | Type / choices |
 |---|---|
