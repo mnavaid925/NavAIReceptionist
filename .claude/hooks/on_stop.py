@@ -5,7 +5,7 @@ Runs when Claude finishes a turn:
   1. Always: Django `manage.py check`.
   2. If pytest is installed AND a real test suite exists: run it (bounded, fail-fast).
   3. Always: provider-mode guard — a dev box left on `PROVIDER_MODE=live` can place
-     real calls and send real SMS from a seed, test or debug path.
+     a real call from a seed, test or debug path.
 
 Exit 0  = green (or no suite yet) — a short note is shown to the user.
 Exit 2  = `manage.py check` or the tests FAILED — the summary is fed back so Claude
@@ -101,7 +101,7 @@ def main():
     debug = bool(getattr(settings, "DEBUG", True)) if settings is not None else True
     live_in_dev = mode == "live" and debug
     if live_in_dev:
-        report.append("PROVIDER_MODE: live (DEBUG=True) — real calls/SMS/LLM spend possible")
+        report.append("PROVIDER_MODE: live (DEBUG=True) — real calls / LLM spend possible")
     elif mode:
         report.append(f"PROVIDER_MODE: {mode}")
     else:
@@ -125,8 +125,8 @@ def main():
     if live_in_dev:
         sys.stderr.write(
             "[verify-on-stop] WARNING: PROVIDER_MODE=live with DEBUG=True. The real Twilio/LLM\n"
-            "adapters are wired up — a seed, test or debug path can place a real call, send a\n"
-            "real SMS, or bill real provider spend. Set PROVIDER_MODE=fake in .env for dev.\n")
+            "adapters are wired up — a seed, test or debug path can place a real call or bill\n"
+            "real provider spend. Set PROVIDER_MODE=fake in .env for dev.\n")
         note += " - WARNING: PROVIDER_MODE=live in dev"
     print(json.dumps({"systemMessage": note, "suppressOutput": True}))
     return 0
