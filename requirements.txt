@@ -1,0 +1,29 @@
+# NavAIReceptionist — Python dependencies
+#
+# These bounds are STARTING POINTS, deliberately permissive rather than exact pins:
+# nothing here has been resolved against a built environment yet. Once the venv is
+# created and the foundation runs green, freeze the resolved set
+# (`venv\Scripts\python.exe -m pip freeze`) and pin this file to it.
+
+# --- Framework ---
+Django>=5.1,<6.0
+
+# --- Realtime (ASGI / websockets) — required, not optional: the telephony media stream is a websocket ---
+channels>=4.1,<5.0          # Channels consumers + the ProtocolTypeRouter in config/asgi.py
+daphne>=4.1,<5.0            # the ASGI dev/prod server; `manage.py runserver` cannot serve /ws/ routes
+channels-redis>=4.2,<5.0    # cross-process channel layer; tests use InMemoryChannelLayer instead
+
+# --- Database ---
+PyMySQL>=1.1,<2.0           # MySQL driver, installed via the shim in config/__init__.py
+
+# --- Configuration ---
+python-dotenv>=1.0,<2.0     # loads .env (see .env.example)
+
+# --- Providers ---
+twilio>=9.0,<10.0           # Programmable Voice + Media Streams + Messaging, behind the telephony adapter
+httpx>=0.27,<1.0            # async HTTP for the STT/TTS/LLM adapters (never a sync client on the event loop)
+
+# --- Testing ---
+pytest>=8.0,<9.0
+pytest-django>=4.8,<5.0     # runs the suite under config.settings_test
+pytest-asyncio>=0.23,<1.0   # async consumer tests via channels.testing.WebsocketCommunicator
