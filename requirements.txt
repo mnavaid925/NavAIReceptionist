@@ -20,7 +20,7 @@ PyMySQL>=1.1,<2.0           # MySQL driver, installed via the shim in config/__i
 python-dotenv>=1.0,<2.0     # loads .env (see .env.example)
 
 # --- Providers ---
-twilio>=9.0,<10.0           # Programmable Voice + Media Streams + Messaging, behind the telephony adapter
+twilio>=9.0,<10.0           # Programmable Voice + Media Streams, behind the telephony adapter
 httpx>=0.27,<1.0            # async HTTP for the STT/TTS/LLM adapters (never a sync client on the event loop)
 
 # --- Testing ---
