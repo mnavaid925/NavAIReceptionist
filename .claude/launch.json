@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "NavAIReceptionist",
+      "runtimeExecutable": "venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "daphne", "-b", "127.0.0.1", "-p", "8000", "config.asgi:application"],
+      "port": 8000
+    }
+  ]
+}
