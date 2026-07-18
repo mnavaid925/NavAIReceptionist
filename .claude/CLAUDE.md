@@ -1,6 +1,8 @@
 # NavAIReceptionist — Project Instructions
 
-NavAIReceptionist is a multi-tenant SaaS **AI voice agent** for inbound and outbound phone calls, running 24/7: it answers calls instantly, follows up with new leads, qualifies prospects, sends SMS, and books appointments automatically so no opportunity is missed. The stack is **all-Django, one codebase, no separate microservice** — Django 5.1 + **Django Channels/ASGI** (realtime telephony media-stream websockets and live-call UI), Tailwind CSS + HTMX + Lucide on the front end, MySQL database `navai_receptionist`. It is multi-tenant end to end: a `tenant` FK on every model and `tenant=request.tenant` on every queryset. Telephony, STT, TTS and LLM providers all sit behind adapters in `apps/core/providers/`.
+NavAIReceptionist is a multi-tenant SaaS **AI voice agent** for **inbound** phone calls. A business (tenant) adds **multiple locations**; each location gets its own Twilio number and its own agent configuration. The agent answers the call, books appointments into the location's calendar, transfers to a human when asked, and logs the call in detail. The stack is **all-Django, one codebase, no separate microservice** — Django 5.1 + **Django Channels/ASGI** (the Twilio media-stream websocket and the live-call UI), Tailwind CSS + HTMX + Lucide on the front end, MySQL database `navai_receptionist`. It is scoped end to end by **tenant AND location**: a `tenant` FK on every model, a `location` FK on every location-scoped model, and both on every queryset. Telephony, STT, TTS and LLM providers all sit behind adapters in `apps/runtime/providers/`.
+
+**Seven capabilities, nothing else:** login · change password/email · calendar · bookings · agent setup + Twilio · call transfer · user profile.
 
 ---
 
@@ -12,8 +14,27 @@ NavAIReceptionist is a multi-tenant SaaS **AI voice agent** for inbound and outb
 * Checks: `venv\Scripts\python.exe manage.py check` · migrations: `makemigrations` / `migrate`
 * Tests: `venv\Scripts\python.exe -m pytest -q apps/<app>` (settings `config.settings_test`, SQLite in-memory)
 * DB: MySQL/MariaDB (XAMPP) via PyMySQL, `navai_receptionist`; `.env` via python-dotenv (see `.env.example`)
-* Tunnel for provider webhooks in dev: ngrok → `TWILIO_WEBHOOK_BASE_URL`
-* Provider mode: `PROVIDER_MODE=fake` is the default for dev, tests and seeders — a non-`live` mode must never place a real call or send a real SMS
+* Tunnel for Twilio webhooks in dev: ngrok → `TWILIO_WEBHOOK_BASE_URL`
+* Provider mode: `PROVIDER_MODE=fake` is the default for dev, tests and seeders — a non-`live` mode must never place or answer a real call
+* `AUTH_USER_MODEL = 'accounts.User'` — declared in `config/settings.py` **before the very first `makemigrations`**
+
+---
+
+### Module Catalog (0–5)
+
+| # | Module | app slug | Owns |
+|---|---|---|---|
+| 0 | Accounts & Access | `accounts` | login, logout, password change, email change, user profile, roles, the active-location switcher |
+| 1 | Business & Locations | `tenants` | the business record, locations, location settings, staff↔location assignment, provider working hours |
+| 2 | Agent Setup & Telephony | `agents` | per-location agent config, Twilio credentials + inbound number, transfer settings, test call |
+| 3 | Call Runtime | `runtime` | Twilio webhooks + signature verification, the media-stream consumer, turn loop, LLM tools, transfer execution, recording |
+| 4 | Calendar & Bookings | `scheduling` | contacts, services, resources, availability, appointments, calendar views, callback requests |
+| 5 | Call Logs | `calls` | session list + detail, transcript, event log, cost breakdown, recording playback, transfer outcome |
+
+Sub-modules are `N.M` numbered, 3–5 per module. Modules 0 and 1 together are the foundation and are built first.
+Module 3 is a **service module** — consumers, webhooks, provider adapters and a diagnostics page; it ships no CRUD.
+
+**This is a greenfield repo — there is no `apps/` directory yet. Never claim a module is built.**
 
 ---
 
@@ -60,7 +81,7 @@ NavAIReceptionist is a multi-tenant SaaS **AI voice agent** for inbound and outb
 * Point at logs, errors, failing tests – then resolve them
 * Zero context switching required from the user
 * Go fix failing CI tests without being told how
-* Use the monitor tool 
+* Use the monitor tool
 
 ---
 
@@ -68,7 +89,7 @@ NavAIReceptionist is a multi-tenant SaaS **AI voice agent** for inbound and outb
 
 Whenever you create a **new module or sub-module** (especially via `/next-module`), follow this exact sequence. It **starts with research and planning** (`research` → `todo`) so the build is driven by what the best products in the domain actually do, *then* writes the code, *then* runs the review agents. Each step ends with `git add` + `git commit` (one file per commit, PowerShell-safe). **Never run `git push` at any step** — the user pushes manually.
 
-1. **Run the `research` agent** — research the ~6–10 leading commercial AI voice-agent / conversational-telephony products in the ONE target sub-module's (`N.M`) specific domain (not the parent module's generic domain) — the competitor universe is Bland AI, Retell AI, Vapi, Synthflow, PolyAI, Goodcall, Smith.ai, Ruby, Rosie and Dialpad AI — read their feature sets, and write a deduplicated, prioritized feature catalog to `.claude/tasks/research-<slug>-<N.M>.md` (features mapped to that sub-module's NavAIReceptionist.md feature bullets and the core spine in `NavAIReceptionist-ERD.md`, with a recommended 1–4-model build scope). Then `git add` + `git commit` that file. Do NOT `git push`.
+1. **Run the `research` agent** — research the ~6–10 leading commercial AI voice-agent / conversational-telephony products in the ONE target sub-module's (`N.M`) specific domain (not the parent module's generic domain) — the competitor universe is Bland AI, Retell AI, Vapi, Synthflow, PolyAI, Goodcall, Smith.ai, Ruby, Rosie and Dialpad AI — read their feature sets, and write a deduplicated, prioritized feature catalog to `.claude/tasks/research-<slug>-<N.M>.md` (features mapped to that sub-module's scope and the data model in `NavAIReceptionist-ERD.md`, with a recommended 1–3-model build scope). Then `git add` + `git commit` that file. Do NOT `git push`.
 2. **Run the `todo` agent** — feed it the `research` output; it turns the specialized features into a checkable build plan in `.claude/tasks/todo.md` (the models + their fields/choices **driven by the researched features**, plus backend/wire-up/templates/verify/close-out items). Then `git add` + `git commit` that file. Do NOT `git push`.
 3. **Write the module code** — implement the module per the `todo` plan, then `git add` + `git commit`. Do NOT `git push`.
 4. **Run the `code-reviewer` agent** — apply its findings, then `git add` + `git commit`. Do NOT `git push`.
@@ -84,7 +105,7 @@ Whenever you create a **new module or sub-module** (especially via `/next-module
 **Rules for this sequence:**
 
 * Run the agents **in this order, one at a time** — do not skip a step and do not reorder. **`research` runs first, then `todo`, then "Write the module code", then the review agents** as listed.
-* The `research` step produces `.claude/tasks/research-<slug>-<N.M>.md` (e.g. `research-scheduling-10.3.md`); the `todo` step produces `.claude/tasks/todo.md` from it — commit each as its own file.
+* The `research` step produces `.claude/tasks/research-<slug>-<N.M>.md` (e.g. `research-scheduling-4.2.md`); the `todo` step produces `.claude/tasks/todo.md` from it — commit each as its own file.
 * After each agent step, commit the resulting changes before moving to the next agent (still one file per commit).
 * `git push` is **never** part of this sequence — stop at `git commit` every time.
 * If an agent reports no changes are needed, note that and proceed to the next step (no empty commit required).
@@ -97,29 +118,29 @@ Every time you finish a **new module** (a Django app under `apps/<slug>`), you M
 
 **Create or update:** author the file only on a **brand-new-app run**. On every later sub-module run the skill already exists — **UPDATE** it in place, adding this sub-module's models / routes / templates / seeder rows (plus its *Tools & prompt surface* and *Realtime surfaces* subsections). Re-authoring it from scratch clobbers the earlier sub-modules' documentation, which is the exact failure this rule exists to prevent.
 
-1. **Location & name:** create `.claude/skills/<module-slug>/SKILL.md` where `<module-slug>` is the app slug (e.g. `telephony`, `agents`, `calls`, `scheduling`). The skill `name` is the slug (or `<slug>-module`).
+1. **Location & name:** create `.claude/skills/<module-slug>/SKILL.md` where `<module-slug>` is the app slug (`tenants`, `agents`, `runtime`, `scheduling`, `calls`). The skill `name` is the slug (or `<slug>-module`).
 
 2. **Frontmatter** (YAML) is required:
    * `name:` — the slug.
-   * `description:` — one line that states **what the skill covers and when to trigger it**, with explicit trigger phrases, e.g. *"Work on the Calls module (inbound/outbound call sessions, transcripts, recordings, dispositions). Use when the user asks to add/change/debug anything under apps/calls or templates/calls, or invokes /calls."*
+   * `description:` — one line that states **what the skill covers and when to trigger it**, with explicit trigger phrases, e.g. *"Work on the Calls module (call sessions, transcripts, event logs, recordings, transfer outcome). Use when the user asks to add/change/debug anything under apps/calls or templates/calls, or invokes /calls."*
 
 3. **Body** must document the **as-built** module so it can be worked on without re-reading everything:
-   * **Overview** — what the module does (mirror its `NavAIReceptionist.md` section) and its app path.
-   * **Models** — each model + key fields, choices, and which **core-spine** entities it reuses (`core.Contact`, `core.ContactChannel`, `core.PhoneNumber`, `core.Agent`/`core.AgentVersion`, `core.Interaction`/`core.InteractionEvent`, `core.UsageEvent`, `core.Appointment`, `core.Recording`, etc.) vs. adds.
-   * **URLs / routes** — the `app_name` and url names (list/create/detail/edit/delete) + any custom actions: place-call, transfer, hang-up, retry, play-recording, download-transcript, test-agent, publish-agent-version, send-SMS, book/reschedule/cancel.
+   * **Overview** — what the module does and its app path.
+   * **Models** — each model + key fields, choices, which FKs it carries (`tenant`, `location`) and which existing models it reuses (`tenants.Location`, `accounts.User`, `scheduling.Contact`, `calls.CallSession`) vs. adds.
+   * **URLs / routes** — the `app_name` and url names (list/create/detail/edit/delete) + any custom actions: switch-location, test-call, transfer, play-recording, download-transcript, book/reschedule/cancel.
    * **Templates** — the `templates/<slug>/` pages and the shared patterns/partials they use.
-   * **Tools & prompt surface** — which LLM tools this module registers or enables, their argument schemas, which `AgentVersion.enabled_tools` entries switch them on, and what prompt variables the module injects. State plainly that identity args (`tenant_id`, `contact_id`, `interaction_id`) come from server state, never from the model.
-   * **Realtime surfaces** — any Channels consumers, `routing.py` websocket patterns, group-name scheme (`t{tenant_id}:…`), background tasks, provider webhooks and their signature-verification entry points; or the explicit line "this module has no realtime surface".
-   * **Seeder** — the `seed_<slug>` command and the demo data it creates: demo tenants, provisioned phone numbers, agent personas with published versions, synthetic interactions carrying transcript events, appointments, SMS threads and usage events. All of it produced through the fake provider adapter.
-   * **Conventions & gotchas** — tenant scoping, the context-var contract, any module-specific rules.
+   * **Tools & prompt surface** — which LLM tools this module registers or enables, their argument schemas, and what prompt variables the module injects. State plainly that identity args (`tenant_id`, `location_id`, `contact_id`, `session_id`) come from server state, never from the model.
+   * **Realtime surfaces** — any Channels consumers, `routing.py` websocket patterns, group-name scheme (`t{tenant_id}:l{location_id}:…`), background tasks, Twilio webhooks and their signature-verification entry points; or the explicit line "this module has no realtime surface".
+   * **Seeder** — the `seed_<slug>` command and the demo data it creates: demo tenants, locations, per-location agent settings and inbound numbers, contacts, services, resources, appointments and synthetic call sessions carrying transcript/log JSON. All of it produced through the fake provider adapter.
+   * **Conventions & gotchas** — tenant **and location** scoping, the context-var contract, any module-specific rules.
    * **Common tasks** — concrete steps for "add a field", "add a new model + CRUD", "add a filter", "extend the seeder".
-   * **Sidebar wiring** — the `LIVE_LINKS` entries added in `apps/core/navigation.py` for this module.
+   * **Sidebar wiring** — the `LIVE_LINKS` entries added in `apps/accounts/navigation.py` for this module.
 
 4. **Accuracy & upkeep:** the skill must reflect the real code (correct paths, url names, field names). When the module changes later, update its skill in the same change.
 
 5. **Commit it** as its own file (one file per commit, PowerShell-safe). **Never `git push`.**
 
-> Module 0 is the foundation and is covered by the workflow skills (`next-module`, `frontend-design`, `voice-agent-runtime`). Modules **1–13** each get their own skill via this rule.
+> Module 0 (`accounts`) is the foundation and is covered by the workflow skills (`next-module`, `frontend-design`, `voice-agent-runtime`). Modules **1–5** each get their own skill via this rule.
 
 ---
 
@@ -152,16 +173,16 @@ git commit -m 'some example changes'.
 
 **STRICT — ONE FILE PER COMMIT (no exceptions):**
 
-* **Never** combine multiple files into a single `git add` / `git commit` pair, **even if they're in the same folder, share a feature, or look like a "set"** (e.g. `persona/list.html` + `persona/form.html` + `persona/detail.html` of the same model).
+* **Never** combine multiple files into a single `git add` / `git commit` pair, **even if they're in the same folder, share a feature, or look like a "set"** (e.g. `location/list.html` + `location/form.html` + `location/detail.html` of the same model).
 * **Wrong** (this is what NOT to do):
   ```
-  git add 'templates/agents/persona/list.html' 'templates/agents/persona/form.html' 'templates/agents/persona/detail.html'; git commit -m 'feat(agents): persona templates'
+  git add 'templates/tenants/location/list.html' 'templates/tenants/location/form.html' 'templates/tenants/location/detail.html'; git commit -m 'feat(tenants): location templates'
   ```
 * **Right** — one `git add` + one `git commit` per file, every time:
   ```
-  git add 'templates/agents/persona/list.html'; git commit -m 'feat(agents): persona list template'
-  git add 'templates/agents/persona/form.html'; git commit -m 'feat(agents): persona form template'
-  git add 'templates/agents/persona/detail.html'; git commit -m 'feat(agents): persona detail template with version history'
+  git add 'templates/tenants/location/list.html'; git commit -m 'feat(tenants): location list template'
+  git add 'templates/tenants/location/form.html'; git commit -m 'feat(tenants): location form template'
+  git add 'templates/tenants/location/detail.html'; git commit -m 'feat(tenants): location detail template with staff assignment'
   ```
 * Each commit message should be specific to that one file's content — don't reuse the same message across multiple commits.
 * If a change spans 30+ files, the snippet block IS 30+ commits. Length is fine — bundling is not.
@@ -179,23 +200,28 @@ git commit -m 'some example changes'.
 
 ---
 
-### Core Spine Invariants (MANDATORY)
+### Invariants (MANDATORY)
 
-`apps/core` (Module 0) owns the **entire** shared spine — identity, the communication log, the metering ledger, the outcome documents and the compliance gate. Modules 1–13 own their own domain tables and the UI/engines over the spine; they **never** own a spine table. The full field-level definitions live in `NavAIReceptionist-ERD.md`; that document is INTENT — the code is truth, so grep before you FK.
+The full field-level definitions live in `NavAIReceptionist-ERD.md`; that document is INTENT — the code is truth, so grep before you FK.
 
-The six invariants below are law. They are quoted by number (`Invariant 2`) from every review agent, and the wording must be identical in every file that carries them.
+The three invariants below are law. They are quoted by number (`Invariant 2`) from every review agent, and the wording must be identical in every file that carries them.
 
-1. **One identity table.** Leads, prospects, customers, callers, attendees and staff are `core.ContactRole` rows on `core.Contact`. **Flag any new standalone person table.** A phone number belongs to `core.ContactChannel` / `core.PhoneNumber` — flag any module storing raw phone strings on its own model.
-2. **One communication log.** Every call, SMS and email is a `core.Interaction` + append-only `core.InteractionEvent` rows. Conversation history, transcripts and tool-call audit are **derived by query**, never copied into a module table. **Flag a second transcript/message/activity table.**
-3. **One metering ledger.** Every billable unit is a `core.UsageEvent`. **Flag a stored, hand-editable `minutes_used`, `credit_balance`, `calls_placed` or `spend_to_date` field, or code that mutates a usage total directly instead of appending an event.**
-4. **Append-only means append-only.** `InteractionEvent` and `UsageEvent` have no update or delete path. Corrections are compensating rows. Redaction is the sole exception and goes through the compliance module's documented redaction service, which writes an `AuditLog` row.
-5. **One outbound gate.** Every outbound call, SMS or voicemail drop calls exactly one service function — `apps/core/compliance.check_outbound_allowed(contact, channel, now)` — which consults `ConsentRecord` + `SuppressionEntry` + `QuietHoursPolicy` + `Contact.status`. **There is no second DNC list and no inline `if not contact.do_not_call` check anywhere.** Flag both.
-6. **Server owns identity; the model owns wording.** The LLM tool dispatcher signature is `apply_tool_call(state, name, args)` and is **transport-agnostic** (the same dispatcher serves the turn-based path and the realtime websocket path). Identity arguments — `tenant_id`, `contact_id`, `interaction_id` — are injected from server-side session state and are **never tool parameters**. Any ID the model *does* supply (`appointment_id`, `slot_token`) must be authorized server-side against tenant **and** the identified contact.
+1. **One contact identity table.** Callers, bookers and attendees are `scheduling.Contact` rows.
+   **Flag any new standalone `Lead`, `Caller`, `Patient` or `Attendee` model.**
+2. **One call log.** A call is exactly one `calls.CallSession`; its transcript, event log, per-turn usage,
+   analysis and transfer outcome are **JSON columns on that row**. **Flag a second transcript, turn, tool-call or
+   call-event table.**
+3. **Server owns identity; the model owns wording.** The tool dispatcher is `apply_tool_call(state, name, args)`.
+   `tenant_id`, `location_id`, `contact_id` and `session_id` come from server-side session state and are **never
+   tool parameters**. Any id the model does supply (`appointment_id`, `slot_token`) is authorized server-side
+   against tenant, location **and** the identified contact.
 
-Two further spine rules are non-negotiable, not suggestions:
+Two supporting rules, kept:
 
-* **Opaque signed slot tokens.** The availability tool returns one `slot_token` per slot (a signed, short-TTL blob encoding start/resource/service/tenant), not semantic fields the model must echo verbatim. The model cannot mangle or invent a token, and the backend can verify the slot was actually offered *in this interaction*.
-* **One tool-result envelope.** Every tool returns `{"ok": bool, "data": {...}, "error": {"code": ..., "message": ...} | null}`. Never prose, never a bare `{"id": ...}`, never a different success key per tool.
+* **Opaque signed slot tokens.** The availability tool returns one signed short-TTL `slot_token` per slot, not
+  semantic fields the model must echo back.
+* **One tool-result envelope.** `{"ok": bool, "data": {...}, "error": {"code": "...", "message": "..."} | null}`,
+  `code` always lower_snake_case.
 
 ---
 
@@ -205,29 +231,30 @@ Every list page in this application MUST have working filters. When creating or 
 
 1. **View must pass ALL context needed by template filters:**
    - For status dropdowns: pass `status_choices` (from `Model.STATUS_CHOICES`)
-   - For FK dropdowns (agents, phone numbers, campaigns, contacts, dispositions): pass the queryset to the template
+   - For FK dropdowns (locations, providers, resources, services, contacts): pass the queryset to the template
    - For type/method dropdowns: pass the model's `CHOICES` constant
    - Never assume the template will get data it wasn't explicitly passed in the view context
 
 2. **Template filter comparison rules:**
    - For string fields: `{% if request.GET.status == value %}selected{% endif %}`
    - For FK/pk fields: use `|stringformat:"d"` — NEVER use `|slugify` for pk comparison
-   - Example: `{% if request.GET.agent == a.pk|stringformat:"d" %}selected{% endif %}`
+   - Example: `{% if request.GET.provider == u.pk|stringformat:"d" %}selected{% endif %}`
 
 3. **View filter logic:**
    - Always parse GET params and apply to queryset BEFORE pagination
    - Search: `request.GET.get('q', '').strip()` with `Q()` lookups
    - Status: `request.GET.get('status', '')` with `qs.filter(status=value)`
    - Active/Inactive: map `'active'`/`'inactive'` to `is_active=True/False`
-   - A junk value (`?agent=abc`) must degrade to "no filter", never raise
+   - A junk value (`?provider=abc`) must degrade to "no filter", never raise
 
 4. **Template variable naming must match view context:**
    - If view passes `call_sessions`, template must use `{% for r in call_sessions %}`
-   - If model field is `duration_seconds`, template must use `r.duration_seconds` (not `r.duration`)
-   - If view passes `stats` dict, template accesses `stats.missed` (not `missed_count`)
+   - If model field is `started_at`, template must use `r.started_at` (not `r.start`)
+   - If view passes `stats` dict, template accesses `stats.completed` (not `completed_count`)
 
 5. **Badge values must match model CHOICES:**
-   - Template badge conditions must use exact model choice values (e.g., `'no_answer'` not `'noanswer'`, `'voicemail'` not `'vm'`, `'in_progress'` not `'inprogress'`)
+   - Template badge conditions must use exact model choice values (e.g., `'in_progress'` not `'inprogress'`, `'no_show'` not `'noshow'`)
+   - The canonical call-status map is `in_progress`→`badge-info`, `completed`→`badge-green`, `abandoned`→`badge-muted`, `transferred`→`badge-info`, `failed`→`badge-red`
    - Always include an `{% else %}` fallback: `{{ obj.get_field_display }}`
 
 Run the `/frontend-design` skill for the full pattern reference.
@@ -240,13 +267,11 @@ Run the `/frontend-design` skill for the full pattern reference.
 
 * **CRUD sub-module** — it introduces one or more tenant-scoped models with a list page. These rules apply in full: such a sub-module must never ship with only list/add/view — Edit and Delete are mandatory.
 * **Service sub-module** — infrastructure, not CRUD.
-* **View sub-module** — pages over spine data it only READS, with **zero new models**.
+* **View sub-module** — pages over data it only READS, with **zero new models**.
 
-**Service sub-module exemption:** parts of this product are infrastructure, not CRUD — the realtime runtime (Module 4), the media bridge and webhook ingress in Module 1, the enforcement paths in Modules 6 and 9, and the connectors in Module 13 produce consumers, services, provider adapters and diagnostics rather than list/detail/form pages. A **service sub-module** MAY ship zero CRUD templates. It MUST still ship: tenant scoping on every query, a `LIVE_LINKS["N.M"]` entry pointing at its diagnostics or settings page, migrations if it adds models, tests, an idempotent seeder if it adds data, a fake provider implementation so the whole path runs with `PROVIDER_MODE=fake`, and **at least one observable surface** — a diagnostics page, a settings form or a management command. A sub-module with no observable surface is not done.
+**Service sub-module exemption:** parts of this product are infrastructure, not CRUD — **Module 3 (Call Runtime)** is the service module: the media-stream consumer, the Twilio webhook ingress, the turn loop, the tool dispatcher, the provider adapters and a diagnostics page rather than list/detail/form pages. A **service sub-module** MAY ship zero CRUD templates. It MUST still ship: tenant **and location** scoping on every query, a `LIVE_LINKS["N.M"]` entry pointing at its diagnostics or settings page, migrations if it adds models, tests, an idempotent seeder if it adds data, a fake provider implementation so the whole path runs with `PROVIDER_MODE=fake`, and **at least one observable surface** — a diagnostics page, a settings form or a management command. A sub-module with no observable surface is not done.
 
-**View sub-module exemption:** some sub-modules add **no data of their own** — they are the reading surface over spine tables that already exist. A **view sub-module** ships **ZERO new models and ZERO migrations**: it is pages, filters, search, detail views, exports and a `LIVE_LINKS["N.M"]` entry built over spine tables it only READS. The known instances are **11.1, 11.2, 5.6, 12.4 and 12.5**. *Inventing a model to satisfy the 1–4-model target is the bug this branch exists to prevent. If the data already lives in the spine, the sub-module is a view — ship the pages, not a table.* Concretely, 11.2 (Transcript & Tool-Call Trace) is the transcript view over `core.InteractionEvent`; a `Transcript`/`TranscriptTurn`/`ToolCall` table there is an **Invariant 2** violation. A view sub-module MUST still ship: tenant scoping on every query (`tenant=request.tenant`), the `LIVE_LINKS["N.M"]` entry, its templates under `templates/<slug>/<submodule>/<entity>/`, tests, and **seeded demo data reachable through the pages — seeded into the spine, never into a new table** (extend the existing `seed_<slug>` idempotently). It has no create/edit/delete views, and their absence is correct.
-
-Append-only spine tables (`core.InteractionEvent`, `core.UsageEvent`) and immutable published records (a published `core.AgentVersion`) legitimately have **no** edit or delete view. Their *absence* is correct; their unguarded *presence* is the bug.
+**View sub-module exemption:** some sub-modules add **no data of their own** — they are the reading surface over tables that already exist. A **view sub-module** ships **ZERO new models and ZERO migrations**: it is pages, filters, search, detail views, exports and a `LIVE_LINKS["N.M"]` entry built over tables it only READS. *Inventing a model to satisfy the 1–3-model target is the bug this branch exists to prevent. If the data already lives in an existing table, the sub-module is a view — ship the pages, not a table.* Concretely, the transcript and event-log surfaces in Module 5 read `calls.CallSession`'s JSON columns; a `Transcript`/`TranscriptTurn`/`ToolCall` table there is an **Invariant 2** violation. A view sub-module MUST still ship: tenant and location scoping on every query, the `LIVE_LINKS["N.M"]` entry, its templates under `templates/<slug>/<submodule>/<entity>/`, tests, and **seeded demo data reachable through the pages — seeded into the existing tables, never into a new one** (extend the existing `seed_<slug>` idempotently). It has no create/edit/delete views, and their absence is correct.
 
 1. **Every model that has a list page MUST have these views:**
    - `list_view` — with search + filters
@@ -259,18 +284,18 @@ Append-only spine tables (`core.InteractionEvent`, `core.UsageEvent`) and immuta
    - View button (eye icon) — links to detail page
    - Edit button (pencil icon) — links to edit form
    - Delete button (bin icon) — POST form with `onclick="return confirm('...')"` and `{% csrf_token %}`
-   - Conditional display: wrap Edit/Delete in `{% if obj.status == 'draft' %}` (unpublished agent version) or `{% if obj.status == 'scheduled' %}` (undialed campaign attempt) when status-dependent
+   - Conditional display: wrap Edit/Delete in a status guard where it applies (e.g. `{% if obj.status == 'scheduled' %}` on an appointment)
 
 3. **Every detail template MUST have an Actions sidebar with:**
    - Edit button — links to edit form (conditional on status)
    - Delete button — POST form with confirm dialog (conditional on status)
    - Back to List link
 
-4. **Delete view pattern:**
+4. **Delete view pattern** (add `location=request.location` for location-scoped models):
    ```python
    @login_required
    def model_delete_view(request, pk):
-       obj = get_object_or_404(Model, pk=pk, tenant=request.tenant)
+       obj = get_object_or_404(Model, pk=pk, tenant=request.tenant, location=request.location)
        if request.method == 'POST':
            obj.delete()
            messages.success(request, 'Deleted successfully.')
@@ -281,40 +306,38 @@ Append-only spine tables (`core.InteractionEvent`, `core.UsageEvent`) and immuta
 5. **Delete URL pattern:**
    - Always add: `path('models/<int:pk>/delete/', views.model_delete_view, name='model_delete')`
 
+A completed `calls.CallSession` is a record of what happened and has **no** edit view. Its absence is correct; its unguarded presence is the bug.
+
 ---
 
 ### Template Folder Structure (MANDATORY)
 
 Templates MUST be organized **one folder per sub-module, then one folder per entity** — never flat. The page
 (`list` / `detail` / `form` / a secondary action) is the **bare filename**. A model's CRUD pages live under
-`templates/<app>/<submodule>/<entity>/<page>.html`, grouped by the NavAIReceptionist.md sub-module that owns the
-model.
+`templates/<app>/<submodule>/<entity>/<page>.html`, grouped by the sub-module that owns the model.
 
 1. **Path shape:** `templates/<app>/<submodule>/<entity>/<page>.html` where `<page>` ∈ {`list`, `detail`, `form`,
    … a secondary action like `import`}. e.g. `templates/calls/calllog/callsession/detail.html`,
-   `templates/calls/calllog/callsession/list.html`, `templates/contacts/directory/contact/form.html`. The view's
-   `render()` / `crud_*` `template=` argument uses that full path: `render(request,
+   `templates/calls/calllog/callsession/list.html`, `templates/scheduling/bookings/appointment/form.html`. The
+   view's `render()` / `crud_*` `template=` argument uses that full path: `render(request,
    "calls/calllog/callsession/detail.html", ...)`. **Never** ship a flat `<entity>_<page>.html` file inside a
    sub-module folder (the `callsession_detail.html` shape is banned).
 
-2. **Two folder levels: sub-module → entity.** The sub-module folder uses a short slug taken from the real
-   NavAIReceptionist.md catalog sub-modules (Calls, Module 11 — `apps/calls`:
-   `calllog/ transcript/ summaries/ scoring/ review/ delivery/`; Contacts, Module 7 — `apps/contacts`:
-   `directory/ capture/ qualification/ pipeline/ hygiene/`; Inbound, Module 5 — `apps/inbound`:
-   `greeting/ screening/ routing/ transfer/ voicemail/ monitoring/`). **Inside it, each model/entity gets its own
-   folder** (`calllog/callsession/`, `directory/contact/`, `transfer/transferrule/`). The page file is
-   just `list.html` / `detail.html` / `form.html`.
+2. **Two folder levels: sub-module → entity.** The sub-module folder uses a short slug taken from the module's real
+   sub-module headings (Calls, Module 5 — `apps/calls`: `calllog/ transcript/ costs/`; Calendar & Bookings,
+   Module 4 — `apps/scheduling`: `calendar/ bookings/ directory/ catalog/ callbacks/`; Agent Setup, Module 2 —
+   `apps/agents`: `setup/ twilio/ transfer/`). **Inside it, each model/entity gets its own folder**
+   (`calllog/callsession/`, `directory/contact/`, `catalog/service/`). The page file is just `list.html` /
+   `detail.html` / `form.html`.
 
 3. **Single-entity sub-modules: the sub-module folder doubles as the entity folder** — do NOT double-nest. When a
-   sub-module owns one main entity whose slug equals the folder (e.g. `persona`, `campaign`, `knowledge`), keep
-   `persona/form.html`, `campaign/detail.html` — NOT `persona/persona/list.html`. A child entity added later still
-   gets its own folder under the sub-module (e.g. `campaign/step/form.html` alongside the page-only
-   `campaign/list.html`). When a single-entity sub-module later grows to multiple entities it graduates to the
-   rule-2 two-level form.
+   sub-module owns one main entity whose slug equals the folder (e.g. `transfer`, `callback`), keep
+   `transfer/form.html`, `callback/detail.html` — NOT `transfer/transfer/list.html`. A child entity added later
+   still gets its own folder under the sub-module. When a single-entity sub-module later grows to multiple
+   entities it graduates to the rule-2 two-level form.
 
-4. **Foundation apps (Module 0: core / accounts / tenants / dashboard) are flat — no sub-module level**, so the
-   entity folder sits at the app root: `templates/core/contact/list.html`, `templates/accounts/user/form.html`,
-   `templates/tenants/subscription/detail.html`.
+4. **Foundation apps (Modules 0–1: `accounts` / `tenants`) are flat — no sub-module level**, so the entity folder
+   sits at the app root: `templates/accounts/user/form.html`, `templates/tenants/location/detail.html`.
 
 5. **Secondary entity-action pages go inside the entity folder** (page = the action name):
    `directory/contact/import.html` sits next to `directory/contact/list.html`. Fold a non-CRUD page into
@@ -322,11 +345,10 @@ model.
    that directory (longest-entity-stem match — so `call_session_replay.html` is **not** folded into `callsession/`).
 
 6. **Standalone pages stay at the sub-module / app root** (no entity folder): module landing/overview
-   (`templates/calls/overview.html`, `templates/agents/overview.html`, `templates/analytics/dashboard.html`),
-   reports (`analytics/reports/call_volume.html`, `analytics/reports/answer_rate.html`,
-   `calls/scoring/conversion_funnel.html`), print pages (`calls/transcript/transcript_print.html`), wizards
-   (`tenants/onboarding_wizard.html`), and other single-purpose pages that aren't an entity's list/detail/form.
-   Diagnostics and settings pages for service sub-modules live here too (`runtime/diagnostics.html`).
+   (`templates/calls/overview.html`, `templates/agents/overview.html`), the calendar page
+   (`templates/scheduling/calendar/day.html`), print pages (`calls/transcript/transcript_print.html`), and other
+   single-purpose pages that aren't an entity's list/detail/form. Diagnostics and settings pages for the service
+   module live here too (`runtime/diagnostics.html`).
 
 7. **New modules (via `/next-module`)** MUST follow this from the start — create
    `templates/<app>/<submodule>/<entity>/{list,detail,form}.html`. Never ship flat
@@ -335,28 +357,28 @@ model.
 8. **`{% extends %}` / `{% include %}` are unaffected** by the folders — keep `{% extends "base.html" %}` and
    `{% include "partials/..." %}` (base + partials live at the templates root, not inside a module).
 
+9. **The multi-line `{# #}` trap:** a Django comment tag does **not** span lines. A `{# ... ` opened on one line and
+   closed on another leaves the intervening template tags live. Use `{% comment %}…{% endcomment %}` for anything
+   longer than one line.
+
 ---
 
 ### Backend Package Structure (MANDATORY)
 
 The backend mirrors the template rule: `models`, `forms`, `views` and `urls` are **Python packages**, organized
 **one folder per sub-module, then one file per entity** — never flat `.py` monoliths. `NavAIReceptionist-ERD.md`
-is the reference for what belongs in the spine versus a module; `apps/core` and the first built domain app
-(`apps/calls`) **will be** the reference implementations once they exist — do not cite a directory that is not
-there yet.
+is the reference for the 11 models and where each one lives.
 
 1. **Path shape:** `apps/<app>/<layer>/<SubModule>/<Entity>.py` where `<layer>` ∈ {`models`, `forms`, `views`,
-   `urls`}. `<SubModule>` is a short PascalCase form of the real NavAIReceptionist.md sub-module heading
-   (`### 11.1 Call Log & Recording` → `CallLogRecording/`; `### 11.2 Transcript & Tool-Call Trace` →
-   `TranscriptTrace/`; `### 5.4 Transfer & Escalation` → `TransferEscalation/`); `<Entity>` is the entity in
-   **PascalCase** (`Personas.py`, `CallSessions.py`). The four layers **line up one-to-one**:
+   `urls`}. `<SubModule>` is a short PascalCase form of the real sub-module heading (`### 5.1 Call Log & Recording`
+   → `CallLogRecording/`; `### 2.3 Transfer Settings` → `TransferSettings/`); `<Entity>` is the entity in
+   **PascalCase** (`CallSessions.py`, `Appointments.py`). The four layers **line up one-to-one**:
    `apps/calls/models/CallLogRecording/CallSessions.py` ↔ `forms/…` ↔ `views/…` ↔ `urls/…`.
 
-2. **An entity file owns the primary model plus its children** — `Scorecards.py` = `Scorecard` +
-   `ScorecardCriterion`; `Campaigns.py` = `Campaign` + `CampaignStep`. Do not scatter one entity's CRUD across
-   files. Note that the child must be a genuine domain table: a module-owned `Transcript`, `TranscriptTurn`,
-   `ToolCall`, `Message`, `CallEvent` or `ActivityLog` table is an **Invariant 2** violation — the transcript and
-   the tool-call trace are the transcript view over `core.InteractionEvent`.
+2. **An entity file owns the primary model plus its children.** Do not scatter one entity's CRUD across files. Note
+   that the child must be a genuine domain table: a module-owned `Transcript`, `TranscriptTurn`, `ToolCall` or
+   `CallEvent` table is an **Invariant 2** violation — the transcript and the event log are JSON columns on
+   `calls.CallSession`.
 
 3. **Every package `__init__.py` re-exports everything it owns**
    (`from .<SubModule>.<Entity> import (A, B)`). This is what keeps `from apps.<app>.models import X`,
@@ -367,10 +389,11 @@ there yet.
    `from .models import X` resolves to the wrong package one level deeper. Entity modules pull the shared toolkit
    from `<layer>/_base.py` (models) or `<layer>/_common.py` (forms/views) via `import *`.
 
-5. **Shared modules:** `models/_base.py` (django imports + the abstract `Tenant*` base), `forms/_common.py`,
-   `views/_common.py`. Private helpers used by **more than one** sub-module go in `views/_helpers.py`; helpers used
-   by a single entity stay in that entity's module. **A fifth layer, `consumers/`, follows the same
-   `<SubModule>/<Entity>.py` shape** for Channels consumers; `routing.py` stays flat at the app root.
+5. **Shared modules:** `models/_base.py` (django imports + the abstract `Tenant*` / `TenantLocation*` bases),
+   `forms/_common.py`, `views/_common.py`. Private helpers used by **more than one** sub-module go in
+   `views/_helpers.py`; helpers used by a single entity stay in that entity's module. **A fifth layer,
+   `consumers/`, follows the same `<SubModule>/<Entity>.py` shape** for Channels consumers; `routing.py` stays flat
+   at the app root.
 
 6. **`urls/__init__.py`** sets `app_name` and concatenates each entity module's `urlpatterns`. Django resolves
    **first-match-wins, so order is behaviour** — keep literal routes before `<int:pk>` ones, and check any new
@@ -382,24 +405,27 @@ there yet.
 7. **Never create a `*_advanced.py` sidecar** (or any second flat file) for "advanced"/later features — a later
    sub-module's models simply get their own `<SubModule>/<Entity>.py`.
 
-8. **`admin.py`, `apps.py`, `analytics.py`, `services.py`, `consumers.py`, `routing.py`, `tasks.py`,
-   `webhooks.py`, `providers.py` and other single-purpose modules stay flat** at the app root — promote one to a
-   package (`consumers/`, `providers/`) only when it grows past easy navigation. Migrations are unaffected: models
-   sit deeper than the app root, but Django still derives `app_label` from the app config — a correct split needs
-   **no new migration** (`makemigrations --check` must say "No changes detected").
+8. **`admin.py`, `apps.py`, `services.py`, `consumers.py`, `routing.py`, `tasks.py`, `webhooks.py`, `providers.py`
+   and other single-purpose modules stay flat** at the app root — promote one to a package (`consumers/`,
+   `providers/`) only when it grows past easy navigation. Migrations are unaffected: models sit deeper than the app
+   root, but Django still derives `app_label` from the app config — a correct split needs **no new migration**
+   (`makemigrations --check` must say "No changes detected").
 
-9. **Foundation apps (Module 0: `core` / `tenants`) have NO sub-module level** — exactly like their templates
-   (rule 4 above). Module 0 has no catalog sub-modules of the kind rule 1 describes, so the entity file sits FLAT
-   at the package root: `apps/core/models/Contact.py`, `apps/core/views/Contact.py`,
-   `apps/tenants/models/Subscription.py` — never a `<SubModule>/` folder. Shared plumbing still goes in
-   `_base.py` / `_common.py` (e.g. `core/forms/_common.py` holds **`TenantModelForm`**, the base class every other
-   app's forms inherit, plus `ALLOWED_DOC_EXTENSIONS`/`MAX_UPLOAD_BYTES` and
-   `ALLOWED_AUDIO_EXTENSIONS`/`MAX_RECORDING_BYTES`). `accounts` and `dashboard` remain flat modules.
+9. **Foundation apps (Modules 0–1: `accounts` / `tenants`) have NO sub-module level** — exactly like their
+   templates (rule 4 above). The entity file sits FLAT at the package root: `apps/accounts/models/User.py`,
+   `apps/tenants/models/Location.py` — never a `<SubModule>/` folder. Shared plumbing still goes in `_base.py` /
+   `_common.py` (e.g. `accounts/forms/_common.py` holds **`TenantModelForm`** / **`TenantLocationModelForm`**, the
+   base classes every other app's forms inherit, plus `ALLOWED_AUDIO_EXTENSIONS`/`MAX_RECORDING_BYTES`).
 
-10. **Don't split a file just for symmetry — split it when it's hard to navigate.** `core/urls.py` and
+10. **Don't split a file just for symmetry — split it when it's hard to navigate.** `accounts/urls.py` and
     `tenants/urls.py` stay **flat modules**: a compact `crud(slug, name)` factory that generates the 5 standard
     routes per model beats expanding it into per-entity `urlpatterns` lists with dozens of duplicated `path()`
     lines. The factory IS the better structure.
+
+11. **Every FK to the user model uses `settings.AUTH_USER_MODEL`** and
+    `migrations.swappable_dependency(settings.AUTH_USER_MODEL)` — **never** `from apps.accounts.models import User`.
+    That is an import cycle, because `accounts.User` FKs `tenants.Tenant`. Django bakes the user model into every
+    migration that references it, so getting this wrong later requires a **destructive migration reset**.
 
 ---
 
@@ -416,14 +442,16 @@ The realtime layer is where a mistake costs audio, money or a cross-tenant leak 
    - `@login_required` does not apply to consumers — reject with an explicit close code
    - Never accept-then-check; an accepted socket has already leaked the connection
 
-3. **Channels groups are tenant-namespaced:**
-   - `t{tenant_id}:call:{interaction_id}` — an un-namespaced group lets tenant A subscribe to tenant B's live audio
+3. **Channels groups are tenant- AND location-namespaced:**
+   - `t{tenant_id}:l{location_id}:call:{session_id}` — an un-namespaced group lets tenant A (or another location)
+     subscribe to live audio that is not theirs
 
 4. **Every external provider call is bounded:**
    - Explicit timeout and a bounded retry on every telephony/STT/TTS/LLM call
    - Failures degrade to a spoken fallback, never dead air
 
-5. **The greeting/opener is deterministic** — it never waits on an LLM, so first audio is immediate
+5. **The greeting/opener is deterministic** — it is rendered server-side from `AgentSetting.greeting`, costs 0 LLM
+   tokens and never waits on a model, so first audio is immediate
 
 6. **Transport-mutating tools are deferred:**
    - Transfer and hangup set a deferred signal on session state; the transport acts **after** the turn's audio completes
@@ -433,8 +461,12 @@ The realtime layer is where a mistake costs audio, money or a cross-tenant leak 
 8. **Conversation history is trimmed or summarized on long calls** — resending unbounded history makes input tokens
    grow quadratically in both latency and cost
 
-9. **`disconnect()` releases the interaction and flushes buffered events**; an exception in the receive loop is
-   caught so one bad frame does not kill the call
+9. **`disconnect()` releases the session and flushes buffered transcript/log entries onto `calls.CallSession`**; an
+   exception in the receive loop is caught so one bad frame does not kill the call
+
+10. **Latency budget** — ≤1.5 s p50 and ≤3 s p95 from end-of-user-speech to first agent audio. **Audio chain** —
+    μ-law 8 kHz on the Twilio leg ⇄ PCM 16 kHz in / 24 kHz out on the model leg; **barge-in flushes the outbound
+    audio buffer immediately**. **No-audio idle timeout 45 s**; hard max call duration default 15 minutes.
 
 ---
 
@@ -445,7 +477,7 @@ The realtime layer is where a mistake costs audio, money or a cross-tenant leak 
    - Use `get_or_create` for models with unique constraints
    - For models with auto-generated numbers (CALL-00001, APPT-00001), check existence before creating:
      ```python
-     existing = Model.objects.filter(tenant=tenant, number=number).first()
+     existing = Model.objects.filter(tenant=tenant, location=location, number=number).first()
      if existing:
          results.append(existing)
          continue
@@ -457,7 +489,8 @@ The realtime layer is where a mistake costs audio, money or a cross-tenant leak 
    - Print a warning: `"Data already exists. Use --flush to re-seed."`
 
 3. **Print login instructions:**
-   - After seeding, always print which tenant admin accounts to use and the seeded password
+   - After seeding, always print which tenant admin accounts to use, the tenant `customer_id`, the seeded password,
+     and which locations each account can switch into
    - Always warn: `"Superuser 'admin' has no tenant — data won't appear when logged in as admin"`
 
 4. **`__init__.py` files:**
@@ -466,12 +499,18 @@ The realtime layer is where a mistake costs audio, money or a cross-tenant leak 
      - `management/commands/__init__.py`
 
 5. **Seeders never touch a real provider:**
-   - Every seeded call, SMS and recording is produced through the fake provider adapter with `PROVIDER_MODE=fake`
-   - A seeder that could place a real call or send a real SMS is a defect, not a configuration choice
+   - Every seeded call session and recording is produced through the fake provider adapter with `PROVIDER_MODE=fake`
+   - A seeder that could place or answer a real call is a defect, not a configuration choice
+
+6. **Seed multiple locations.** A single-location demo tenant hides every cross-location bug. Seed at least two
+   locations per tenant, each with its own agent settings, inbound number, resources and appointments.
 
 ---
 
-### Multi-Tenancy Rules (Preventing Data Visibility Issues)
+### Multi-Tenancy & Location Rules (Preventing Data Visibility Issues)
+
+Cross-**location** access is a real bug class in this product, not a theoretical one. Location scoping is enforced
+exactly as strictly as tenant scoping.
 
 1. **Superuser has no tenant:**
    - The `admin` superuser has `tenant=None`
@@ -479,22 +518,34 @@ The realtime layer is where a mistake costs audio, money or a cross-tenant leak 
    - When `request.tenant` is `None`, queries return empty results — this is BY DESIGN
    - Always instruct users to log in as a **tenant admin** (e.g., `admin_<slug>`) to see module data
 
-2. **Every view MUST filter by tenant:**
-   - `Model.objects.filter(tenant=request.tenant)` — no exceptions
-   - Never use `Model.objects.all()` in tenant-scoped views
-   - **This rule assumes an HTTP `request`. Channels consumers, background tasks and telephony webhooks have no
-     `request.tenant`.** In those paths the tenant MUST be resolved from a verified source — the dialed
-     `core.PhoneNumber`, the `core.Interaction` row, or a signature-verified provider payload — never from a
-     query-string or body parameter the caller controls. The "never unscoped" guarantee is identical; only the
-     resolution mechanism differs. **A consumer that accepts `tenant_id` from the websocket URL is a cross-tenant
-     vulnerability.**
+2. **Every view MUST filter by tenant, and by location where the model is location-scoped:**
+   - `Model.objects.filter(tenant=request.tenant, location=request.location)` — no exceptions
+   - Never use `Model.objects.all()` in a tenant-scoped view
+   - `request.location` is the session's **active location**, set by the location switcher and **validated against
+     the user's `accounts.UserLocation` rows on every request** — a user must never reach a location they are not
+     assigned to. Trusting a `location` id from a form field, a URL kwarg or a query string without re-checking
+     `UserLocation` is a cross-location IDOR.
+   - `get_object_or_404(Model, pk=pk, tenant=request.tenant, location=request.location)` — pk alone is never enough
+   - Every form's FK choice querysets (provider, resource, service) are narrowed to the active location too, or the
+     dropdown itself becomes the leak
 
-3. **Every model MUST have a tenant FK:**
-   - Except User, Role (which have it already), pure join/through tables, and the deliberately global masters
-     (`core.Currency`, `core.Voice`, `core.TelephonyProvider`, `core.Country`)
-   - Always include: `tenant = models.ForeignKey('core.Tenant', on_delete=models.CASCADE, related_name='...')`
-   - `core.PhoneNumber.e164` is **globally unique across all tenants** — a deliberate exception, because an inbound
-     webhook resolves the tenant from the dialed number
+3. **Webhooks and consumers have no `request`:**
+   - Resolve tenant **and** location from the **dialed number** —
+     `AgentSetting.objects.get(inbound_phone_number=<To>)` — never from a query-string or body parameter the caller
+     controls. **A consumer that accepts `tenant_id` or `location_id` from the websocket URL is a cross-tenant
+     vulnerability.**
+   - Verify the Twilio signature using **that row's** `twilio_account_sid` / `twilio_auth_token` before any side effect
+
+4. **Every model MUST have a tenant FK; location-scoped models MUST have a location FK:**
+   - Always include: `tenant = models.ForeignKey('tenants.Tenant', on_delete=models.CASCADE, related_name='...')`
+   - Location-scoped: `agents.AgentSetting`, `scheduling.Resource`, `scheduling.Appointment`,
+     `scheduling.CallbackRequest`, `calls.CallSession`, and `scheduling.Service` (nullable = all locations)
+   - Not location-scoped: `scheduling.Contact` (a caller belongs to the business and may book at any location),
+     `accounts.User`, `accounts.UserLocation`, `tenants.Location` itself
+   - Exceptions to the tenant FK: `tenants.Tenant` itself, pure join/through tables, and the deliberately global
+     masters (`Voice`, `TelephonyProvider`, `Country`) — only if actually needed
+   - `agents.AgentSetting.inbound_phone_number` is **globally unique across all tenants** — a deliberate exception,
+     because an inbound webhook resolves tenant + location from the dialed number
 
 ---
 
@@ -502,17 +553,17 @@ The realtime layer is where a mistake costs audio, money or a cross-tenant leak 
 
 When you find a security vulnerability, flag it immediately with a WARNING comment and suggest a secure alternative. Never implement insecure patterns even if asked.
 
-This product carries telephony, PII and legal exposure that a normal CRUD app does not. The following are hard rules:
+This product carries telephony and PII exposure that a normal CRUD app does not. The following are hard rules:
 
-1. **Telephony webhooks must verify the provider signature** (`X-Twilio-Signature`) against the raw body and the exact public URL **before any side effect**. `@csrf_exempt` on a webhook is correct only when paired with signature verification.
-2. **Webhook handlers must be idempotent** — providers redeliver. Key on `provider_sid` + `event_type` with a unique constraint; a retry must not double-charge usage, double-book an appointment, or double-send an SMS.
-3. **Provider credentials** (Twilio auth token, LLM/STT/TTS API keys, webhook signing secrets, SIP passwords) come from `.env` or a per-tenant encrypted field; they are never in `Meta.fields`, never in `messages.*`, never logged, never rendered.
-4. **Call recording**: the consent basis is recorded per recording; announce-before-record where the tenant's jurisdiction requires two-party consent; the retention window is enforced by a scheduled job.
+1. **Twilio webhooks must verify the provider signature** (`X-Twilio-Signature`) against the raw body and the exact public URL **before any side effect**, using the **per-location** credentials on the `AgentSetting` row resolved from the dialed number. `@csrf_exempt` on a webhook is correct only when paired with signature verification.
+2. **Webhook handlers must be idempotent** — Twilio redelivers. Key on `provider_call_sid` with a unique constraint; a retry must not double-book an appointment or duplicate a call session.
+3. **Provider credentials** (per-location Twilio auth token, LLM/STT/TTS API keys) are **encrypted at rest** and **write-only in forms** — never in `Meta.fields` as a readable value, never rendered, never logged, never in `messages.*`. Platform-level keys come from `.env`.
+4. **Call recording**: the consent basis is recorded per recording; announce-before-record where the location's jurisdiction requires two-party consent; the retention window is enforced by a scheduled job.
 5. **Transcripts and recordings are PII by definition.** Never log transcript bodies, caller numbers or tool-call argument blobs at INFO — a `create_contact` args payload is a full name and date of birth. Redact the tool-call payload before persisting.
-6. **Outbound is legally gated**: TCPA/quiet hours evaluated in the *contact's* timezone, DNC/suppression, SMS STOP handling within one message, and A2P 10DLC registration state checked before send — all through the single gate in Invariant 5.
-7. **Never place a real call or send a real SMS from a test, seed or development path.** Concretely:
+6. **Prompt injection is a live threat** — a caller's speech reaches the model. A tool call never derives identity from what the caller said; `tenant_id`, `location_id`, `contact_id` and `session_id` come from server state (Invariant 3), and any id the model supplies is authorized server-side against tenant, location and the identified contact.
+7. **Never answer or place a real call from a test, seed or development path.** Concretely:
    1. `PROVIDER_MODE` ∈ `fake | sandbox | live`; **`fake` is the default** for dev, tests and seeders.
-   2. When the mode is not `live`, adapters resolve to the fake/sandbox implementation and **must never reach a real provider** — no real call placed, no real SMS sent, no billable API call.
+   2. When the mode is not `live`, adapters resolve to the fake/sandbox implementation and **must never reach a real provider** — no real call, no billable API call.
    3. The **live** adapter refuses to initialize unless `PROVIDER_MODE == 'live'`, and live mode additionally requires real credentials to be present — missing credentials in live mode is the hard failure.
    4. `on_stop.py` warns loudly if `PROVIDER_MODE=live` is set in a dev environment.
-8. **Cost is a security control**: per-tenant spend caps and per-call max-duration / max-turn ceilings prevent a prompt-injected or looping agent from burning unbounded provider spend.
+8. **Cost is a security control**: per-call max-duration and max-turn ceilings prevent a prompt-injected or looping agent from burning unbounded provider spend.
