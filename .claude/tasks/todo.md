@@ -936,6 +936,37 @@ delete POST-only (405 on GET), seeder idempotent across three consecutive runs, 
   `_call_status_badge.html` both take `obj=`, not `appointment=`/`session=`. Caught by reading the partials
   rather than assuming; would have rendered silently blank once 4.3 and Module 5 land.
 
+### Carried forward — things later sub-modules MUST handle
+
+* **4.3 (Appointments): the field is `start_at`, singular.** `explorer` caught `_appointments_for` and the
+  contact detail template using `starts_at`; both are fixed. The import guard only covers the *import*, so a
+  wrong field name would have raised `FieldError` at request time (view) and rendered a silently blank column
+  (template) the moment 4.3 landed.
+* **3.3 (`identify_contact`): an ANI lookup can match MORE THAN ONE contact.** `(tenant, phone_e164)` is
+  deliberately non-unique — a household, a switchboard or a shared mobile maps to several people, and the 4.1
+  detail page already surfaces that with its "Also on this number" panel. `identify_contact` must NOT silently
+  `.first()`: that would attach the call, and any appointment booked on it, to the wrong person's history.
+  It needs an explicit N>1 policy — treat as unidentified and ask who is calling. Whatever it does, the
+  resolved `contact_id` lands in server-side session state (Invariant 3) and is never handed to the model to
+  echo back as a tool argument.
+* **3.3 (`create_contact`): `tenant` comes from session state**, established at `connect()` from
+  `AgentSetting.objects.get(inbound_phone_number=<To>)` — never from a tool parameter.
+* **Module 5: `_call_status_badge.html` branches on `transferred` and `failed`**, but the ERD defines only
+  `in_progress`/`completed`/`abandoned` for `CallSession.status`. Module 5 must either add those two statuses
+  or trim the dead branches. Pre-existing, not introduced by 4.1.
+* **`normalize_e164` and `Contact.save()` are both realtime-safe** (pure CPU regex work; a single ORM write
+  with no `select_for_update` and no signal receivers), so 3.3 can wrap `Contact.save()` in a single
+  `database_sync_to_async` with nothing hidden inside it. Confirmed by `realtime-reviewer`.
+
+### Access-tier convention for Module 4 (confirmed with the user)
+
+Contacts — and, going forward, appointments and callbacks — are open to **any signed-in user** for
+list/view/create/edit; only owner/manager can delete or erase. This deliberately differs from `tenants` and
+`agents`, where every CRUD view is `@tier_required(owner, manager)`. The reason: taking bookings IS the front
+desk's job, and gating contact creation to management would make the product unusable for its primary user,
+whereas a Location or a Twilio credential is admin config. `explorer` flagged the divergence; the user
+confirmed the front-desk-open reading. **4.2, 4.3 and 4.5 follow this same pattern.**
+
 ### Note on verification method
 
 An early idempotency check reported a false failure because the command was piped to `head`, which closed the
