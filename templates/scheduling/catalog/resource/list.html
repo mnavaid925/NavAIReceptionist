@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %}Resources{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Resources</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Calendar &amp; Bookings</li>
+        <li>Resources</li>
+      </ol>
+    </nav>
+    {% if active_location %}
+      <a class="btn btn-primary" href="{% url 'scheduling:resource_create' %}">
+        <i data-lucide="plus"></i> Add resource
+      </a>
+    {% endif %}
+  </div>
+</div>
+
+{% include "scheduling/catalog/resource/_filters.html" %}
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header">
+    <span>{{ total_count }} resource{{ total_count|pluralize }}</span>
+    {% comment %}
+      Unlike the contact and service lists, this one names the LOCATION, because
+      resources are location-scoped and the list genuinely shows one site's rooms
+      only. Without this the page looks wrong after a location switch — the rows
+      change and nothing on screen explains why.
+
+      base.html already includes partials/_choose_location_banner.html globally,
+      so the no-active-location case is explained there rather than duplicated.
+    {% endcomment %}
+    <span class="text-muted">
+      {% if active_location %}
+        {{ active_location.name }}
+      {% else %}
+        No location chosen
+      {% endif %}
+    </span>
+  </div>
+  <div class="card-body">
+
+    {% if resources %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Resource</th>
+              <th scope="col">Number</th>
+              <th scope="col">Description</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in resources %}
+              <tr>
+                <td>
+                  <a href="{% url 'scheduling:resource_detail' r.pk %}">{{ r.name }}</a>
+                </td>
+                <td>
+                  {% if r.resource_number %}
+                    {{ r.resource_number }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if r.description %}
+                    {{ r.description|truncatechars:60 }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if r.is_active %}
+                    <span class="badge badge-green">Active</span>
+                  {% else %}
+                    <span class="badge badge-muted">Inactive</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <span class="table-actions">
+                    <a class="btn btn-icon" href="{% url 'scheduling:resource_detail' r.pk %}"
+                       aria-label="View {{ r.display_label }}" title="View">
+                      <i data-lucide="eye"></i>
+                    </a>
+                    <a class="btn btn-icon" href="{% url 'scheduling:resource_edit' r.pk %}"
+                       aria-label="Edit {{ r.display_label }}" title="Edit">
+                      <i data-lucide="pencil"></i>
+                    </a>
+                    {% comment %}
+                      Management tiers only; the view re-checks and additionally
+                      refuses when the resource is on any appointment, because
+                      Appointment.resource is SET_NULL and deleting would blank
+                      the room on every past booking.
+                    {% endcomment %}
+                    {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+                      <form method="post" action="{% url 'scheduling:resource_delete' r.pk %}"
+                            onclick="return confirm('Delete {{ r.display_label|escapejs }}? If it has been booked, untick Active instead.');">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-icon"
+                                aria-label="Delete {{ r.display_label }}" title="Delete">
+                          <i data-lucide="trash-2"></i>
+                        </button>
+                      </form>
+                    {% endif %}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/_pagination.html" %}
+
+    {% elif active_location %}
+      {% url 'scheduling:resource_create' as create_url %}
+      {% include "partials/_empty_state.html" with icon="door-closed" title="No resources match" message="Try clearing the filters. Rooms, chairs and equipment belong to one site, so each location needs its own." action_url=create_url action_label="Add resource" %}
+    {% else %}
+      {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Resources belong to one site. Pick the location you are working in and its rooms appear here." %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
