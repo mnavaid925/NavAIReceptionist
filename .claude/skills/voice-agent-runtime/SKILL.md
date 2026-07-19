@@ -16,7 +16,7 @@ The product is **inbound only**. A business (tenant) has multiple **locations**;
 number and its own `agents.AgentSetting` row. The agent answers, books appointments, transfers to a human when
 asked, and logs the call. This layer only ever answers a call that came in; it never originates one.
 
-The stack is **all-Django** — Django 5.1 + Channels/ASGI in one codebase, no separate microservice. Serve it with
+The stack is **all-Django** — Django 4.2 LTS + Channels/ASGI in one codebase, no separate microservice. Serve it with
 `venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 config.asgi:application`. `manage.py runserver` runs the
 WSGI path and **cannot serve websocket routes at all**; a "the media stream never connects" report is this, nine
 times out of ten.
