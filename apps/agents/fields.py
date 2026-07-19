@@ -131,11 +131,11 @@ class EncryptedCharField(models.CharField):
         kwargs.setdefault('max_length', 512)
         super().__init__(*args, **kwargs)
 
-    def deconstruct(self):
-        name, path, args, kwargs = super().deconstruct()
-        if kwargs.get('max_length') == 512:
-            del kwargs['max_length']
-        return name, path, args, kwargs
+    # NOTE: `deconstruct` is deliberately NOT overridden to hide `max_length`.
+    # Stripping it would keep migrations tidy but unpin the column width — a later
+    # change to the default above would then alter the schema silently, because
+    # the deconstructed output would not change and no migration would be
+    # generated. The width belongs in the migration.
 
     def from_db_value(self, value, expression, connection):
         return decrypt_value(value)
