@@ -1,0 +1,20 @@
+{% comment %}
+  Empty state.
+
+    {% include "partials/_empty_state.html" with icon="phone-off" title="No calls yet" message="..." action_url=... action_label=... %}
+
+  Every argument is optional and defaulted, so a bare include still renders
+  something sensible.
+{% endcomment %}
+<div class="empty-state">
+  <span class="empty-icon" aria-hidden="true">
+    <i data-lucide="{{ icon|default:'inbox' }}"></i>
+  </span>
+  <p class="empty-title">{{ title|default:"Nothing here yet" }}</p>
+  {% if message %}<p class="empty-message">{{ message }}</p>{% endif %}
+  {% if action_url %}
+    <a class="btn btn-primary" href="{{ action_url }}">
+      <i data-lucide="plus"></i> {{ action_label|default:"Create" }}
+    </a>
+  {% endif %}
+</div>
