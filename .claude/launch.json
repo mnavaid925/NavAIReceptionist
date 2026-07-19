@@ -6,6 +6,12 @@
       "runtimeExecutable": "venv\\Scripts\\python.exe",
       "runtimeArgs": ["-m", "daphne", "-b", "127.0.0.1", "-p", "8000", "config.asgi:application"],
       "port": 8000
+    },
+    {
+      "name": "NavAIReceptionist (preview)",
+      "runtimeExecutable": "venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "daphne", "-b", "127.0.0.1", "-p", "8001", "config.asgi:application"],
+      "port": 8001
     }
   ]
 }
