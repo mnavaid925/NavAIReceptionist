@@ -17,10 +17,13 @@ from apps.accounts.forms._common import (
     style_widgets,
 )
 from apps.accounts.forms.Auth import (
+    ChangeEmailRequestForm,
+    ChangePasswordForm,
     LoginForm,
     PasswordResetRequestForm,
     SetNewPasswordForm,
 )
+from apps.accounts.forms.Users import OwnProfileForm, UserAdminForm
 
 __all__ = [
     # Cross-app bases and constants.
@@ -33,4 +36,10 @@ __all__ = [
     'LoginForm',
     'PasswordResetRequestForm',
     'SetNewPasswordForm',
+    # 0.2 — Credential Management.
+    'ChangePasswordForm',
+    'ChangeEmailRequestForm',
+    # 0.3 — User Profile & Directory.
+    'UserAdminForm',
+    'OwnProfileForm',
 ]
