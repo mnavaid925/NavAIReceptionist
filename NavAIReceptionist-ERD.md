@@ -148,13 +148,34 @@ Unique `(tenant, slug)`. Ordering `["name"]`.
 | `tier` | Char(16): `owner` / `manager` / `staff` |
 | `status` | Char(16), **indexed**: `active` / `inactive` / `suspended` |
 | `password` | Char(128) — Django hashers, never plaintext |
-| `last_login_at` | DateTime, null |
+| `last_login` | DateTime, null — **inherited from `AbstractBaseUser`** (see the note below) |
 | `is_provider` | Bool — a `True` user IS the bookable clinician; there is no separate Provider entity |
 | `provider_hours` | JSON, **keyed by location id** — `{"<location_id>": [{"start_time": "HH:MM", "end_time": "HH:MM", "days": ["mon", …]}]}` |
 | `inactivity_timeout` | PositiveInt, minutes |
 
-Unique `(tenant, email)`. Unique `(tenant, username)` **where `username` is not null** (a partial unique
-constraint, so multiple unset users do not collide). Ordering `["email"]`.
+Unique `(tenant, email)`. Unique `(tenant, username)` **where `username` is not null**. Ordering `["email"]`.
+
+> **As-built notes — the code is truth, and these three points were settled when `accounts.User` was written.**
+>
+> 1. **`last_login`, not `last_login_at`.** This document originally specified `last_login_at`. `AbstractBaseUser`
+>    already contributes `last_login`, and both Django's `update_last_login` signal receiver and
+>    `PasswordResetTokenGenerator._make_hash_value` read it under that name. Renaming it costs a removed inherited
+>    field, a disconnected built-in signal receiver and a subclassed token generator — three pieces of permanent
+>    framework-fighting for a cosmetic difference. The inherited field is used.
+> 2. **`is_active` is a property, not a column.** Django's auth and admin machinery expect a truthy `is_active`;
+>    `status` is the domain field. `is_active` returns `status == "active"`. A stored second column would be a
+>    second source of truth a view could desync — exactly what §5 forbids.
+> 3. **The `(tenant, username)` rule needs no partial index.** A plain `UniqueConstraint(fields=["tenant",
+>    "username"])` already means "unique where username is not null", because every SQL engine treats NULLs as
+>    distinct inside a unique index. A filtered `UniqueConstraint(condition=…)` would be actively worse here:
+>    MySQL has no partial indexes, so Django skips it silently and the rule ends up unenforced. This is why
+>    `username` is normalised to `None` — never `""` — in both `clean()` and `save()`.
+>
+> A further project-wide trap, found the first time migrations were generated: a manager with
+> `use_in_migrations = True` is serialised by import path, and the mandated backend layout names each entity
+> module after its model, so `apps.accounts.models.User` resolves to the re-exported **class**, not the module.
+> Any migration referencing it then dies with `type object 'User' has no attribute 'UserManager'`. Managers in
+> this project keep `use_in_migrations = False`.
 
 **Login is email-or-username + password, with the tenant resolved by `Tenant.customer_id`.** Because
 `AUTH_USER_MODEL` is baked into every migration that references it, this must be set in `config/settings.py`
