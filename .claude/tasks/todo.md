@@ -972,3 +972,355 @@ confirmed the front-desk-open reading. **4.2, 4.3 and 4.5 follow this same patte
 An early idempotency check reported a false failure because the command was piped to `head`, which closed the
 pipe, killed the process on `BrokenPipeError` and rolled back the `@transaction.atomic` seeder. **Pipe seed and
 migrate commands to `tail`, never `head`.**
+
+---
+
+# Sub-module 4.2 — Services & Resources (Module 4: Calendar & Bookings, `scheduling`) — plan from research-scheduling-4.2.md (2026-07-19)
+
+## Shape: CRUD (EXTEND run — `apps/scheduling` already exists from 4.1, no scaffolding)
+
+Two genuinely new tenant-scoped tables — `scheduling.Service` and `scheduling.Resource` — neither of which
+exists anywhere in the repo (confirmed absent by `research-scheduling-4.2.md`'s own `grep -rn "^class "` sweep
+of `apps/*/models/`), so this is CRUD-shaped, not a view sub-module. **This is an EXTEND run, not a
+scaffold run**: `apps/scheduling/apps.py`, `INSTALLED_APPS`, `config/urls.py`'s `scheduling/` include and
+`config/asgi.py` are all already in place from 4.1 and are untouched here. The only new package-level
+artifacts are one new `ServicesResources/` sub-folder in each of `models/ forms/ views/ urls/`, one new
+migration (`0002_…`, stacked on `0001_initial`), and an extension of the existing `seed_scheduling.py` — every
+`__init__.py` touched gets an **appended** re-export block, never a rewrite.
+
+## Models (from research — 2, within the 1–3 ceiling)
+
+- [ ] **`scheduling.Service`** — tenant-scoped **with a NULLABLE `location` FK** (null = offered at all
+  locations). No abstract base expresses this shape — `apps/scheduling/models/_base.py`'s own docstring already
+  flags it: *"`Service` is tenant-scoped with a NULLABLE location, which no abstract base expresses — it
+  declares its own FK."* Inherits `TenantOwned` directly (not `TenantLocationOwned`) and adds `location` itself.
+  - `tenant` — FK `tenants.Tenant` (verified), inherited from `TenantOwned`, `on_delete=CASCADE`.
+  - `location` — FK `tenants.Location` (verified: `apps/tenants/models/Location.py`), **`null=True, blank=True,
+    on_delete=CASCADE, related_name='services'`** — Per-Location vs. All-Locations Scoping. `on_delete=CASCADE`
+    (not `SET_NULL`) because a deleted `Location` genuinely takes its own site-specific services with it; a
+    service with `location=None` (all-locations) is naturally unaffected by any single location's deletion since
+    no FK points at it. **This is the one FK in this sub-module Django doesn't already narrow for us**, so the
+    view/form work below must do it by hand (see Backend section).
+  - `name` — `CharField(max_length=255)` — Service Catalogue baseline (Bookable Service).
+  - `description` — `TextField(blank=True)` — **new field, beyond the ERD's 6-field baseline** — Service
+    Description / spoken-explanation research finding: the explicit research question for this sub-module is
+    *how the voice agent describes services to a caller*, and every comparator surveyed (Acuity/Square/Cal.com/
+    Setmore) carries a description field for exactly that reason. Read later by 3.3's `get_business_info` tool.
+  - `duration_minutes` — `PositiveIntegerField()` — Duration per Service (the core bookable unit; feeds 4.3's
+    slot math, `next_open >= end_at`).
+  - `buffer_minutes` — `PositiveIntegerField(default=0)` — Buffer/padding, **applied-after semantics fixed per
+    research** (`next_open >= end_at + buffer_minutes`) — the ERD's single field, not Acuity/Cal.com's
+    before-and-after split (see Deferred).
+  - `requires_resource` — `BooleanField(default=False)` — **new field, beyond the ERD's 6-field baseline** —
+    Square's explicit per-service "Require a resource" toggle; the input 4.3's availability search will branch
+    on to decide whether resource capacity gates a slot.
+  - `is_active` — `BooleanField(default=True)` — Active-Only Offering (excluded from booking/availability once
+    4.3 lands, kept for history — never hard-deleted for this reason alone).
+  - `display_order` — `PositiveIntegerField(default=0)` — Display Order for the service menu, including what the
+    agent reads back to a caller (feeds 3.3's `get_business_info` ordering).
+  - `Meta.ordering = ['display_order', 'name']`. **No `Meta.indexes` beyond the FK indexes Django creates
+    automatically** — the research's own Compliance section confirms per-tenant service counts at this product's
+    target size (single-site to few-dozen-site SMBs) keep `Meta.ordering` alone cheap; do not add one by
+    reflex.
+  - Form: `location` is **rendered**, `required=False`, `empty_label='All locations (offered everywhere)'`,
+    narrowed to `request.tenant`'s own locations via `TenantModelForm.tenant_scoped_fields = ('location',)` —
+    **the one documented exception in this sub-module to "location is never a form field"**, because unlike
+    every other location-scoped model, `Service.location` is a genuine business decision the user makes
+    (this-site-only vs. every-site), not an identity fact the server should silently stamp from
+    `request.location`. Form excludes: `tenant` (stamped by `TenantModelForm.save()`), `created_at`/`updated_at`
+    (auto). `is_active`, `display_order`, `requires_resource`, `duration_minutes`, `buffer_minutes`, `name`,
+    `description` are all ordinary rendered fields.
+
+- [ ] **`scheduling.Resource`** — `TenantLocationOwned` (tenant **and** location, both required — verified base
+  class in `apps/scheduling/models/_base.py`, no deviation). A resource is a physical thing at exactly one site.
+  - `tenant` / `location` — inherited from `TenantLocationOwned` (`on_delete=CASCADE` on both, per the base
+    class).
+  - `name` — `CharField(max_length=128)` — Bookable Resource baseline (NexHealth's Operatory, Square's rooms/
+    stations/equipment/chairs, Mindbody's rooms-and-resources).
+  - `resource_number` — `PositiveIntegerField(null=True, blank=True)` — matches NexHealth/Square's numbered
+    room/chair pattern.
+  - `description` — `CharField(max_length=255, blank=True)` — per ERD.
+  - `display_order` — `PositiveIntegerField(default=0)` — feeds 4.4's future "By Resource" calendar column
+    ordering (no new field there — 4.4 reuses this one).
+  - `is_active` — `BooleanField(default=True)` — Active-Only Offering.
+  - **No `capacity` field** — Resource Exclusivity finding: a resource hosts exactly one appointment at a time,
+    recorded here as a **deliberate omission**, not an oversight, so a later pass does not add one by analogy to
+    Mindbody's group-class rooms (this product has no attendee-count concept on `Appointment`). **No FK to
+    `settings.AUTH_USER_MODEL`** — Resource-vs-Provider Decoupling finding: NexHealth and Square both keep the
+    physical resource and the person serving from it as two independent axes; 4.3's `Appointment` will carry
+    `resource` and `provider` as two separate nullable FKs, never folded into one.
+  - `Meta.unique_together = [('location', 'name')]` — per ERD, prevents two same-named rooms at one site.
+  - `Meta.ordering = ['display_order', 'name']`. No additional indexes beyond the inherited `(tenant, location)`
+    FK indexes.
+  - Form: standard `TenantLocationModelForm` — `location` **excluded**, stamped from `request.location` exactly
+    like every other fully location-scoped model in the project. Form excludes: `tenant`, `location`,
+    `created_at`/`updated_at`. **Gotcha to plan for explicitly**: because `location` is absent from
+    `ResourceForm.Meta.fields`, Django's automatic `Meta.unique_together` validation during `full_clean()`
+    silently **excludes** it too (a field outside `self.fields` is excluded from validation by default) — the
+    `(location, name)` uniqueness would surface as a raw `IntegrityError`/500 on a duplicate submission instead
+    of a friendly field error. `ResourceForm` must override `clean_name()` (or `clean()`) to check
+    `Resource.objects.filter(tenant=self.tenant, location=self.location,
+    name=name).exclude(pk=self.instance.pk).exists()` itself and raise `ValidationError` — this is new code, not
+    inherited free from the base class.
+
+### FK intent for 4.3's `Appointment` — stated now, not built here
+
+`Appointment.service` and `Appointment.resource` will be **`on_delete=SET_NULL, null=True`** — this is what
+`NavAIReceptionist-ERD.md`'s `Appointment` table actually specifies for both fields, confirmed verbatim by the
+research doc's own Compliance section, and it is **not** `PROTECT` (unlike `Appointment.contact`, which the ERD
+does give `on_delete=PROTECT` — the two are different by design, not by omission). Practical consequence: a hard
+delete of a `Service`/`Resource` with appointment history will be survivable at the DB level once 4.3 lands (the
+appointment keeps its row, just loses the reference), so this sub-module cannot rely on a `ProtectedError` catch
+the way 4.1's `contact_delete_view` does. Instead:
+- [ ] Both delete views implement the same **forward-looking, import-guarded check** 4.1's `_appointments_for`
+  established (`try: from apps.scheduling.models import Appointment / except ImportError: … `): if the row has
+  any related `Appointment`, block the hard delete and redirect with a message pointing at the `is_active`
+  toggle instead ("Deactivate it so it drops out of booking without losing history"); if it has none (true
+  today, since `Appointment` doesn't exist yet, and true later for a genuinely unused row), the hard delete
+  proceeds. This produces the same practical safety net a `PROTECT` FK would, implemented in the view layer
+  because the ERD's chosen `on_delete` is `SET_NULL`, not `PROTECT` — deliberately corrected here from a loose
+  paraphrase rather than silently mis-declaring the forward FK.
+- [ ] Both list/detail templates show `is_active` as the primary lifecycle control (a toggle-style edit, not a
+  separate view) — Active-Only Offering's "deactivate rather than remove" pattern, universal across every
+  comparator surveyed (Acuity archives, Square/Mindbody deactivate).
+
+## Backend (apps/scheduling/{models,forms,views,urls}/ServicesResources/ — EXTEND, append re-exports)
+
+Models:
+- [ ] `apps/scheduling/models/ServicesResources/__init__.py`
+- [ ] `apps/scheduling/models/ServicesResources/Services.py` — the `Service` model above
+- [ ] `apps/scheduling/models/ServicesResources/Resources.py` — the `Resource` model above
+- [ ] **APPEND** to `apps/scheduling/models/__init__.py` (do not rewrite): add
+  `from apps.scheduling.models.ServicesResources.Services import Service` and
+  `from apps.scheduling.models.ServicesResources.Resources import Resource`, extend `__all__` to
+  `['Contact', 'Service', 'Resource']`, and extend the module docstring's sub-module-folder list with
+  `* ServicesResources/  — 4.2  Service, Resource`
+
+Forms:
+- [ ] `apps/scheduling/forms/ServicesResources/__init__.py`
+- [ ] `apps/scheduling/forms/ServicesResources/Services.py` — `ServiceForm(TenantModelForm)`,
+  `tenant_scoped_fields = ('location',)`, `Meta.fields = ('location', 'name', 'description',
+  'duration_minutes', 'buffer_minutes', 'requires_resource', 'is_active', 'display_order')`, `__init__` sets
+  `self.fields['location'].required = False` and a friendly `empty_label`
+- [ ] `apps/scheduling/forms/ServicesResources/Resources.py` — `ResourceForm(TenantLocationModelForm)`,
+  `Meta.fields = ('name', 'resource_number', 'description', 'display_order', 'is_active')`, plus the manual
+  `clean_name()` uniqueness check described above
+- [ ] **APPEND** to `apps/scheduling/forms/__init__.py`: import both forms, extend `__all__` to
+  `['ContactForm', 'ServiceForm', 'ResourceForm']`
+
+Views:
+- [ ] `apps/scheduling/views/ServicesResources/__init__.py`
+- [ ] `apps/scheduling/views/ServicesResources/Services.py`:
+  - [ ] `_tenant_services(request)` — `Service.objects.filter(tenant=request.tenant).select_related('location')`
+  - [ ] `service_list_view` — `@login_required` only (front-desk convention, confirmed module-wide in
+    `.claude/skills/scheduling/SKILL.md`). Filters, applied before pagination: `q` search across
+    `name`/`description` via `Q()`; `location` GET param — `''` (default) shows every service tenant-wide,
+    a specific location pk **additively** includes that location's own rows **and** `location__isnull=True`
+    rows (`Q(location_id=loc) | Q(location__isnull=True)`, exactly the query 4.3's hot path will run) so
+    picking a location filter **never hides all-locations services** per the task's explicit requirement, and
+    a literal `all_locations` sentinel value shows only the `location__isnull=True` rows; `status` GET param
+    (`active`/`inactive`) maps to `is_active=True/False`, a junk value degrades to no filter. Passes
+    `location_choices=request.tenant.locations.all()` to the template (Filter Implementation Rule 1 — FK
+    dropdown data must come from the view, never assumed by the template).
+  - [ ] `service_create_view` / `service_edit_view` — `@login_required`; `ServiceForm(request.POST or None,
+    instance=obj, request=request)`
+  - [ ] `service_detail_view` — `@login_required`; shows the resolved location ("All locations" vs. the named
+    site) and an import-guarded appointment count exactly like 4.1's `_appointments_for` pattern (`None` today)
+  - [ ] `service_delete_view` — `@login_required` + `tier_required(*MANAGEMENT_TIERS)`, `@require_POST`; the
+    import-guarded appointment check from the Models section above
+- [ ] `apps/scheduling/views/ServicesResources/Resources.py`:
+  - [ ] `_location_resources(request)` — `Resource.objects.filter(tenant=request.tenant,
+    location=request.location)` — **both** filters always, never tenant alone (the task's explicit instruction:
+    Resource is fully location-scoped, unlike Contact). Guard `request.location is None` the same way
+    `apps/agents/views/_helpers.py:get_setting_for_active_location` does for create/edit/delete (redirect to
+    `accounts:my_locations` with a message); the list view instead degrades to an empty queryset so the global
+    `partials/_choose_location_banner.html` explains the empty state, matching how every other location-scoped
+    list in the project already behaves.
+  - [ ] `resource_list_view` — `@login_required`; `q` search across `name`/`description`/`resource_number`;
+    `status` (`active`/`inactive`) filter; passes `active_location=request.location` explicitly to the template
+    for the **visible active-location indicator** the task calls for (Resource's list header states which site
+    it is showing, deliberately the opposite of Contact's "all locations" header)
+  - [ ] `resource_create_view` / `resource_edit_view` — `@login_required`; `ResourceForm`
+  - [ ] `resource_detail_view` — `@login_required`; import-guarded appointment count (`None` today)
+  - [ ] `resource_delete_view` — `@login_required` + `tier_required(*MANAGEMENT_TIERS)`, `@require_POST`; same
+    import-guarded appointment check
+- [ ] **APPEND** to `apps/scheduling/views/__init__.py`: import all ten new views, extend `__all__`
+
+URLs:
+- [ ] `apps/scheduling/urls/ServicesResources/__init__.py`
+- [ ] `apps/scheduling/urls/ServicesResources/Services.py` — literal before `<int:pk>`: `services/` →
+  `service_list`, `services/create/` → `service_create`, `services/<int:pk>/` → `service_detail`,
+  `services/<int:pk>/edit/` → `service_edit`, `services/<int:pk>/delete/` → `service_delete`
+- [ ] `apps/scheduling/urls/ServicesResources/Resources.py` — `resources/` → `resource_list`,
+  `resources/create/` → `resource_create`, `resources/<int:pk>/` → `resource_detail`,
+  `resources/<int:pk>/edit/` → `resource_edit`, `resources/<int:pk>/delete/` → `resource_delete`
+- [ ] **APPEND** to `apps/scheduling/urls/__init__.py` (do not rewrite): import both new `urlpatterns` lists and
+  concatenate them onto the existing `urlpatterns = list(contact_directory_urlpatterns) + …` — check the new
+  `services/`/`resources/` literals against the **whole** concatenated list, not just this file, per the
+  first-match-wins rule (no collision expected: `contacts/`, `services/`, `resources/` are disjoint prefixes)
+
+- [ ] `apps/scheduling/admin.py` — **APPEND** `ServiceAdmin` (`list_display=('name', 'tenant', 'location',
+  'duration_minutes', 'requires_resource', 'is_active', 'display_order')`, `list_filter=('tenant', 'location',
+  'is_active', 'requires_resource')`, `search_fields=('name', 'description')`,
+  `list_select_related=('tenant', 'location')`) and `ResourceAdmin` (`list_display=('name', 'tenant', 'location',
+  'resource_number', 'is_active', 'display_order')`, `list_filter=('tenant', 'location', 'is_active')`,
+  `search_fields=('name', 'description')`, `list_select_related=('tenant', 'location')`) — do not touch
+  `ContactAdmin`
+- [ ] `makemigrations scheduling` → expect `0002_…` (an incremental migration stacked on `0001_initial`, per the
+  brief — **not** a rebuilt `0001_initial`, unlike 4.1 which was still one commit old and unpushed)
+- [ ] **EXTEND** `apps/scheduling/management/commands/seed_scheduling.py` idempotently — do not create a new
+  seeder file. Add `DEMO_SERVICES` and `DEMO_RESOURCES` dicts keyed by tenant slug, reusing the `acme`/`globex`
+  tenants and their locations already looked up by slug (never re-invent a demo tenant). Seed, per tenant:
+  at least one **all-locations** service (`location=None`) and at least one **per-location** service so the
+  nullable-location filter has both shapes to exercise; at least one service with `requires_resource=True` and
+  one with `False`; at least one `is_active=False` row on each model so the active/inactive filter has both
+  buckets; **at least two `Resource` rows per location** (seed rule "seed multiple locations" — a
+  single-resource site hides the `(location, name)` uniqueness and the by-resource ordering). Dedupe
+  `Service` on `(tenant, location, name)` and `Resource` on `(tenant, location, name)` via an existence check
+  before create, exactly like the existing `Contact` dedupe pattern (`if Model.objects.filter(**lookup).exists():
+  skipped += 1; continue`). Update the seeder's module docstring's "Sub-modules seeded so far" list to add
+  `* 4.2  Service, Resource — a service catalogue and resource set per location, ...`. Touches no provider.
+
+## Realtime & agent surface
+
+No consumer, no `routing.py` entry, no live surface this pass — `scheduling` still has no websocket route.
+**No LLM tool is implemented in this sub-module.** The forward reference is `get_business_info` (named in
+`research-agents-2.1.md`, confirmed again here), which belongs to **3.3 Tools & Dispatcher** (does not exist
+yet). What 4.2 ships for 3.3 to call later is the **queryable shape**, documented here so 3.3's plan has a
+verified contract instead of re-deriving it: `Service.objects.filter(tenant=tenant, is_active=True).filter(
+Q(location=location_id) | Q(location__isnull=True))` and `Resource.objects.filter(tenant=tenant,
+location=location_id, is_active=True)`, both ordered by the existing `Meta.ordering`. When 3.3 is built, the
+tool takes **zero model-supplied arguments** — `tenant_id`/`location_id` come from server-held session state
+(Invariant 3) — and returns `data.services: [{"name", "description", "duration_minutes"}]` /
+`data.resources: [{"name"}]` in a pure read, never touching the tool-result envelope's `error` branch on
+success.
+
+## Prompt / variables
+
+None. No new entry on `agents.AgentSetting.variables` this pass — a rendered service list reaching the prompt
+(rather than being read on-demand by the `get_business_info` tool) is explicitly the pattern this sub-module's
+research rejected, citing Retell/Vapi's own "tool over static prompt" finding (research §"Beyond the bullets").
+
+## Provider adapter
+
+None. This sub-module makes no Twilio/STT/TTS/LLM call and adds nothing to `apps/runtime/providers/` — the
+research's own Compliance section confirms "No provider call, no cost line."
+
+## CallSession.usage cost lines
+
+None. `calls.CallSession` does not exist yet (Module 5) and this sub-module appends nothing to any per-turn
+usage ledger.
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` — add **exactly one** new entry to `LIVE_LINKS`:
+  `'4.2': {'Services': 'scheduling:service_list', 'Resources': 'scheduling:resource_list'}` (two labels, one
+  key — matches the existing multi-link shape already used by `'0.2'`/`'0.3'`; `MODULE_ICONS['4']` already
+  exists, no change there)
+- [ ] `config/settings.py` — **untouched**, `'apps.scheduling'` already in `INSTALLED_APPS` from 4.1
+- [ ] `config/urls.py` — **untouched**, `path('scheduling/', include('apps.scheduling.urls'))` already present
+- [ ] `config/asgi.py` — **untouched**, no websocket surface this pass
+- [ ] `AUTH_USER_MODEL` — **N/A**, already declared before Module 0's first `makemigrations`
+
+## Templates (templates/scheduling/catalog/service/ and templates/scheduling/catalog/resource/)
+
+New sub-module slug `catalog` per CLAUDE.md's own worked example for `apps/scheduling`
+(`calendar/ bookings/ directory/ catalog/ callbacks/`); two entity folders underneath it, since 4.2 owns two
+models (graduates straight to the rule-2 two-level form — never single-entity-folds `catalog/` itself).
+
+- [ ] `templates/scheduling/catalog/service/list.html` — filter bar reflecting `request.GET` (`q`, `location`
+  `<select>` built from `location_choices` **plus an explicit "All locations" option that maps to the
+  `all_locations` sentinel**, `status`), a `badge-info`/`badge-muted` style badge per row showing the resolved
+  location ("All locations" vs. the named site — reusing the theme's colour-named badge classes, no
+  `badge-purple`), Actions column (view/edit/delete-POST+confirm+csrf, delete gated to `MANAGEMENT_TIERS` in
+  the template matching the view), pagination with `has_previous`/`has_next` guards, empty-state ("No services
+  yet — add one to start taking bookings.")
+- [ ] `templates/scheduling/catalog/service/detail.html` — full field display including the resolved
+  location, `requires_resource`/`is_active` as badges, the import-guarded appointment panel (empty-state today);
+  Actions sidebar (Edit, Delete-POST+confirm gated on tier, Back to List)
+- [ ] `templates/scheduling/catalog/service/form.html` — shared create/edit; renders `location` as an explicit
+  `<select>` with the "All locations" empty option (the one field this sub-module DOES let the user post,
+  documented inline as the deliberate exception), `name`, `description`, `duration_minutes`, `buffer_minutes`,
+  `requires_resource`, `display_order`, `is_active`
+- [ ] `templates/scheduling/catalog/resource/list.html` — a **visible active-location indicator** in the page
+  header/subtitle (e.g. "Resources — {{ request.location.name }}", reusing `active_location` from context —
+  the deliberate opposite of `directory/contact/list.html`'s "all locations" header, called out inline exactly
+  as the task requires), filter bar (`q`, `status`), Actions column, pagination, empty-state ("No resources at
+  this location yet.")
+- [ ] `templates/scheduling/catalog/resource/detail.html` — full field display, import-guarded appointment
+  panel; Actions sidebar
+- [ ] `templates/scheduling/catalog/resource/form.html` — shared create/edit; `name`, `resource_number`,
+  `description`, `display_order`, `is_active` — **no `location` field rendered**, unlike `service/form.html`
+
+## Verify
+
+- [ ] `makemigrations scheduling` + `migrate` — expect `0002_…`, an incremental migration (not "No changes
+  detected", and not a rebuilt `0001_initial`)
+- [ ] `seed_scheduling` ×2 — second run reports the new `Service`/`Resource` rows as already present alongside
+  the existing `Contact` idempotency message
+- [ ] `manage.py check` — no new issues
+- [ ] `PROVIDER_MODE=fake` — asserted even though this sub-module makes no provider call
+- [ ] `pytest` — model tests (`Service.location` nullable + `on_delete=CASCADE`, `Resource`'s `(location,
+  name)` unique_together actually raises, both `Meta.ordering`s), form tests (`ServiceForm`'s location narrowed
+  to the requesting tenant and defaults to "All locations" when left blank; `ResourceForm.clean_name()` rejects
+  a duplicate name at the same location but allows the same name at a different location), view tests (list
+  search/filter/pagination on both, the `location` filter's additive `Q(location=X) | Q(location__isnull=True)`
+  behaviour proven — NOT just asserted, a specific-location filter run and both an all-locations row AND that
+  location's own row must both appear — create/edit/detail/delete on both), all under `apps/scheduling/tests/`
+- [ ] Twilio webhook signature + idempotency — **N/A**, this sub-module ships no webhook
+- [ ] websocket connect/reject — **N/A**, this sub-module ships no consumer
+- [ ] `temp/` smoke sweep as `admin_acme` (password from `seed_accounts.py`, `navai-demo-2026`) covering every
+  new `scheduling:service_*` / `scheduling:resource_*` url: 200/302, no `{#`/`{% comment` leaks, page titles, a
+  seeded record visible; **cross-tenant IDOR** — `admin_acme` requesting a `globex` service/resource detail/
+  edit/delete by pk gets 404; **cross-location IDOR** — `admin_acme` switched to Acme Downtown requesting an
+  Acme Uptown `Resource`'s detail/edit/delete by pk gets 404 (Resource is fully location-scoped, so this check
+  is new relative to 4.1, which had no location axis to test); an all-locations `Service` remains visible after
+  switching the active location, while a per-location `Service` does not appear when the wrong location is
+  active in the `location` filter
+- [ ] Sidebar shows `4.2` Live under Module 4, both "Services" and "Resources" links resolve
+
+## Close-out
+
+- [ ] Review agents: `code-reviewer` → `explorer` → `frontend-reviewer` → `performance-reviewer` →
+  `realtime-reviewer` (expected to find nothing — no realtime surface this pass) → `qa-smoke-tester` →
+  `security-reviewer` (confirm neither model carries PII, per research's Compliance section — a sanity check,
+  not an expected finding) → `test-writer`
+- [ ] **UPDATE** `.claude/skills/scheduling/SKILL.md` — **do not re-author**. Add `Service`/`Resource` to the
+  Models section (with the nullable-location vs. fully-location-scoped contrast spelled out), the Build State
+  table row flip from "not built" to "**BUILT**" for 4.2, the new routes, the new `templates/scheduling/catalog/`
+  entries, the extended seeder rows, the `get_business_info` forward contract under Tools & prompt surface, and
+  a new Conventions & gotchas bullet for the `ResourceForm.clean_name()` manual uniqueness check
+- [ ] README — note the two new list pages if the project README enumerates them (unlikely; skip if it doesn't
+  already enumerate 4.1's Contacts page either)
+
+## Later passes / deferred
+
+Carried over verbatim from `research-scheduling-4.2.md`'s own Deferred section — nothing here is dropped, only
+parked:
+
+- `price`/`price_cents` field on `Service` — no payments capability exists among the seven; revisit only if one
+  is ever added.
+- Split `buffer_before_minutes`/`buffer_after_minutes` — the ERD's single applied-after `buffer_minutes` is
+  sufficient for this product's single-service-at-a-time booking flow; revisit only on a real prep-time need.
+- Multiple duration variants per service (Cal.com's `multipleDuration`) — workaround is a separate `Service` row
+  per duration; a durations array/table is unwarranted complexity at this size.
+- `resource_type`/category field (room vs. chair vs. equipment) — free-text `name`/`description` already covers
+  it; no comparator hard-types it either.
+- `Service` ↔ `Resource` eligibility matrix (M2M) — a third table, over this pass's two-model scope;
+  `Service.requires_resource` plus 4.3's location-scoped resource search covers the common case.
+- `capacity` field on `Resource` — **deliberately rejected, not merely postponed**: would require attendee-count
+  support on `Appointment` that does not exist and is not requested by any of the seven capabilities.
+- Availability-search slot computation reading `duration_minutes`/`buffer_minutes`/`requires_resource`/
+  `is_active` → **4.3 Availability & Booking**.
+- `Appointment.service`/`Appointment.resource` FK wiring (`on_delete=SET_NULL`, stated as intent above, not
+  built here) → **4.3**.
+- The calendar's "By Resource and By Provider" column toggle consuming `Resource.display_order` → **4.4
+  Calendar Views**.
+- `get_business_info` LLM tool implementation, argument-free schema, and result envelope (contract documented
+  above under Realtime & agent surface) → **3.3 Tools & Dispatcher**.
+- Booking-list filters by service/resource (4.5's "Booking List" bullet) → **4.5 Bookings List & Callback
+  Requests**.
+
+## Review notes
+
+(filled in at the end)
