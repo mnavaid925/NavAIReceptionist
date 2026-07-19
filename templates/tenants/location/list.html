@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Locations{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Locations</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Business &amp; Locations</li>
+        <li>Locations</li>
+      </ol>
+    </nav>
+    <a class="btn btn-primary" href="{% url 'tenants:location_create' %}">
+      <i data-lucide="plus"></i> Add location
+    </a>
+  </div>
+</div>
+
+{% include "tenants/location/_filters.html" %}
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header">
+    <span>{{ total_count }} location{{ total_count|pluralize }}</span>
+    <span class="text-muted">{{ active_tenant.name }}</span>
+  </div>
+  <div class="card-body">
+
+    {% if locations %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Location</th>
+              <th scope="col">Address</th>
+              <th scope="col">Timezone</th>
+              <th scope="col">Local time</th>
+              <th scope="col">Staff</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for loc in locations %}
+              <tr>
+                <td>
+                  {{ loc.name }}
+                  {% if active_location and loc.pk == active_location.pk %}
+                    <span class="badge badge-info">Working here</span>
+                  {% endif %}
+                  <span class="block text-muted text-xs">{{ loc.slug }}</span>
+                </td>
+                <td>
+                  {% if loc.full_address %}
+                    {{ loc.full_address }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                  {% if loc.phone %}
+                    <span class="block text-muted text-xs">{{ loc.phone|phone_e164 }}</span>
+                  {% endif %}
+                </td>
+                <td>{{ loc.timezone }}</td>
+                <td><time>{{ loc.local_now|date:"H:i" }}</time></td>
+                <td>
+                  <a href="{% url 'tenants:staff_locations' %}?location={{ loc.pk }}">
+                    {{ loc.staff_count }}
+                  </a>
+                </td>
+                <td>
+                  {% if loc.is_active %}
+                    <span class="badge badge-green">Active</span>
+                  {% else %}
+                    <span class="badge badge-muted">Inactive</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <span class="table-actions">
+                    <a class="btn btn-icon" href="{% url 'tenants:location_detail' loc.pk %}"
+                       aria-label="View {{ loc.name }}" title="View">
+                      <i data-lucide="eye"></i>
+                    </a>
+                    <a class="btn btn-icon" href="{% url 'tenants:location_edit' loc.pk %}"
+                       aria-label="Edit {{ loc.name }}" title="Edit">
+                      <i data-lucide="pencil"></i>
+                    </a>
+                    {% comment %}
+                      Deactivation, not deletion — appointments and call logs FK
+                      this row with CASCADE, so deleting would take the site's
+                      whole history with it. Hidden when already inactive; the
+                      view re-checks that plus the last-active-location guard.
+                    {% endcomment %}
+                    {% if loc.is_active %}
+                      <form method="post" action="{% url 'tenants:location_delete' loc.pk %}"
+                            onclick="return confirm('Deactivate {{ loc.name|escapejs }}? Staff will no longer be able to work there. Its history is kept.');">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-icon"
+                                aria-label="Deactivate {{ loc.name }}" title="Deactivate">
+                          <i data-lucide="power-off"></i>
+                        </button>
+                      </form>
+                    {% endif %}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/_pagination.html" %}
+
+    {% else %}
+      {% url 'tenants:location_create' as create_url %}
+      {% include "partials/_empty_state.html" with icon="map-pin-off" title="No locations match" message="Try clearing the filters, or add the first site for this business." action_url=create_url action_label="Add location" %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
