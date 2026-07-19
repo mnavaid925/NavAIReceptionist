@@ -25,13 +25,16 @@ OPTIONAL_CHROME_URLS = {
 
 def navigation(request):
     """Sidebar tree, active location and the user's assignable locations."""
-    from apps.accounts.navigation import build_sidebar, _resolve
+    from apps.accounts.navigation import build_account_tabs, build_sidebar, _resolve
 
     user = getattr(request, 'user', None)
     is_authenticated = bool(user and user.is_authenticated)
 
     context = {
         'nav_modules': build_sidebar(request.path) if is_authenticated else [],
+        # Module 0's surfaces. They are not in the sidebar — they render as the
+        # account area's tab strip and in the topbar user dropdown.
+        'account_tabs': build_account_tabs(user, request.path) if is_authenticated else [],
         'nav_urls': {key: _resolve(name) for key, name in OPTIONAL_CHROME_URLS.items()},
         'active_tenant': getattr(request, 'tenant', None),
         'active_location': getattr(request, 'location', None),
