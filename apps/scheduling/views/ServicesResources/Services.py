@@ -13,8 +13,16 @@ from django.db.models import Q
 from apps.scheduling.forms import ServiceForm
 from apps.scheduling.models import Service
 from apps.scheduling.views._common import *  # noqa: F401,F403
+from apps.scheduling.views._helpers import save_or_report_conflict
 
 logger = logging.getLogger(__name__)
+
+#: Shown when two writers race for the same name. `ServiceForm.clean` catches the
+#: ordinary case; this covers the window between that check and the insert.
+_NAME_CONFLICT = (
+    'Someone just added a service with that name at the same location. '
+    'Give this one a different name.'
+)
 
 __all__ = [
     'service_list_view',
@@ -125,13 +133,14 @@ def service_create_view(request):
     form = ServiceForm(request.POST or None, request=request)
 
     if request.method == 'POST' and form.is_valid():
-        obj = form.save()
-        logger.info('Service created service_id=%s tenant_id=%s by user_id=%s',
-                    obj.pk, request.tenant.pk, request.user.pk)
-        messages.success(  # noqa: F405
-            request, f'{obj.name} has been added to your catalogue.'
-        )
-        return redirect('scheduling:service_detail', pk=obj.pk)  # noqa: F405
+        obj = save_or_report_conflict(form, _NAME_CONFLICT)
+        if obj is not None:
+            logger.info('Service created service_id=%s tenant_id=%s by user_id=%s',
+                        obj.pk, request.tenant.pk, request.user.pk)
+            messages.success(  # noqa: F405
+                request, f'{obj.name} has been added to your catalogue.'
+            )
+            return redirect('scheduling:service_detail', pk=obj.pk)  # noqa: F405
 
     return render(request, 'scheduling/catalog/service/form.html', {  # noqa: F405
         'form': form,
@@ -147,11 +156,11 @@ def service_edit_view(request, pk):
     form = ServiceForm(request.POST or None, instance=obj, request=request)
 
     if request.method == 'POST' and form.is_valid():
-        form.save()
-        logger.info('Service updated service_id=%s by user_id=%s',
-                    obj.pk, request.user.pk)
-        messages.success(request, f'{obj.name} has been updated.')  # noqa: F405
-        return redirect('scheduling:service_detail', pk=obj.pk)  # noqa: F405
+        if save_or_report_conflict(form, _NAME_CONFLICT) is not None:
+            logger.info('Service updated service_id=%s by user_id=%s',
+                        obj.pk, request.user.pk)
+            messages.success(request, f'{obj.name} has been updated.')  # noqa: F405
+            return redirect('scheduling:service_detail', pk=obj.pk)  # noqa: F405
 
     return render(request, 'scheduling/catalog/service/form.html', {  # noqa: F405
         'form': form,
