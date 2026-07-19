@@ -135,6 +135,17 @@
     }
   }
 
+  function closeDropdowns() {
+    var open = document.querySelectorAll('.dropdown-menu.is-open');
+    for (var i = 0; i < open.length; i++) {
+      open[i].classList.remove('is-open');
+    }
+    var toggles = document.querySelectorAll('[data-dropdown][aria-expanded="true"]');
+    for (var j = 0; j < toggles.length; j++) {
+      toggles[j].setAttribute('aria-expanded', 'false');
+    }
+  }
+
   onReady(function () {
     var sidebar = document.getElementById('app-sidebar');
     var drawer = document.getElementById('settings-drawer');
@@ -177,6 +188,25 @@
         return;
       }
 
+      /* Dropdown menus (the topbar user menu). Toggling by class rather than a
+         popover library keeps it working inside the fixed topbar at every layout
+         variant. Any click elsewhere closes whatever is open. */
+      var dropdownToggle = event.target.closest('[data-dropdown]');
+      if (dropdownToggle) {
+        event.preventDefault();
+        var menu = document.getElementById(dropdownToggle.getAttribute('data-dropdown'));
+        var wasOpen = menu && menu.classList.contains('is-open');
+        closeDropdowns();
+        if (menu && !wasOpen) {
+          menu.classList.add('is-open');
+          dropdownToggle.setAttribute('aria-expanded', 'true');
+        }
+        return;
+      }
+      if (!event.target.closest('.dropdown-menu')) {
+        closeDropdowns();
+      }
+
       if (event.target.closest('[data-action="open-settings"]')) {
         event.preventDefault();
         if (drawer) drawer.classList.add('is-open');
@@ -200,6 +230,7 @@
       if (event.key === 'Escape') {
         if (drawer) drawer.classList.remove('is-open');
         if (sidebar) sidebar.classList.remove('is-open');
+        closeDropdowns();
       }
       // Ctrl/Cmd-K focuses the topbar search.
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
