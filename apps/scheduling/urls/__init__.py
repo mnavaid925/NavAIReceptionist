@@ -12,8 +12,20 @@ against everything below, not only against its own module.
 from apps.scheduling.urls.ContactDirectory.Contacts import (
     urlpatterns as contact_directory_urlpatterns,
 )
+from apps.scheduling.urls.ServicesResources.Resources import (
+    urlpatterns as resource_urlpatterns,
+)
+from apps.scheduling.urls.ServicesResources.Services import (
+    urlpatterns as service_urlpatterns,
+)
 
 app_name = 'scheduling'
 
 # -- 4.1 Contact Directory ------------------------------------------------- #
 urlpatterns = list(contact_directory_urlpatterns)
+
+# -- 4.2 Services & Resources ---------------------------------------------- #
+# Distinct path prefixes (`contacts/`, `services/`, `resources/`), so nothing
+# here can shadow 4.1. Check that again before adding any `<str:...>` route.
+urlpatterns += service_urlpatterns
+urlpatterns += resource_urlpatterns
