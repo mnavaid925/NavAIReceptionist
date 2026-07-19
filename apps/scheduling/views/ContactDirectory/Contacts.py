@@ -88,8 +88,8 @@ def contact_detail_view(request, pk):
     return render(request, 'scheduling/directory/contact/detail.html', {  # noqa: F405
         'obj': obj,
         'also_on_this_number': _also_on_this_number(obj),
-        'appointments': _appointments_for(obj),
-        'call_sessions': _call_sessions_for(obj),
+        'appointments': _appointments_for(obj, request),
+        'call_sessions': _call_sessions_for(obj, request),
     })
 
 
@@ -112,12 +112,31 @@ def _also_on_this_number(contact):
     )
 
 
-def _appointments_for(contact):
-    """This contact's bookings, or None while sub-module 4.3 is unbuilt.
+def _visible_location_ids(request):
+    """The locations the VIEWING user may see records from.
+
+    The contact row itself is business-wide, but the things hanging off it are
+    not: `Appointment` and `CallSession` are both location-scoped. Scoping those
+    panels by tenant alone would let a receptionist assigned only to Downtown
+    read Uptown's booking times and call history off any contact's detail page —
+    a cross-location disclosure, and one that would have switched itself on
+    silently the moment 4.3 and Module 5 landed.
+
+    `assigned_locations()` IS the authorization boundary the location switcher
+    validates against, so it is the right source here too — never a location id
+    from a form field, a URL kwarg or a query string.
+    """
+    return request.user.assigned_locations().values_list('pk', flat=True)
+
+
+def _appointments_for(contact, request):
+    """This contact's bookings at locations this user may see, or None while 4.3
+    is unbuilt.
 
     Import-guarded rather than assumed: `Appointment` does not exist yet, and a
     hard import would make the whole contact directory un-importable until it
-    does. When 4.3 lands this starts returning real rows with no edit here.
+    does. When 4.3 lands this starts returning real rows with no edit here —
+    which is exactly why the location filter has to be correct NOW.
     """
     try:
         from apps.scheduling.models import Appointment
@@ -125,7 +144,9 @@ def _appointments_for(contact):
         return None
     return (
         Appointment.objects.filter(
-            tenant_id=contact.tenant_id, contact=contact
+            tenant_id=contact.tenant_id,
+            contact=contact,
+            location_id__in=_visible_location_ids(request),
         )
         .select_related('location', 'service')
         # `start_at`, singular — the ERD name (NavAIReceptionist-ERD.md, the
@@ -136,10 +157,13 @@ def _appointments_for(contact):
     )
 
 
-def _call_sessions_for(contact):
-    """This contact's calls, or None while Module 5 is unbuilt.
+def _call_sessions_for(contact, request):
+    """This contact's calls at locations this user may see, or None while Module
+    5 is unbuilt.
 
-    Same import guard, for the same reason — `apps.calls` is a later module.
+    Same import guard and same location scoping, for the same reasons — a call
+    session carries a transcript, so leaking one across locations leaks caller
+    PII, not just a timestamp.
     """
     try:
         from apps.calls.models import CallSession
@@ -147,7 +171,9 @@ def _call_sessions_for(contact):
         return None
     return (
         CallSession.objects.filter(
-            tenant_id=contact.tenant_id, contact=contact
+            tenant_id=contact.tenant_id,
+            contact=contact,
+            location_id__in=_visible_location_ids(request),
         )
         .select_related('location')
         .order_by('-started_at')[:10]
