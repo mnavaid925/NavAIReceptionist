@@ -10,7 +10,12 @@ Sub-module folders, in build order:
 * `ContactDirectory/`   — 4.1  contact CRUD
 * `ServicesResources/`  — 4.2  service CRUD, resource CRUD
 * `Bookings/`           — 4.3  appointment CRUD + slots/book/reschedule/cancel
+* `CalendarViews/`      — 4.4  day and week grids (a VIEW sub-module: no models)
 """
+from apps.scheduling.views.CalendarViews.Calendar import (
+    calendar_day_view,
+    calendar_week_view,
+)
 from apps.scheduling.views.Bookings.Appointments import (
     appointment_book_view,
     appointment_cancel_view,
@@ -71,4 +76,6 @@ __all__ = [
     'appointment_book_view',
     'appointment_reschedule_view',
     'appointment_cancel_view',
+    'calendar_day_view',
+    'calendar_week_view',
 ]
