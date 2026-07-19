@@ -878,7 +878,12 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--brand-600); wi
 
 .calendar-event.scheduled { border-color: var(--info-bd);  border-inline-start-color: var(--info-fg);  background: var(--info-bg);  color: var(--info-fg); }
 .calendar-event.confirmed { border-color: var(--green-bd); border-inline-start-color: var(--green-fg); background: var(--green-bg); color: var(--green-fg); }
-.calendar-event.completed { border-color: var(--green-bd); border-inline-start-color: var(--green-fg); background: var(--green-bg); color: var(--green-fg); }
+/* `completed` is deliberately MUTED, not green like `confirmed`.
+   The two were byte-identical, which made the only two statuses a live grid
+   normally shows indistinguishable — and colour was their sole carrier, since
+   the block's text is the contact's name. A finished appointment is history;
+   draining it lets the eye find what is still to come. */
+.calendar-event.completed { border-color: var(--border);    border-inline-start-color: var(--muted-fg);  background: var(--surface-alt); color: var(--muted-fg); }
 .calendar-event.cancelled { border-color: var(--red-bd);   border-inline-start-color: var(--red-fg);   background: var(--red-bg);   color: var(--red-fg); }
 .calendar-event.no_show   { border-color: var(--amber-bd); border-inline-start-color: var(--amber-fg); background: var(--amber-bg); color: var(--amber-fg); }
 
