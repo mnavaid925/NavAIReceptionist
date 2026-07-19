@@ -2,7 +2,7 @@
 
 NavAIReceptionist is a multi-tenant AI voice receptionist. A business signs in, adds its **locations**, and configures a **Twilio number and an AI voice agent per location**. The agent answers inbound calls, books appointments into the location's calendar, transfers the caller to a human when asked, and writes a detailed call log.
 
-**Stack.** All-Django: Django 5.1 + Channels/ASGI for the realtime Twilio media-stream websocket, Tailwind + HTMX + Lucide for the UI, MySQL for storage, `AUTH_USER_MODEL = accounts.User`. There is no separate microservice. Each module is a Django app under `apps/<slug>`, and anything touching websockets is served over ASGI (`daphne … config.asgi:application`), never `manage.py runserver`.
+**Stack.** All-Django: Django 4.2 LTS + Channels/ASGI for the realtime Twilio media-stream websocket, Tailwind + HTMX + Lucide for the UI, MySQL for storage, `AUTH_USER_MODEL = accounts.User`. There is no separate microservice. Each module is a Django app under `apps/<slug>`, and anything touching websockets is served over ASGI (`daphne … config.asgi:application`), never `manage.py runserver`.
 
 **Multi-tenant means multi-location.** A tenant is the business; a `Location` is a site. Twilio credentials, the inbound number, the agent prompt, resources, appointments and call logs are all **per location**. Every queryset carries `tenant=request.tenant`, and location-scoped models additionally carry `location=request.location` — reaching another location's data is a bug, not a feature.
 
