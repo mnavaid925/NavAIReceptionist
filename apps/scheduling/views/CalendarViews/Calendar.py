@@ -28,9 +28,7 @@ Four things about that arithmetic are easy to get wrong, and all four bite:
    different vertical origins against one set of labels.
 """
 import logging
-from datetime import date, datetime, time as dt_time, timedelta
-
-from django.utils import timezone as dj_timezone
+from datetime import timedelta
 
 from apps.scheduling.availability import BLOCKING_STATUSES, local_day_bounds_utc
 from apps.scheduling.models import Appointment
@@ -438,5 +436,9 @@ def calendar_week_view(request):
         'prev_date': week_start - timedelta(days=7),
         'next_date': week_start + timedelta(days=7),
         'today': today,
-        'total_count': len(appointments),
+        # `live`, NOT `appointments`: the grid paints only blocking statuses, and
+        # unlike the day view the week has no freed-bookings table to account for
+        # the difference — so counting all statuses would caption 12 bookings over
+        # 9 blocks with nothing on the page explaining the gap.
+        'total_count': len(live),
     })
