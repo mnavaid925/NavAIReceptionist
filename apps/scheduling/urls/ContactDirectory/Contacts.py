@@ -16,4 +16,7 @@ urlpatterns = [
     path('contacts/<int:pk>/', views.contact_detail_view, name='contact_detail'),
     path('contacts/<int:pk>/edit/', views.contact_edit_view, name='contact_edit'),
     path('contacts/<int:pk>/delete/', views.contact_delete_view, name='contact_delete'),
+    # Erasure, not deletion — the path that still works once Appointment.contact
+    # (PROTECT) makes a contact with bookings undeletable.
+    path('contacts/<int:pk>/forget/', views.contact_forget_view, name='contact_forget'),
 ]
