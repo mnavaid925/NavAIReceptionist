@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}{{ obj.display_name }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{{ obj.display_name }}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'accounts:user_list' %}">Users</a></li>
+      <li>{{ obj.display_name }}</li>
+    </ol>
+  </nav>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 space-y-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Account</span>
+        <span class="flex items-center gap-2">
+          {% if obj.status == 'active' %}
+            <span class="badge badge-green">Active</span>
+          {% elif obj.status == 'inactive' %}
+            <span class="badge badge-muted">Inactive</span>
+          {% elif obj.status == 'suspended' %}
+            <span class="badge badge-red">Suspended</span>
+          {% else %}
+            <span class="badge badge-muted">{{ obj.get_status_display }}</span>
+          {% endif %}
+          {% if is_invited %}<span class="badge badge-amber">Invited</span>{% endif %}
+        </span>
+      </div>
+      <div class="card-body">
+        <dl class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <dt class="form-label">Email</dt>
+            <dd class="m-0">{{ obj.email }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Username</dt>
+            <dd class="m-0">{% if obj.username %}{{ obj.username }}{% else %}<span class="text-muted">Not set</span>{% endif %}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Role</dt>
+            <dd class="m-0"><span class="badge badge-slate">{{ obj.get_tier_display }}</span></dd>
+          </div>
+          <div>
+            <dt class="form-label">Bookable provider</dt>
+            <dd class="m-0">
+              {% if obj.is_provider %}
+                <span class="badge badge-info">Yes</span>
+              {% else %}
+                <span class="text-muted">No</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Phone</dt>
+            <dd class="m-0">{% if obj.primary_phone %}{{ obj.primary_phone|phone_e164 }}{% else %}<span class="text-muted">Not set</span>{% endif %}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Signs out after</dt>
+            <dd class="m-0">{{ obj.effective_inactivity_timeout }} minutes idle</dd>
+          </div>
+          <div>
+            <dt class="form-label">Last signed in</dt>
+            <dd class="m-0">
+              {% if obj.last_login %}
+                <time datetime="{{ obj.last_login|date:'c' }}">{{ obj.last_login|date:"j M Y, H:i" }}</time>
+              {% else %}
+                <span class="text-muted">Never</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Added</dt>
+            <dd class="m-0"><time datetime="{{ obj.created_at|date:'c' }}">{{ obj.created_at|date:"j M Y" }}</time></dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Assigned locations</span>
+        <span class="text-muted">{{ assigned_locations|length }}</span>
+      </div>
+      <div class="card-body">
+        {% if assigned_locations %}
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th scope="col">Location</th>
+                  <th scope="col">City</th>
+                  <th scope="col">Timezone</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for location in assigned_locations %}
+                  <tr>
+                    <td>{{ location.name }}</td>
+                    <td>{% if location.city %}{{ location.city }}{% else %}<span class="text-muted">&mdash;</span>{% endif %}</td>
+                    <td>{{ location.timezone }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          {% include "partials/_empty_state.html" with icon="map-pin-off" title="No locations assigned" message="This user cannot reach any location's calendar or call log until they are assigned to one." %}
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="space-y-4">
+    <div class="card">
+      <div class="card-header"><span>Actions</span></div>
+      <div class="card-body grid gap-2">
+
+        <a class="btn btn-outline w-full" href="{% url 'accounts:user_edit' obj.pk %}">
+          <i data-lucide="pencil"></i> Edit user
+        </a>
+
+        {% comment %}
+          Deactivation is hidden for yourself and for an already-inactive user.
+          The view re-checks both conditions plus the last-owner guard — hiding a
+          control is never the enforcement.
+        {% endcomment %}
+        {% if not is_self and obj.status == 'active' %}
+          <form method="post" action="{% url 'accounts:user_delete' obj.pk %}"
+                onclick="return confirm('Deactivate {{ obj.display_name|escapejs }}? They will no longer be able to sign in. Their history is kept.');">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger w-full">
+              <i data-lucide="user-minus"></i> Deactivate
+            </button>
+          </form>
+        {% endif %}
+
+        <a class="btn btn-outline w-full" href="{% url 'accounts:user_list' %}">
+          <i data-lucide="arrow-left"></i> Back to list
+        </a>
+
+      </div>
+    </div>
+
+    {% if is_invited %}
+      <div class="card">
+        <div class="card-header"><span>Pending invitation</span></div>
+        <div class="card-body">
+          <p class="text-muted">
+            This user has been emailed a link to choose their own password and has
+            not signed in yet. If the link expired, they can use
+            &ldquo;Forgot your password?&rdquo; on the sign-in page.
+          </p>
+        </div>
+      </div>
+    {% endif %}
+  </aside>
+
+</div>
+{% endblock %}
