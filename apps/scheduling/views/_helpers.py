@@ -37,8 +37,12 @@ def save_or_report_conflict(form, message):
     try:
         return form.save()
     except IntegrityError:
-        logger.info(
-            'Save lost a uniqueness race form=%s', type(form).__name__
+        # `exception`, not `info`: this catch is deliberately broad, so it can
+        # also swallow a FK or NOT NULL violation caused by a bug elsewhere and
+        # show it to the user as a name clash. Without the traceback in the log,
+        # that misdirection is invisible during triage.
+        logger.exception(
+            'Save failed on an integrity error form=%s', type(form).__name__
         )
         form.add_error(None, message)
         return None
