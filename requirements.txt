@@ -6,7 +6,11 @@
 # (`venv\Scripts\python.exe -m pip freeze`) and pin this file to it.
 
 # --- Framework ---
-Django>=5.1,<6.0
+# Django 4.2 LTS, pinned deliberately rather than 5.x: Django 5.1+ requires
+# MariaDB 10.5 or later, and the XAMPP install this project develops against ships
+# MariaDB 10.4.14. 4.2 LTS supports MariaDB 10.4, is supported until April 2026,
+# and runs Channels 4.x unchanged. Revisit when the database server is upgraded.
+Django>=4.2,<5.0
 
 # --- Realtime (ASGI / websockets) — required, not optional: the telephony media stream is a websocket ---
 channels>=4.1,<5.0          # Channels consumers + the ProtocolTypeRouter in config/asgi.py
