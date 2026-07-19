@@ -70,6 +70,7 @@ LIVE_LINKS = {
     '2.2': {'Twilio Connection': 'agents:twilio_connection'},
     '2.3': {'Transfer Settings': 'agents:transfer_settings'},
     '2.4': {'Test Call': 'agents:test_call'},
+    '4.1': {'Contacts': 'scheduling:contact_list'},
 }
 
 
