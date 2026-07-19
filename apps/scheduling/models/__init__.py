@@ -7,8 +7,11 @@ package), but every import site in the project fails with an ImportError.
 
 Sub-module folders, in build order:
 
-* `ContactDirectory/`  — 4.1  Contact
+* `ContactDirectory/`   — 4.1  Contact
+* `ServicesResources/`  — 4.2  Service, Resource
 """
 from apps.scheduling.models.ContactDirectory.Contacts import Contact
+from apps.scheduling.models.ServicesResources.Resources import Resource
+from apps.scheduling.models.ServicesResources.Services import Service
 
-__all__ = ['Contact']
+__all__ = ['Contact', 'Service', 'Resource']
