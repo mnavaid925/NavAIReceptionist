@@ -1,0 +1,27 @@
+{% comment %}
+  Module 2's own tab strip. All four sub-modules configure the SAME row for the
+  active location, so they read as one screen with four sections rather than four
+  unrelated pages.
+
+  Defined once and included by every agent page, so the sections cannot drift.
+{% endcomment %}
+<nav class="tabs" aria-label="Agent setup sections">
+  {% url 'agents:agent_setup' as u_setup %}
+  {% url 'agents:twilio_connection' as u_twilio %}
+  {% url 'agents:transfer_settings' as u_transfer %}
+  {% url 'agents:test_call' as u_test %}
+
+  <a class="tab {% if request.path == u_setup or request.path == '/agent/edit/' or request.path == '/agent/preview/' %}active{% endif %}"
+     href="{{ u_setup }}">
+    <i data-lucide="bot"></i> Agent
+  </a>
+  <a class="tab {% if request.path|slice:':14' == '/agent/twilio/' %}active{% endif %}" href="{{ u_twilio }}">
+    <i data-lucide="phone"></i> Twilio
+  </a>
+  <a class="tab {% if request.path|slice:':16' == '/agent/transfer/' %}active{% endif %}" href="{{ u_transfer }}">
+    <i data-lucide="phone-forwarded"></i> Transfer
+  </a>
+  <a class="tab {% if request.path == u_test %}active{% endif %}" href="{{ u_test }}">
+    <i data-lucide="phone-call"></i> Test call
+  </a>
+</nav>
