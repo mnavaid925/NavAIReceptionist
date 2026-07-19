@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}{% if is_edit %}Edit {{ obj.display_name }}{% else %}Add user{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{% if is_edit %}Edit {{ obj.display_name }}{% else %}Add user{% endif %}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'accounts:user_list' %}">Users</a></li>
+      <li>{% if is_edit %}Edit{% else %}Add{% endif %}</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  One template serves create and edit; the view passes the bound-or-empty form
+  plus `is_edit`. There is no password field: a new user is emailed a link and
+  chooses their own, so an admin never has to relay a password out of band.
+
+  `tenant` is never rendered — TenantModelForm pops it and stamps it from
+  request.tenant in save(), so it cannot be pointed at another business.
+{% endcomment %}
+<form method="post" novalidate>
+  {% csrf_token %}
+
+  <div class="card">
+    <div class="card-body grid gap-4 sm:grid-cols-2">
+
+      {% if form.non_field_errors %}
+        <div class="alert alert-red sm:col-span-2" role="alert">
+          <span>{{ form.non_field_errors|join:" " }}</span>
+        </div>
+      {% endif %}
+
+      {% for field in form %}
+        <div class="form-group{% if field.field.widget.input_type == 'textarea' %} sm:col-span-2{% endif %}">
+          <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+          {% if field.help_text %}
+            <span class="text-muted text-sm">{{ field.help_text }}</span>
+          {% endif %}
+          {% if field.errors %}
+            <span class="form-error">{{ field.errors|join:" " }}</span>
+          {% endif %}
+        </div>
+      {% endfor %}
+
+    </div>
+
+    <div class="card-header">
+      {% if is_edit %}
+        <a class="btn btn-outline" href="{% url 'accounts:user_detail' obj.pk %}">Cancel</a>
+      {% else %}
+        <a class="btn btn-outline" href="{% url 'accounts:user_list' %}">Cancel</a>
+      {% endif %}
+      <button type="submit" class="btn btn-primary">
+        <i data-lucide="check"></i>
+        {% if is_edit %}Save changes{% else %}Add user and send invitation{% endif %}
+      </button>
+    </div>
+  </div>
+
+</form>
+{% endblock %}
