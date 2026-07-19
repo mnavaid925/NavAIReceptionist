@@ -1,0 +1,81 @@
+{% comment %}
+  Filter bar for the bookings list.
+
+  `status` is a string choice, compared with `==`. The provider/service/resource
+  options are pks, so they compare with |stringformat:"d" — never |slugify.
+  Every one of those querysets is passed from the view and re-authorised there
+  before it filters, so a foreign pk degrades to no filter rather than leaking.
+
+  The date inputs are LOCAL calendar days at this location. The view converts
+  each to a half-open UTC range rather than using __date, which would convert in
+  the wrong timezone and, on MySQL, return nothing at all.
+{% endcomment %}
+<form class="card card-body flex flex-wrap items-end gap-3" method="get">
+
+  <div class="form-group grow">
+    <label class="form-label" for="f-q">Search</label>
+    <input class="form-input" type="search" id="f-q" name="q"
+           placeholder="Contact name, phone or reason"
+           value="{{ request.GET.q|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-from">From</label>
+    <input class="form-input" type="date" id="f-from" name="from"
+           value="{{ request.GET.from|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-to">To</label>
+    <input class="form-input" type="date" id="f-to" name="to"
+           value="{{ request.GET.to|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-status">Status</label>
+    <select class="form-select" id="f-status" name="status">
+      <option value="">All statuses</option>
+      {% for value, label in status_choices %}
+        <option value="{{ value }}" {% if request.GET.status == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-provider">Provider</label>
+    <select class="form-select" id="f-provider" name="provider">
+      <option value="">Anyone</option>
+      {% for p in providers %}
+        <option value="{{ p.pk }}" {% if request.GET.provider == p.pk|stringformat:"d" %}selected{% endif %}>{{ p.display_name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-service">Service</label>
+    <select class="form-select" id="f-service" name="service">
+      <option value="">Any service</option>
+      {% for s in services %}
+        <option value="{{ s.pk }}" {% if request.GET.service == s.pk|stringformat:"d" %}selected{% endif %}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-resource">Resource</label>
+    <select class="form-select" id="f-resource" name="resource">
+      <option value="">Any resource</option>
+      {% for r in resources %}
+        <option value="{{ r.pk }}" {% if request.GET.resource == r.pk|stringformat:"d" %}selected{% endif %}>{{ r.display_label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <span class="flex gap-2">
+      <button type="submit" class="btn btn-primary"><i data-lucide="filter"></i> Filter</button>
+      <a class="btn btn-outline" href="{{ request.path }}">Reset</a>
+    </span>
+  </div>
+
+</form>
