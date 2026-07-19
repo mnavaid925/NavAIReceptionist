@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+
+{% block title %}{{ provider.display_name }} at {{ location.name }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Working hours</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'tenants:provider_hours_report' %}">Working hours</a></li>
+      <li>{{ provider.display_name }} &middot; {{ location.name }}</li>
+    </ol>
+  </nav>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {{ formset.management_form }}
+
+      <div class="card">
+        <div class="card-header">
+          <span>{{ provider.display_name }} at {{ location.name }}</span>
+          {% if not is_configured %}
+            <span class="badge badge-amber">Not configured</span>
+          {% elif not has_intervals %}
+            <span class="badge badge-muted">Not working here</span>
+          {% else %}
+            <span class="badge badge-green">Configured</span>
+          {% endif %}
+        </div>
+
+        <div class="card-body grid gap-4">
+
+          <p class="text-muted">
+            Times are wall-clock at <strong>{{ location.name }}</strong>
+            ({{ location.timezone }}), currently
+            <time>{{ location.local_now|date:"H:i" }}</time> there. Add a second
+            row for a split shift.
+          </p>
+
+          {% for form in formset %}
+            <div class="card" style="background: var(--surface-alt);">
+              <div class="card-body grid gap-3 sm:grid-cols-3">
+                <div class="form-group">
+                  <label class="form-label" for="{{ form.start_time.id_for_label }}">From</label>
+                  {{ form.start_time }}
+                  {% if form.start_time.errors %}
+                    <span class="form-error">{{ form.start_time.errors|join:" " }}</span>
+                  {% endif %}
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="{{ form.end_time.id_for_label }}">To</label>
+                  {{ form.end_time }}
+                  {% if form.end_time.errors %}
+                    <span class="form-error">{{ form.end_time.errors|join:" " }}</span>
+                  {% endif %}
+                </div>
+                <div class="form-group sm:col-span-3">
+                  <span class="form-label">Days</span>
+                  <span class="flex flex-wrap gap-3">
+                    {% for checkbox in form.days %}
+                      <label class="flex items-center gap-1.5 text-sm">
+                        {{ checkbox.tag }} {{ checkbox.choice_label }}
+                      </label>
+                    {% endfor %}
+                  </span>
+                  {% if form.days.errors %}
+                    <span class="form-error">{{ form.days.errors|join:" " }}</span>
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+
+          <p class="text-muted text-sm">
+            Leave a row completely blank to ignore it. Rows must not overlap on a
+            shared day.
+          </p>
+
+        </div>
+
+        <div class="card-header">
+          <a class="btn btn-outline" href="{% url 'tenants:provider_hours_report' %}">Cancel</a>
+          <span class="flex gap-2">
+            <button type="submit" name="action" value="clear" class="btn btn-outline"
+                    onclick="return confirm('Mark {{ provider.display_name|escapejs }} as not working at {{ location.name|escapejs }}? Existing hours here will be cleared.');">
+              <i data-lucide="x"></i> Not working here
+            </button>
+            <button type="submit" class="btn btn-primary">
+              <i data-lucide="check"></i> Save hours
+            </button>
+          </span>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside class="space-y-4">
+
+    <div class="card">
+      <div class="card-header"><span>Current week</span></div>
+      <div class="card-body">
+        <dl class="grid gap-2">
+          {% for key, label, intervals in summary %}
+            <div class="flex items-center justify-between gap-3">
+              <dt class="form-label" style="margin: 0;">{{ label }}</dt>
+              <dd class="m-0 text-sm">
+                {% if intervals %}
+                  {% for interval in intervals %}
+                    <span class="block">{{ interval.start_time|time:"H:i" }}&ndash;{{ interval.end_time|time:"H:i" }}</span>
+                  {% endfor %}
+                {% else %}
+                  <span class="text-muted">Closed</span>
+                {% endif %}
+              </dd>
+            </div>
+          {% endfor %}
+        </dl>
+      </div>
+    </div>
+
+    {% if other_locations %}
+      <div class="card">
+        <div class="card-header"><span>Their other sites</span></div>
+        <div class="card-body grid gap-2">
+          <p class="text-muted text-sm">
+            Hours are set per location, because the same person can work different
+            days at different sites.
+          </p>
+          {% for other in other_locations %}
+            <a class="btn btn-outline w-full" href="{% url 'tenants:provider_hours' provider.pk other.pk %}">
+              <i data-lucide="clock"></i> {{ other.name }}
+            </a>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+
+    <div class="card">
+      <div class="card-header"><span>How these are used</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          Availability search will never offer a caller a slot outside these
+          windows. A provider with no configured hours is treated as
+          <strong>unavailable</strong>, not as available all day.
+        </p>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
