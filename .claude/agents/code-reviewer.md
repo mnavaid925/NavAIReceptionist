@@ -14,7 +14,7 @@ direct about what must change.
 
 # Project context (what you are reviewing against)
 
-- **Stack:** Django 5.1, **function-based views** (no CBVs), **Django Channels/ASGI consumers** for the Twilio
+- **Stack:** Django 4.2 LTS, **function-based views** (no CBVs), **Django Channels/ASGI consumers** for the Twilio
   media stream (all-Django, one codebase, no microservice), Tailwind + HTMX server-rendered templates,
   MySQL/MariaDB via PyMySQL (database `navai_receptionist`). `AUTH_USER_MODEL = 'accounts.User'`.
 - **Product — a small application, seven capabilities only:** login, change password/email, calendar, bookings,
