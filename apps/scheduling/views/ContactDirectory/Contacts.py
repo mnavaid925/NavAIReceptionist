@@ -128,7 +128,11 @@ def _appointments_for(contact):
             tenant_id=contact.tenant_id, contact=contact
         )
         .select_related('location', 'service')
-        .order_by('-starts_at')[:10]
+        # `start_at`, singular — the ERD name (NavAIReceptionist-ERD.md, the
+        # Appointment table). `starts_at` would raise FieldError at request time
+        # the moment 4.3 lands, because the import guard above only covers the
+        # import, not the field reference.
+        .order_by('-start_at')[:10]
     )
 
 
