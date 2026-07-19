@@ -116,6 +116,7 @@
       }
       try { window.localStorage.removeItem(STORAGE_PREFIX + 'direction'); } catch (e) {}
       applyDirection('ltr', false);
+      syncAllControls();
     }
   };
 
@@ -132,6 +133,33 @@
   function refreshIcons() {
     if (window.lucide && typeof window.lucide.createIcons === 'function') {
       window.lucide.createIcons();
+    }
+  }
+
+  /* Re-assert every control's pressed state against the live attributes.
+     REQUIRED on DOMContentLoaded: the synchronous pass above runs inside <head>,
+     before the settings drawer exists in the DOM, so its querySelectorAll matches
+     nothing and no option would ever render as selected until it was clicked. */
+  function syncAllControls() {
+    for (var key in OPTIONS) {
+      if (Object.prototype.hasOwnProperty.call(OPTIONS, key)) {
+        var value = root.getAttribute('data-' + key) || OPTIONS[key].fallback;
+        var controls = document.querySelectorAll('[data-option="' + key + '"]');
+        for (var i = 0; i < controls.length; i++) {
+          controls[i].setAttribute(
+            'aria-pressed',
+            controls[i].getAttribute('data-value') === value ? 'true' : 'false'
+          );
+        }
+      }
+    }
+    var dir = root.getAttribute('dir') || 'ltr';
+    var dirControls = document.querySelectorAll('[data-option="direction"]');
+    for (var j = 0; j < dirControls.length; j++) {
+      dirControls[j].setAttribute(
+        'aria-pressed',
+        dirControls[j].getAttribute('data-value') === dir ? 'true' : 'false'
+      );
     }
   }
 
@@ -252,6 +280,8 @@
     });
 
     /* Icons swapped in by HTMX are inert <i> tags until Lucide runs again. */
+    syncAllControls();
+
     document.body.addEventListener('htmx:afterSwap', refreshIcons);
     refreshIcons();
 
