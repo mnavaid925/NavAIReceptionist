@@ -1,0 +1,38 @@
+{% comment %}
+  Filter bar for the contact directory.
+
+  `source` is compared with `==` against the raw GET value. The view validates it
+  against Contact.SOURCE_CHOICES, so a junk parameter degrades to no filter
+  rather than raising.
+
+  There is no location filter here, and that is not an omission: contacts are
+  business-wide, so filtering them by site would hide a caller from the very
+  location they are ringing about.
+{% endcomment %}
+<form class="card card-body flex flex-wrap items-end gap-3" method="get">
+
+  <div class="form-group grow">
+    <label class="form-label" for="f-q">Search</label>
+    <input class="form-input" type="search" id="f-q" name="q"
+           placeholder="Name, phone or email"
+           value="{{ request.GET.q|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-source">Source</label>
+    <select class="form-select" id="f-source" name="source">
+      <option value="">All sources</option>
+      {% for value, label in source_choices %}
+        <option value="{{ value }}" {% if request.GET.source == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <span class="flex gap-2">
+      <button type="submit" class="btn btn-primary"><i data-lucide="filter"></i> Filter</button>
+      <a class="btn btn-outline" href="{{ request.path }}">Reset</a>
+    </span>
+  </div>
+
+</form>
