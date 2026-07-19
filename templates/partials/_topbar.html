@@ -24,24 +24,33 @@
 
   <div class="flex items-center gap-2 ms-auto">
 
-    {% if active_location %}
-      {% if nav_urls.switch_location and user_locations %}
+    {% comment %}
+      Gated on user_locations, NOT on active_location: a user with two or more
+      assignments and none active yet is exactly who most needs the switcher, and
+      the old active_location guard hid it from them.
+    {% endcomment %}
+    {% if user_locations %}
+      {% if nav_urls.switch_location %}
         <form class="location-switcher" method="post" action="{{ nav_urls.switch_location }}">
           {% csrf_token %}
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
           <i data-lucide="map-pin" aria-hidden="true"></i>
           <label class="sr-only" for="active-location">Active location</label>
           <select class="form-select" id="active-location" name="location"
                   onchange="this.form.submit()">
+            {% if not active_location %}
+              <option value="" selected>Choose a location&hellip;</option>
+            {% endif %}
             {% for location in user_locations %}
               <option value="{{ location.pk }}"
-                {% if location.pk == active_location.pk %}selected{% endif %}>
+                {% if active_location and location.pk == active_location.pk %}selected{% endif %}>
                 {{ location.name }}
               </option>
             {% endfor %}
           </select>
           <noscript><button type="submit" class="btn btn-outline">Switch</button></noscript>
         </form>
-      {% else %}
+      {% elif active_location %}
         <span class="location-switcher">
           <i data-lucide="map-pin" aria-hidden="true"></i>
           <span class="text-muted">{{ active_location.name }}</span>
@@ -70,13 +79,17 @@
     </button>
 
     {% if user.is_authenticated %}
-      <div class="flex items-center gap-2">
+      {% if nav_urls.profile %}
+        <a class="flex items-center gap-2" href="{{ nav_urls.profile }}" title="My profile">
+      {% else %}
+        <span class="flex items-center gap-2">
+      {% endif %}
         <span class="avatar-initial" aria-hidden="true">{{ user.initials }}</span>
         <span class="hidden sm:block">
           <span class="block font-semibold leading-tight">{{ user.display_name }}</span>
           <span class="block text-muted text-xs leading-tight">{{ user.get_tier_display }}</span>
         </span>
-      </div>
+      {% if nav_urls.profile %}</a>{% else %}</span>{% endif %}
       {% if nav_urls.logout %}
         <form method="post" action="{{ nav_urls.logout }}">
           {% csrf_token %}
