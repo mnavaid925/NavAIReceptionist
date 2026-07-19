@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Twilio connection{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Twilio connection</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Agent Setup &amp; Telephony</li>
+        <li>Twilio</li>
+      </ol>
+    </nav>
+    <form method="post" action="{% url 'agents:twilio_check' %}">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-outline">
+        <i data-lucide="plug-zap"></i> Check connection
+      </button>
+    </form>
+    <a class="btn btn-primary" href="{% url 'agents:twilio_connection_edit' %}">
+      <i data-lucide="pencil"></i> Edit
+    </a>
+  </div>
+</div>
+
+{% include "agents/_tabs.html" %}
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 space-y-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Credentials for {{ active_location.name }}</span>
+        {% if setting.twilio_connected %}
+          <span class="badge badge-green">Connected</span>
+        {% else %}
+          <span class="badge badge-amber">Incomplete</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <dl class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <dt class="form-label">Inbound number</dt>
+            <dd class="m-0">
+              {% if setting.inbound_phone_number %}
+                {{ setting.inbound_phone_number|phone_e164 }}
+              {% else %}
+                <span class="text-muted">Not set</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Account SID</dt>
+            <dd class="m-0">
+              {% if setting.twilio_account_sid %}
+                <code>{{ setting.twilio_account_sid }}</code>
+              {% else %}
+                <span class="text-muted">Not set</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            {% comment %}
+              The token is NEVER rendered. The view supplies a boolean and a
+              masked tail; the value itself never reaches a template context.
+            {% endcomment %}
+            <dt class="form-label">Auth token</dt>
+            <dd class="m-0">
+              {% if setting.has_auth_token %}
+                <span class="badge badge-green">Stored</span>
+                <span class="text-muted">{{ setting.masked_auth_token }}</span>
+              {% else %}
+                <span class="badge badge-muted">Not set</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Provider mode</dt>
+            <dd class="m-0">
+              {% if provider_mode == 'live' %}
+                <span class="badge badge-red">Live</span>
+              {% else %}
+                <span class="badge badge-info">{{ provider_mode|title }}</span>
+              {% endif %}
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Paste these into Twilio</span></div>
+      <div class="card-body">
+        {% if urls %}
+          <p class="text-muted">
+            On this number in the Twilio console, set the voice webhook and the
+            media-stream URL to these exact values.
+          </p>
+          <dl class="grid gap-3" style="margin-block-start: 12px;">
+            <div>
+              <dt class="form-label">Voice webhook (HTTP POST)</dt>
+              <dd class="m-0"><code>{{ urls.voice }}</code></dd>
+            </div>
+            <div>
+              <dt class="form-label">Status callback</dt>
+              <dd class="m-0"><code>{{ urls.status }}</code></dd>
+            </div>
+            <div>
+              <dt class="form-label">Media stream</dt>
+              <dd class="m-0"><code>{{ urls.stream }}</code></dd>
+            </div>
+          </dl>
+          <p class="text-muted text-sm" style="margin-block-start: 12px;">
+            The URL must match exactly. Twilio signs each request over the full
+            callback URL, so a trailing slash, http where Twilio sent https, or a
+            stale tunnel host makes every webhook fail signature verification
+            with a 403 and nothing obviously wrong in the payload.
+          </p>
+        {% else %}
+          <p class="text-muted">
+            <code>TWILIO_WEBHOOK_BASE_URL</code> is not set in the environment, so
+            the URLs cannot be shown. In development this is your ngrok HTTPS URL.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="space-y-4">
+    <div class="card">
+      <div class="card-header"><span>About these credentials</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          Credentials are per location, because each site may run its own Twilio
+          subaccount. The auth token is encrypted at rest and is never shown again
+          once saved &mdash; to change it, paste a new one.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>The inbound number</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          One number, one location, across the whole platform. An inbound call
+          carries no session, so the number dialled is what tells the runtime
+          which business and which site is being called.
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
