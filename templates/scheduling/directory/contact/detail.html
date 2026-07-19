@@ -24,7 +24,9 @@
     <div class="card">
       <div class="card-header">
         <span>Details</span>
-        {% if obj.source == 'ai_phone' %}
+        {% if obj.is_anonymized %}
+          <span class="badge badge-slate">Erased</span>
+        {% elif obj.source == 'ai_phone' %}
           <span class="badge badge-info">AI phone call</span>
         {% elif obj.source == 'manual' %}
           <span class="badge badge-slate">Added manually</span>
@@ -35,6 +37,17 @@
         {% endif %}
       </div>
       <div class="card-body grid gap-4 sm:grid-cols-2">
+
+        {% if obj.is_anonymized %}
+          <div class="alert alert-info sm:col-span-2" role="status">
+            <span>
+              This contact's personal details were erased on
+              <time datetime="{{ obj.anonymized_at|date:'c' }}">{{ obj.anonymized_at|date:"j M Y" }}</time>
+              at their request. The record is kept so past appointments still add
+              up, but it no longer identifies anyone and cannot be edited.
+            </span>
+          </div>
+        {% endif %}
 
         <div>
           <span class="form-label">Name</span>
@@ -207,10 +220,26 @@
     <div class="card">
       <div class="card-header"><span>Actions</span></div>
       <div class="card-body grid gap-2">
-        <a class="btn btn-primary" href="{% url 'scheduling:contact_edit' obj.pk %}">
-          <i data-lucide="pencil"></i> Edit contact
-        </a>
+        {% comment %}
+          An erased contact has no editable content left, and re-populating it
+          would undo the erasure — so Edit and Erase both disappear once
+          anonymized_at is set. The view re-checks both.
+        {% endcomment %}
+        {% if not obj.is_anonymized %}
+          <a class="btn btn-primary" href="{% url 'scheduling:contact_edit' obj.pk %}">
+            <i data-lucide="pencil"></i> Edit contact
+          </a>
+        {% endif %}
         {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+          {% if not obj.is_anonymized %}
+            <form method="post" action="{% url 'scheduling:contact_forget' obj.pk %}"
+                  onclick="return confirm('Erase the personal details for {{ obj.display_name|escapejs }}? Name, phone, email, date of birth and notes are cleared permanently. Past appointments stay on the calendar. This cannot be undone.');">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-outline">
+                <i data-lucide="user-round-x"></i> Erase personal details
+              </button>
+            </form>
+          {% endif %}
           <form method="post" action="{% url 'scheduling:contact_delete' obj.pk %}"
                 onclick="return confirm('Delete {{ obj.display_name|escapejs }}? This cannot be undone.');">
             {% csrf_token %}
