@@ -59,8 +59,24 @@ urlpatterns = [
          name='password_reset_request'),
     path('password-reset/<uidb64>/<token>/', views.password_reset_confirm_view,
          name='password_reset_confirm'),
+
+    # -- 0.2 Credential Management ---------------------------------------- #
+    path('account/password/', views.change_password_view, name='change_password'),
+    path('account/email/', views.change_email_request_view, name='change_email'),
+    # The signed token is base64-ish with colons; <str:> would stop at a slash,
+    # and django.core.signing never emits one, so <str:> is the right converter.
+    path('account/email/confirm/<str:token>/', views.email_change_confirm_view,
+         name='email_change_confirm'),
+
+    # -- 0.3 User Profile & Directory ------------------------------------- #
+    path('profile/', views.profile_view, name='profile'),
+
+    # -- 0.4 Active Location Switcher ------------------------------------- #
+    path('locations/switch/', views.switch_location_view, name='switch_location'),
 ]
 
-# Later sub-modules append their crud() blocks here:
-#   urlpatterns += crud('users', 'user')            # 0.3 User Directory
-# Keep them AFTER the literals above.
+# crud() blocks come AFTER the literals above. Django resolves first-match-wins,
+# so a `<int:pk>` route emitted ahead of a literal would swallow it — and crud()
+# emits its own literals (`users/create/`) before its member routes for the same
+# reason.
+urlpatterns += crud('users', 'user')            # 0.3 User Directory
