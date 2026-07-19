@@ -612,3 +612,272 @@ Steps 4-11: `code-reviewer` -> `explorer` -> `frontend-reviewer` -> `performance
 `security-reviewer` -> `test-writer` (the pytest suite under `apps/accounts/tests/` — `temp/smoke_0_1.py`
 is a throwaway and is gitignored, so it is NOT the deliverable test suite). Step 12 is a deliberate no-op:
 CLAUDE.md carves Module 0 out of the Per-Module Skill rule.
+
+---
+
+# Sub-module 4.1 — Contact Directory (Module 4: Calendar & Bookings, `scheduling`) — plan from research-scheduling-4.1.md (2026-07-19)
+
+## Shape: CRUD (brand-new app — full CRUD ships this pass, no reduction)
+
+`apps/scheduling/` does not exist yet (confirmed by directory glob and by the research agent's own repo-state
+check) — this is Module 4's first sub-module and a brand-new-app run: the full app skeleton, `INSTALLED_APPS`
+and root URL wiring are in scope alongside the one model. The sub-module genuinely introduces the tenant's
+contact identity table, so it is CRUD-shaped by the "does new tenant-scoped data get introduced" test — it is
+not a view sub-module, because `scheduling.Contact` does not exist anywhere yet for a view sub-module to merely
+read.
+
+## Models (from research — 1, within the 1–3 ceiling)
+
+- [ ] **`scheduling.Contact`** — tenant-scoped **only**, deliberately **NOT** location-scoped (Business-Wide
+  Identity bullet, `NavAIReceptionist.md` §4.1, confirmed against Square's Customer Directory / Mindbody's
+  cross-location "All Contacts" smart list in research). **Do not add a `location` FK, not even an optional
+  "primary location" convenience field — flag any reviewer suggestion to add one.** A caller belongs to the
+  business and may book at any of its sites; per-visit location lives on `Appointment.location` (4.3), not here.
+  Inherits `TenantOwned` (not `TenantLocationOwned`), mirroring `tenants.Location(TenantOwned)` — the one other
+  model in the project that is tenant-only.
+  - `tenant` — FK `tenants.Tenant` (verified: `apps/tenants/models/Tenant.py`), inherited from `TenantOwned`.
+  - `first_name`, `last_name` — `CharField(max_length=128, blank=True)` — **Blank-Tolerant Identity** / Core
+    intake fields: an unknown or withheld-caller-ID contact has neither.
+  - `phone_e164` — `CharField(max_length=16, db_index=True, blank=True)`, **not unique** — **Phone-Keyed
+    Contacts / ANI auto-match-or-create** and **Shared-line Disambiguation** (a household or shared office line
+    legitimately maps to more than one contact — a `UniqueConstraint` here would break that case on purpose
+    left open). Normalized in `clean()`/`save()` mirroring `AgentSetting.inbound_phone_number`'s pattern
+    (`apps/agents/models/AgentConfiguration/AgentSettings.py`): strip whitespace on both; the form's
+    `clean_phone_e164()` additionally rejects a non-blank value that doesn't match `^\+[1-9]\d{6,14}$`, so a
+    malformed number becomes a field error the user can fix, not silently-uncalled-back data.
+  - `email` — `EmailField(blank=True)` — Core intake fields.
+  - `date_of_birth` — `DateField(null=True, blank=True)` — Core intake fields.
+  - `notes` — `TextField(blank=True)` — Core intake fields; also carries the "common, not required" DNC/consent
+    note per the research's Compliance section — no dedicated boolean field this pass.
+  - `source` — `CharField(max_length=16, choices=SOURCE_CHOICES, default=SOURCE_MANUAL)` — **Filter by Source
+    Channel**. Declare as class constants exactly like `AgentSetting.VOICE_PROVIDER_CHOICES`:
+    `SOURCE_AI_PHONE = 'ai_phone'`, `SOURCE_MANUAL = 'manual'`, `SOURCE_WEB = 'web'`,
+    `SOURCE_CHOICES = [(SOURCE_AI_PHONE, 'AI Phone'), (SOURCE_MANUAL, 'Manual'), (SOURCE_WEB, 'Web')]`.
+    **Excluded from `ContactForm.Meta.fields`** — system-stamped, never user-chosen: a staff-created row gets
+    the model's own `default='manual'` for free, because a `ModelForm` never touches a field absent from
+    `Meta.fields`, on create OR edit. `'ai_phone'` is reserved for the future Module 3.3 `create_contact` tool
+    and `'web'` for a future web widget — neither built yet. Never render a `source` `<select>` — a staff user
+    hand-labelling their own entry as `ai_phone` would corrupt the Filter-by-Source feature's meaning.
+  - `created_at`, `updated_at` — inherited from `TenantOwned`/`TimeStamped` — **Recently-Active / Last-Touch
+    Sort** (buildable now on these two; a call/appointment-aware sort is deferred, see below).
+  - `Meta.indexes`: `(tenant, phone_e164)` and `(tenant, last_name, first_name)`, exactly per
+    `NavAIReceptionist-ERD.md` §3 `scheduling.Contact`. `Meta.ordering = ['last_name', 'first_name']`.
+  - Form excludes: `tenant` (stamped by `TenantModelForm.save()`), `source` (system-stamped, see above),
+    `created_at`/`updated_at` (auto). No `location` field exists to exclude — the callout above is the point.
+
+No second model this pass. A tags table, a dedicated `do_not_contact` boolean/table and a merge-audit table
+were all considered by the research and rejected; Invariant 1 forbids a second identity table outright
+regardless of the researched features.
+
+## Backend (apps/scheduling/{models,forms,views,urls}/ContactDirectory/ — brand-new app, full skeleton)
+
+App skeleton (none of this exists yet):
+- [ ] `apps/scheduling/__init__.py`
+- [ ] `apps/scheduling/apps.py` — `SchedulingConfig(AppConfig)`, `default_auto_field =
+  'django.db.models.BigAutoField'`, `name='apps.scheduling'`, `label='scheduling'`,
+  `verbose_name='Calendar & Bookings'` (mirrors `apps/tenants/apps.py` / `apps/agents/apps.py`)
+- [ ] `apps/scheduling/migrations/__init__.py`
+
+Models:
+- [ ] `apps/scheduling/models/_base.py` — re-exports `apps.accounts.models._base` (`TenantOwned`,
+  `TenantLocationOwned`, `TimeStamped`, etc. via `import *`), mirroring `apps/tenants/models/_base.py` /
+  `apps/agents/models/_base.py`
+- [ ] `apps/scheduling/models/ContactDirectory/__init__.py`
+- [ ] `apps/scheduling/models/ContactDirectory/Contacts.py` — the `Contact` model above, `SOURCE_*` constants
+- [ ] `apps/scheduling/models/__init__.py` — `from apps.scheduling.models.ContactDirectory.Contacts import
+  Contact` + `__all__ = ['Contact']` (the re-export block — its absence is an `ImportError` at runtime)
+
+Forms:
+- [ ] `apps/scheduling/forms/_common.py` — re-exports `apps.accounts.forms._common`
+  (`TenantModelForm`/`TenantLocationModelForm`/`style_widgets`), mirroring `apps/tenants/forms/_common.py`
+- [ ] `apps/scheduling/forms/ContactDirectory/__init__.py`
+- [ ] `apps/scheduling/forms/ContactDirectory/Contacts.py` — `ContactForm(TenantModelForm)` with
+  `Meta.fields = ('first_name', 'last_name', 'phone_e164', 'email', 'date_of_birth', 'notes')` and
+  `clean_phone_e164()`; `ContactImportForm(forms.Form)` with one `csv_file = forms.FileField()`
+- [ ] `apps/scheduling/forms/__init__.py` — re-export `ContactForm`, `ContactImportForm`
+
+Views:
+- [ ] `apps/scheduling/views/_common.py` — re-exports `apps.accounts.views._common` (`paginate`, decorators,
+  shortcuts) + `tier_required`/`safe_redirect_target` from `apps.accounts.views._helpers` + a local
+  `MANAGEMENT_TIERS = ('owner', 'manager')`, mirroring `apps/tenants/views/_common.py` exactly
+- [ ] `apps/scheduling/views/ContactDirectory/__init__.py`
+- [ ] `contact_list_view` — `@login_required` only (routine front-desk work, no tier gate); search `q` across
+  `first_name`/`last_name`/`phone_e164`/`email` via `Q()`; `source` filter against `Contact.SOURCE_CHOICES`
+  (a junk value degrades to no filter, never raises); `?sort=recent` toggles `-updated_at` vs. the default name
+  ordering; `paginate()`; passes `source_choices` to the template context (Filter Implementation Rule 1)
+- [ ] `contact_create_view` — `@login_required`; `ContactForm`; the new row gets `source='manual'` for free
+  from the model default (see Models section — no explicit view code needed for this)
+- [ ] `contact_detail_view` — `@login_required`; the appointment-history panel is **import-guarded**:
+  `try: from apps.scheduling.models import Appointment` / `except ImportError: appointments = None` (the exact
+  pattern `apps/tenants/views/Location.py`'s `_agent_setting_for()` already uses for a not-yet-built sibling),
+  so the panel renders an empty state today and starts showing real rows the moment 4.3 lands with **zero code
+  change at this call site**; also renders the "can book at any of the business's locations" copy (pure UI, no
+  query)
+- [ ] `contact_edit_view` — `@login_required`; same `ContactForm`; `source` is left untouched because it is
+  absent from `Meta.fields`
+- [ ] `contact_delete_view` — `@login_required` + `tier_required(*MANAGEMENT_TIERS)`, `@require_POST`; tries
+  `obj.delete()`; catches `django.db.models.ProtectedError` and redirects to the detail page with a message
+  pointing at "Forget This Contact" instead — **inert today** (no FK anywhere points at `Contact` yet) but
+  written now per the research's explicit GDPR finding, so 4.3's `Appointment.contact`
+  (`on_delete=PROTECT`) needs no retrofit here
+- [ ] `contact_forget_view` — `@login_required` + `tier_required(*MANAGEMENT_TIERS)`, `@require_POST` — the
+  **REQUIRED GDPR/CCPA erasure path**: blanks `first_name`, `email`, `phone_e164`, `date_of_birth`, `notes`,
+  sets `last_name='(Erased)'`; keeps the row (and any future FKs into it) intact; logs the erasure server-side
+  (never into `Contact.notes`, which was just cleared); no new field — `source` is left as-is (it is not PII)
+- [ ] `contact_import_view` — `@login_required` + `tier_required(*MANAGEMENT_TIERS)` (bulk mutation is a
+  privileged write); GET renders `ContactImportForm` with column instructions; POST parses `csv.DictReader`
+  over `first_name,last_name,phone_e164,email,date_of_birth,notes`, caps at **500 rows** per upload (Acuity's
+  cited batch size — a DoS/perf guard on one request), dedupes on `(tenant, phone_e164)` via `get_or_create`
+  when `phone_e164` is present, reports created/skipped-duplicate/error counts back on the same template
+- [ ] `contact_export_view` — `@login_required`; streams a `text/csv` response of the tenant's contacts,
+  **re-applying the same `q`/`source` GET params as the list view** so "export what you're viewing" works; no
+  template
+- [ ] `apps/scheduling/views/__init__.py` — re-export all eight views above (the re-export block)
+
+URLs (package form, matching the `calls`/`CallLogRecording` worked example in CLAUDE.md's Backend Package
+Structure rule 1 — `scheduling` is headed for five entities across 4.1–4.5, so the package shape is adopted
+from this first sub-module rather than retrofitted later, unlike `agents`' one-model flat `urls.py`):
+- [ ] `apps/scheduling/urls/__init__.py` — `app_name = 'scheduling'`; concatenates
+  `ContactDirectory.Contacts.urlpatterns`
+- [ ] `apps/scheduling/urls/ContactDirectory/__init__.py`
+- [ ] `apps/scheduling/urls/ContactDirectory/Contacts.py` — literal routes before the `<int:pk>` ones:
+  `contacts/` → `contact_list`, `contacts/create/` → `contact_create`, `contacts/import/` → `contact_import`,
+  `contacts/export/` → `contact_export`, `contacts/<int:pk>/` → `contact_detail`,
+  `contacts/<int:pk>/edit/` → `contact_edit`, `contacts/<int:pk>/delete/` → `contact_delete`,
+  `contacts/<int:pk>/forget/` → `contact_forget`
+
+- [ ] `apps/scheduling/admin.py` — `ContactAdmin`: `list_display=('__str__', 'tenant', 'phone_e164', 'email',
+  'source', 'created_at')`, `list_filter=('source', 'tenant')`,
+  `search_fields=('first_name', 'last_name', 'phone_e164', 'email')`, `list_select_related=('tenant',)` — **no
+  location filter**, correctly, since the model carries no `location` FK
+- [ ] `makemigrations scheduling` → `0001_initial.py` (this sub-module actually creates a table — expect a real
+  migration, not "No changes detected")
+- [ ] `apps/scheduling/management/__init__.py`
+- [ ] `apps/scheduling/management/commands/__init__.py`
+- [ ] `apps/scheduling/management/commands/seed_scheduling.py` — idempotent; calls `seed_tenants` first when
+  `Tenant.objects.filter(slug__in=('acme', 'globex')).exists()` is False (mirrors `seed_accounts`'s own
+  dependency check); seeds ~8–10 `Contact` rows per tenant against the two demo tenants
+  `apps/tenants/management/commands/seed_tenants.py` creates (`acme`, `globex`), with a mix of `source` values,
+  at least one blank-name/withheld-caller-ID row per tenant to exercise Blank-Tolerant Identity, and at least
+  one duplicate phone number within a tenant to exercise Shared-line Disambiguation; dedupes via
+  `get_or_create(tenant=..., phone_e164=...)`; touches no provider; prints the demo tenant admin accounts
+  (`admin_acme` / `admin_globex`, from `apps/accounts/management/commands/seed_accounts.py`) and reminds to
+  browse Contacts under each
+
+## Realtime & agent surface
+
+No consumer, no `routing.py` entry and no live surface this pass — `scheduling` has no websocket route and
+`config/asgi.py` is untouched. **No LLM tool is implemented in this sub-module.** `identify_contact` and
+`create_contact` belong to sub-module **3.3 Tools & Dispatcher**, which does not exist yet (`apps/runtime/` was
+confirmed absent by the research agent's repo-state check). What 4.1 ships for 3.3 to call later is the
+**lookup shape**, documented here so the interface doesn't drift when 3.3 is planned:
+`Contact.objects.filter(tenant=tenant, phone_e164=e164)` — 0 rows means "create", 1 row means "match", >1 row
+means "candidates" (Shared-line Disambiguation, `data.candidates: [...]`). When 3.3 is built, its
+`identify_contact()` tool takes **zero model-supplied args** (the ANI comes from server-held session state,
+Invariant 3) and its `create_contact(first_name?, last_name?, phone?, email?, date_of_birth?, notes?)` tool
+takes `tenant_id` from server state, never a model argument. Neither tool is implemented here; this section
+exists so 3.3's `todo` plan has a verified contract to build against instead of re-deriving it.
+
+## Prompt / variables
+
+None. This sub-module adds no `agents.AgentSetting.variables` entry — a resolved contact's name reaching the
+prompt as a `{{caller_name}}`-style variable is a Module 3 integration concern, out of scope here.
+
+## Provider adapter
+
+None. This sub-module makes no Twilio/STT/TTS/LLM call and adds nothing to `apps/runtime/providers/` — the
+research's own Compliance section confirms "Provider/rate-limit implications: none directly."
+
+## CallSession.usage cost lines
+
+None. `calls.CallSession` does not exist yet (Module 5), and this sub-module precedes the runtime module
+entirely — it appends nothing to any per-turn usage ledger.
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` — add **one** new entry to `LIVE_LINKS`:
+  `'4.1': {'Contacts': 'scheduling:contact_list'}` (Module 4's icon, `calendar-days`, already exists in
+  `MODULE_ICONS` — no change needed there)
+- [ ] `config/settings.py` — `INSTALLED_APPS`: add `'apps.scheduling',` under a new
+  `# Module 4 — Calendar & Bookings` comment, after `'apps.agents'` (brand-new-app wiring)
+- [ ] `config/urls.py` — add `path('scheduling/', include('apps.scheduling.urls'))`, before the
+  `apps.accounts.urls` catch-all include (which must stay last — it owns the site root)
+- [ ] `config/asgi.py` — **untouched**, no websocket surface this pass
+- [ ] `AUTH_USER_MODEL` — **N/A this pass**, already declared before Module 0's first `makemigrations`;
+  nothing to do here
+
+## Templates (templates/scheduling/directory/contact/)
+
+Sub-module slug `directory` per CLAUDE.md's own worked example for `apps/scheduling`
+(`calendar/ bookings/ directory/ catalog/ callbacks/`); `contact/` is the entity folder underneath it.
+
+- [ ] `templates/scheduling/directory/contact/list.html` — filter bar reflecting `request.GET` (`q`, `source`
+  dropdown from `source_choices`, `sort`), Actions column (view / edit / delete-POST+confirm+csrf, gated on
+  `MANAGEMENT_TIERS` in the template same as the view), pagination with `has_previous`/`has_next` guards,
+  empty-state ("No contacts yet — add one or import a CSV."), an Import button and an Export button
+- [ ] `templates/scheduling/directory/contact/detail.html` — contact info panel; appointment-history panel
+  rendering the empty state when `appointments is None`; the "can book at any of the business's locations"
+  copy; Actions sidebar (Edit, Delete-POST+confirm, Forget-This-Contact-POST+confirm, Back to List) — Delete
+  and Forget both hidden from non-management tiers in the template, matching the view gate
+- [ ] `templates/scheduling/directory/contact/form.html` — shared create/edit template; fields
+  `first_name`/`last_name`/`phone_e164`/`email`/`date_of_birth`/`notes` only — **no `source` field rendered**
+- [ ] `templates/scheduling/directory/contact/import.html` — CSV upload form, expected-column instructions,
+  the 500-row cap noted, and a results panel (created / skipped-duplicate / error rows) rendered after POST
+
+## Verify
+
+- [ ] `makemigrations scheduling` + `migrate` — expect one new migration (`0001_initial`), not "No changes
+  detected" (this is the sub-module that actually creates a table)
+- [ ] `seed_scheduling` ×2 — second run reports "Data already exists" (idempotent)
+- [ ] `manage.py check` — no new issues
+- [ ] `PROVIDER_MODE=fake` — asserted even though this sub-module makes no provider call, so the invariant is
+  checked starting with the first sub-module of every module, not only the ones that need it
+- [ ] `pytest` — model tests (`clean()`/normalization, both indexes exist, blank-name save succeeds, no
+  `location` column exists on the table), view tests (list search/filter/sort/pagination,
+  create/edit/detail/delete/forget, import dedup + 500-row cap, export CSV shape), all under
+  `apps/scheduling/tests/` (arrives formally at step 11, `test-writer`)
+- [ ] Twilio webhook signature + idempotency — **N/A**, this sub-module ships no webhook
+- [ ] websocket connect/reject — **N/A**, this sub-module ships no consumer
+- [ ] `temp/` smoke sweep as `admin_acme` (password from
+  `apps/accounts/management/commands/seed_accounts.py` — `navai-demo-2026`) covering every new `scheduling:*`
+  url: 200/302, no `{#`/`{% comment` leaks, page titles, a seeded record visible; **cross-tenant IDOR** —
+  `admin_acme` requesting a `globex` contact's detail/edit/delete/forget by pk gets 404; **the deliberate
+  absence of location scoping proven, not assumed** — switching `admin_acme`'s active location between
+  Downtown and Uptown leaves the contact list **unchanged**, demonstrating `Contact` is correctly tenant-only
+  rather than accidentally showing everything because a `location` filter was forgotten
+- [ ] Sidebar shows `4.1` Live under Module 4, "Contacts" link resolves
+
+## Close-out
+
+- [ ] Review agents: `code-reviewer` → `explorer` → `frontend-reviewer` → `performance-reviewer` →
+  `realtime-reviewer` (expected to find nothing — no realtime surface this pass) → `qa-smoke-tester` →
+  `security-reviewer` (PII handling on `notes`/`date_of_birth`/`phone_e164`, the forget-flow, CSV upload
+  validation) → `test-writer`
+- [ ] Create `.claude/skills/scheduling/SKILL.md` — **author**, not update (brand-new app): models, routes,
+  templates, seeder rows, the forward `identify_contact`/`create_contact` contract, and the explicit "no
+  `location` FK on `Contact`" gotcha so a future sub-module's agent doesn't reintroduce it
+- [ ] README — note the new `/scheduling/` mount if the project README enumerates mounted apps
+
+## Later passes / deferred
+
+- Tag/category system on `Contact` — not in the ERD's 8-field baseline; park until a real requirement surfaces.
+- "Last call" / "last appointment" aware sort — needs `calls.CallSession` and `scheduling.Appointment`, neither
+  built yet (Module 5, sub-module 4.3).
+- Full contact merge with FK re-pointing — no strong requirement in the documented `NavAIReceptionist.md`
+  bullets, and no FK exists yet to re-point; do not build a scaffold prematurely — revisit once 4.3/Module 5
+  exist.
+- CSV import duplicate-detection nuance beyond exact `(tenant, phone_e164)` match (Acuity-style fuzzy "merge on
+  match") — the basic exact-dedupe import ships this pass; refine only once manual merge exists.
+- Appointment-history query wiring on the detail page (ships now as an empty-state-guarded panel) → 4.3
+  Availability & Booking / 4.4 Calendar Views.
+- Callback-request linkage and any structured do-not-contact flag → 4.5 Bookings List & Callback Requests.
+- Call history / transcript link from a contact → 5.1 Call Log List, 5.2 Call Detail & Transcript.
+- `identify_contact` / `create_contact` tool implementation, argument-schema enforcement, and the tool
+  dispatcher itself → 3.3 Tools & Dispatcher (contract documented above under Realtime & agent surface).
+- Push contact/call data to an external CRM, outbound marketing/bulk SMS, spam/robocall screening, loyalty
+  programs / stored payment methods on a contact — all out of scope for the product's seven capabilities, not
+  merely deferred.
+
+## Review notes
+
+(filled in at the end)
