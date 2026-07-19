@@ -11,6 +11,13 @@ Three pieces:
   EXACTLY ONE entry and touches no other.
 
 Value shape: `{"N.M": {"<Feature label>": "<app_name>:<url_name>"}}`.
+
+**Presence of the key means BUILT; the links are optional.** A sub-module whose
+surfaces are not pages a signed-in user navigates to — 0.1 is login, logout,
+password reset and throttling — maps to an empty dict. It still counts as built
+and still shows in the sidebar, it just contributes no link. Pointing such a
+sub-module at some other module's page instead produces a duplicate row that
+appears to do nothing when clicked.
 """
 import re
 from functools import lru_cache
@@ -37,19 +44,17 @@ MODULE_ICONS = {
 # BUILD STATE. One entry per built sub-module. Add exactly one per module run.
 # ---------------------------------------------------------------------------
 LIVE_LINKS = {
-    # 0.1's four features are all pre-authentication surfaces (login, logout,
-    # forgot/reset password, throttling) — none is a page a signed-in user would
-    # click from the sidebar. The dashboard is the reachable proof that
-    # customer-scoped login works, so it is this sub-module's representative link.
-    '0.1': {'Dashboard': 'accounts:dashboard'},
+    # BUILT, but deliberately contributes no sidebar link: all four of 0.1's
+    # features (login, logout, forgot/reset password, throttling) are
+    # pre-authentication surfaces or topbar controls. There is no page here for a
+    # signed-in user to navigate to, and pointing this at the dashboard just
+    # duplicated the sidebar's own Dashboard row.
+    '0.1': {},
     '0.2': {'Change Password': 'accounts:change_password',
             'Change Email': 'accounts:change_email'},
     '0.3': {'My Profile': 'accounts:profile',
             'Users': 'accounts:user_list'},
-    # The assigned-location list is the dashboard's "Your locations" table; the
-    # switcher itself lives in the topbar, since it applies to every page rather
-    # than being somewhere you navigate to.
-    '0.4': {'My Locations': 'accounts:dashboard'},
+    '0.4': {'My Locations': 'accounts:my_locations'},
 }
 
 
@@ -139,7 +144,9 @@ def build_sidebar(current_path=''):
                         'is_active': bool(current_path) and current_path.startswith(url) and url != '/',
                     })
 
-            is_live = bool(links)
+            # Built is decided by the KEY, not by whether it produced links — a
+            # sub-module can be finished and still have nothing to navigate to.
+            is_live = submodule['key'] in LIVE_LINKS
             module_is_live = module_is_live or is_live
             submodules.append({
                 'key': submodule['key'],
