@@ -18,7 +18,7 @@ though this module itself has **no realtime surface**.
 |---|---|---|
 | 4.1 Contact Directory | **BUILT** | `Contact` |
 | 4.2 Services & Resources | **BUILT** | `Service`, `Resource` |
-| 4.3 Availability & Booking | not built | `Appointment` |
+| 4.3 Availability & Booking | **BUILT** | `Appointment` (+ `availability.py`) |
 | 4.4 Calendar Views | not built | none — a **view** sub-module |
 | 4.5 Bookings List & Callback Requests | not built | `CallbackRequest` |
 
@@ -80,6 +80,38 @@ Deliberately **no `capacity`** (a room is exclusive; there is no group-class or 
 **no FK to the user model** (the provider is a separate concern from the room — merging them would make
 "room 2 is busy" and "Dr Chen is busy" the same constraint when they are independent).
 
+### `Appointment` — 4.3 · `models/Bookings/Appointments.py`
+
+Base `TenantLocationOwned`. `contact` FK is **PROTECT** (deleting a person must not delete the record they
+were seen — that is what `Contact.anonymize()` is for). `provider` / `resource` / `service` are all
+`SET_NULL`. Statuses `scheduled` / `confirmed` / `completed` / `cancelled` / `no_show` (underscore — the
+badge partial matches it literally). `source` is server-stamped provenance.
+
+**`end_at` is `start_at + duration_minutes` — the buffer is NOT in it.** Folding the buffer in would make
+every appointment render longer than it is. The buffer only extends what blocks the NEXT booking.
+
+**`booked_by_session` is absent.** Django refuses a string FK to the uninstalled `calls` app. **Module 5
+must add it as an additive migration**, and un-stub the "originating call" panel in
+`bookings/appointment/detail.html`.
+
+Members: `duration_minutes`, `buffer_minutes`, `blocks_until`, `is_open`, `is_cancelled`, `local_start()`,
+`local_end()`. `OPEN_STATUSES` gates edit / reschedule / cancel.
+
+### `availability.py` — 4.3 · flat at the app root
+
+**Module 3.3's LLM tools call these directly**, so every function re-authorises rather than trusting its
+caller. Named `availability.py` not `services.py` because this app already has a `Service` *model*.
+
+`find_available_slots()` · `book_slot()` · `reschedule_appointment()` · `cancel_appointment()` ·
+`overlapping_appointments()` · `mint_slot_token()` / `redeem_slot_token()` · `local_day_bounds_utc()`.
+`SlotError.code` is drawn from the closed set `SLOT_ERROR_CODES` = `invalid_argument` / `not_permitted` /
+`slot_expired` / `slot_unavailable`, asserted at construction, so 3.3 can drop it straight into the
+`{ok, data, error}` envelope.
+
+Tunables: `MAX_OFFERED_SLOTS=5`, `SLOT_GRANULARITY_MINUTES=15`, `MIN_BOOKING_NOTICE_MINUTES=60`,
+`SEARCH_HORIZON_DAYS=60`, `MAX_SEARCH_SPAN_DAYS=21`, `SLOT_TOKEN_TTL_SECONDS=300`,
+`SLOT_TOKEN_SALT='scheduling.slot.v1'`.
+
 ## Routes
 
 `urls/` is a **package** (not the flat module `tenants`/`accounts` use), because this app is headed for five
@@ -94,10 +126,20 @@ across the **whole concatenated list** — check any new greedy route against al
 `service_list` · `service_create` · `service_detail` · `service_edit` · `service_delete` (POST) ·
 `resource_list` · `resource_create` · `resource_detail` · `resource_edit` · `resource_delete` (POST)
 
+**4.3** — `urls/Bookings/Appointments.py`:
+`appointment_list` · `appointment_create` · `appointment_slots` · `appointment_book` (POST) ·
+`appointment_detail` · `appointment_edit` · `appointment_delete` (POST) ·
+`appointment_reschedule` (POST) · `appointment_cancel` (POST).
+`slots/` and `book/` are literals and MUST stay ahead of `<int:pk>`.
+
 ## Templates
 
 `templates/scheduling/directory/contact/` — `list.html`, `detail.html`, `form.html`, `_filters.html`.
 `templates/scheduling/catalog/service/` and `templates/scheduling/catalog/resource/` — same four each.
+`templates/scheduling/bookings/appointment/` — `list`, `detail`, `form`, `_filters`, plus **`slots.html`**,
+which has TWO modes: normally each slot books a new appointment; with `?reschedule=<pk>` it MOVES an
+existing one. The pk rides a hidden field so it survives a re-search — without that the next POST silently
+creates a second booking.
 Shared partials used: `partials/_pagination.html`, `_empty_state.html`, and (once 4.3 / Module 5 land)
 `_appointment_status_badge.html` / `_call_status_badge.html` — **both take `obj=`**, not
 `appointment=`/`session=`.
@@ -143,12 +185,44 @@ locations, with "Surgery 1" deliberately duplicated across Downtown and Uptown t
 constraint is location-scoped. Services key on `(tenant, location, name)`; resources on `(location, name)` —
 the same tuples their forms validate.
 
+**4.3 seeds 14 appointments** across all four demo locations, spanning every status. Anchored to fixed
+day OFFSETS and local wall-clock hours, never `now()` — a `now()`-derived `start_at` never matches on a
+re-run and would duplicate the whole diary every time. `seed_accounts` was extended to add a provider at
+Uptown and Lakeside and to stamp `provider_hours`: `is_provider=True` with empty hours is a broken state,
+not a neutral default, and it made availability return nothing everywhere.
+
+**Flush order matters**: appointments before contacts, because `Appointment.contact` is PROTECT.
+
 > **The dedupe lookup must normalise before comparing.** `Contact.save()` normalises on write, so keying on
 > the raw spec value re-creates the unnormalised row on every run. That bug shipped once and was caught by
 > the second-run check.
 
 ## Conventions & gotchas
 
+* **A range lock over ZERO rows does not serialise (4.3).** `SELECT … FOR UPDATE` on a query matching no
+  rows takes only *gap locks* in InnoDB, and gap locks are mutually compatible — two callers booking the
+  same free slot both pass and both insert. `_lock_contended_rows` locks the concrete `Resource` /
+  provider `User` row instead, ordered by pk so two bookings never deadlock on lock order.
+* **Under REPEATABLE READ a plain re-check cannot see a concurrent commit.** The in-lock overlap check
+  MUST pass `for_update=True`, or it reads the transaction's pinned snapshot, reports "free" and
+  double-books.
+* **Never use `start_at__date`.** `__date` converts in Django's *active* timezone, not the location's, and
+  on MySQL compiles to `CONVERT_TZ()` — which returns NULL unless the server's tz tables are loaded. It
+  passes on SQLite in the test settings and silently returns **zero rows** in production, and it cannot use
+  `idx_appt_tenant_loc_start`. Use `availability.local_day_bounds_utc(location, day)`.
+* **Wall-clock arithmetic is not instant arithmetic.** Adding a `timedelta` to a zone-aware LOCAL datetime
+  moves the wall clock, so it is wrong across a DST boundary. Convert to UTC first, then add. Spring-forward
+  local times do not exist — `_local_naive_to_utc` returns `None` for them and callers skip, rather than
+  500ing a live call.
+* **`ActiveLocationMiddleware` calls `timezone.activate(location.tzinfo)`** so templates render in the
+  site's own zone, with a `finally: deactivate()` so a pooled worker cannot leak one request's zone into
+  the next. Without it every datetime rendered in UTC.
+* **No configured `provider_hours` means UNAVAILABLE**, never "available all day" — that is
+  `apps/tenants/services.py::get_provider_intervals`' documented contract. Read hours through it; never
+  subscript `provider_hours[str(location_id)]`.
+* **A NAMED provider who is unbookable returns no slots** — it must not fall back to "anyone", which would
+  answer yes to a request for a specific person who cannot take it. Suspended users are excluded in
+  `availability`, the form dropdown AND the list filter; all three need `status=User.STATUS_ACTIVE`.
 * **THE nullable-location trap (4.2).** `Service.location` may be `NULL`. Anywhere you filter services by
   location, the filter must be **ADDITIVE** —
   `Q(location=here) | Q(location__isnull=True)` — never a plain `filter(location=here)`, which silently
@@ -219,17 +293,20 @@ rows.
 '4.1': {'Contacts': 'scheduling:contact_list'},
 '4.2': {'Services': 'scheduling:service_list',
         'Resources': 'scheduling:resource_list'},
+'4.3': {'Appointments': 'scheduling:appointment_list',
+        'Find a slot': 'scheduling:appointment_slots'},
 ```
 
 ## Tests
 
 `apps/scheduling/tests/` — 4.1: `test_models.py`, `test_services.py`, `test_forms.py`, `test_views.py`,
 `test_security.py`; 4.2: `test_catalog_models.py`, `test_catalog_forms.py`, `test_catalog_views.py`,
-`test_catalog_security.py`. **224 passing.** Run with
+`test_catalog_security.py`; 4.3: `test_booking_models.py`, `test_booking_forms.py`,
+`test_booking_availability.py`, `test_booking_views.py`, `test_booking_security.py`. **377 passing.**
+Run with
 `venv\Scripts\python.exe -m pytest -q apps/scheduling`. Fixtures live in the repo-root `conftest.py` (two
 tenants, three locations, owner/manager/staff users, and client fixtures that activate a location through the
 real `accounts:switch_location` endpoint rather than poking the session).
 
-`test_views.py` carries a `TODO(4.3 / Module 5)` marker on the regression guard that asserts the appointment
-and call panels return `None` today — **replace it with the real cross-location assertion** when those models
-land.
+The 4.1 `TODO(4.3)` marker has been discharged: `test_views.py` now carries the real cross-location
+assertion. The `calls.CallSession` half is still `None` — **Module 5 replaces that one.**
