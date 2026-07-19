@@ -1,0 +1,51 @@
+{% extends "auth_base.html" %}
+
+{% block title %}Sign in{% endblock %}
+
+{% block content %}
+{% comment %}
+  Failures are rendered ONLY as non-field errors, and the view supplies a single
+  uniform message for every cause — wrong customer id, unknown user, wrong
+  password, deactivated business, suspended account. A per-field error here would
+  tell an attacker which part was right, undoing the throttling entirely.
+{% endcomment %}
+<form class="card" method="post" novalidate>
+  {% csrf_token %}
+  <input type="hidden" name="next" value="{{ request.GET.next|default:'' }}">
+
+  <div class="card-header">
+    <span>Sign in to your workspace</span>
+  </div>
+
+  <div class="card-body grid gap-4">
+
+    {% if form.non_field_errors %}
+      <div class="alert alert-red" role="alert">
+        <span>{{ form.non_field_errors|join:" " }}</span>
+      </div>
+    {% endif %}
+
+    {% for field in form %}
+      <div class="form-group">
+        <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.help_text %}
+          <span class="text-muted text-sm">{{ field.help_text }}</span>
+        {% endif %}
+        {% if field.errors %}
+          <span class="form-error">{{ field.errors|join:" " }}</span>
+        {% endif %}
+      </div>
+    {% endfor %}
+
+    <button type="submit" class="btn btn-primary w-full">
+      <i data-lucide="log-in"></i> Sign in
+    </button>
+
+    <p class="text-center text-sm">
+      <a href="{% url 'accounts:password_reset_request' %}">Forgot your password?</a>
+    </p>
+
+  </div>
+</form>
+{% endblock %}
