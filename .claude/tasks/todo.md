@@ -397,6 +397,77 @@ supported until April 2026.
 
 ---
 
+## Module 1 — Business & Locations (1.1-1.4) — built and verified
+
+Plans in `todo-1.1-1.2.md` and `todo-1.3-1.4.md`; research in
+`research-tenants-1.{1,2,3,4}.md`. Mounted at `/manage/`. Skill authored at
+`.claude/skills/tenants/SKILL.md` (Modules 1-5 require one; Module 0 is exempt).
+
+**All four sub-modules shipped ZERO new models and ZERO migrations** —
+`makemigrations --check` reports "No changes detected". `Tenant`, `Location`,
+`UserLocation` and `User.provider_hours` all pre-existed, so Module 1 is entirely
+forms, views and templates over existing tables.
+
+### Security fix carried in
+
+`accounts.User.assigned_locations()` did not filter `Location.is_active`. Without
+that filter, deactivating a site left it switchable for everyone already assigned
+and `ActiveLocationMiddleware` kept honouring a stored id pointing at it — so
+"Location Deactivation" would have been cosmetic. Found by the 1.2 research agent
+reading the as-built code, fixed with the regression test alongside.
+
+### Decisions worth knowing
+
+1. **1.1 has no pk in any URL.** One Tenant per business and `request.tenant` IS
+   it, so a pk would be an invitation to request someone else's. `customer_id`,
+   `slug` and `is_active` render but are never editable: editing the first locks
+   every user out at login, and the third blocks the next login for everyone with
+   nobody left able to undo it.
+2. **Delete is deactivation everywhere**, and `location_delete_view` additionally
+   refuses to deactivate the last active site — a business with no active location
+   has nowhere to take a booking.
+3. **The matrix treats posted pairs as filters, not identifiers.** Every
+   `"<user_pk>:<location_pk>"` has BOTH halves intersected with the tenant's own
+   querysets before writing, so a forged pair naming another business matches
+   nothing. Removals use an OR of exact pairs — two `__in` filters would form a
+   cross product and delete assignments nobody touched.
+4. **Cross-module reads are import-guarded.** `apps.agents` (Module 2) and
+   `apps.scheduling` (Module 4) do not exist. `_agent_setting_for()` and
+   `future_appointment_count()` both `try/except ImportError` and return
+   `None`/`0`, so THE CALL SITES DO NOT CHANGE when those modules land.
+5. **`services.py` is the only writer of the `provider_hours` JSON**, and
+   `get_provider_intervals(user, location, weekday=None)` is the named contract
+   Module 4's availability search imports. "No configured hours" resolves to
+   UNAVAILABLE, never "available all day".
+
+### Verification evidence
+
+`temp/smoke_module1.py` — **115/115**, covering: the tier gate across every
+management view; spoofed `customer_id`/`slug`/`is_active` on the business form
+having no effect; 9 junk filter and pagination values; slug auto-derivation and
+per-tenant uniqueness; an invalid IANA timezone refused; cross-tenant IDOR to 404
+on location detail/edit/delete, the provider toggle and both hours ids; a
+deactivated location leaving `assigned_locations()` and the switcher; the
+last-active-location guard; forged cross-tenant pairs in the matrix ignored; 5
+junk pair payloads; the last-location warn-then-confirm round trip; interval
+overlap, end-before-start and unassigned-location validation; malformed stored
+JSON degrading rather than raising; and every `badge-*` checked against
+`theme.css`.
+
+Module 0 re-run after the `assigned_locations()` change: **61/61** and
+**156/156**, so nothing regressed. Live Daphne run: all six `/manage/` pages
+render with zero template-tag leaks, and a location was created end to end.
+
+### Still outstanding across Modules 0 AND 1
+
+Steps 4-11 have not run for ANY sub-module: `code-reviewer`, `explorer`,
+`frontend-reviewer`, `performance-reviewer`, `realtime-reviewer`,
+`qa-smoke-tester`, `security-reviewer`, `test-writer`. **There is still no
+committed pytest suite** — `apps/accounts/` and `apps/tenants/` have no `tests/`,
+and every `temp/smoke_*.py` is a gitignored throwaway.
+
+---
+
 ## Sub-modules 0.2, 0.3 and 0.4 — built and verified
 
 Plans live in `todo-0.2.md`, `todo-0.3.md`, `todo-0.4.md` (written to separate files so the three `todo`
