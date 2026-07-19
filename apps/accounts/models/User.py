@@ -244,6 +244,12 @@ class User(AbstractBaseUser, PermissionsMixin, TimeStamped):  # noqa: F405
 
         This queryset IS the authorization boundary the active-location switcher
         validates against — never a list built from a form field or a URL kwarg.
+
+        `is_active=True` is part of that boundary, not a display nicety:
+        deactivating a location is how a business takes a site out of service, and
+        without this filter the site would remain switchable for everyone already
+        assigned to it, and `ActiveLocationMiddleware` would keep honouring a
+        stored id pointing at it.
         """
         from apps.tenants.models import Location
 
@@ -251,6 +257,7 @@ class User(AbstractBaseUser, PermissionsMixin, TimeStamped):  # noqa: F405
             return Location.objects.none()
         return Location.objects.filter(
             tenant_id=self.tenant_id,
+            is_active=True,
             user_assignments__user=self,
         ).distinct()
 
