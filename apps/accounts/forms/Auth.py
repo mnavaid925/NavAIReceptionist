@@ -12,7 +12,13 @@ from django.contrib.auth import password_validation
 
 from apps.accounts.forms._common import *  # noqa: F401,F403
 
-__all__ = ['LoginForm', 'PasswordResetRequestForm', 'SetNewPasswordForm']
+__all__ = [
+    'LoginForm',
+    'PasswordResetRequestForm',
+    'SetNewPasswordForm',
+    'ChangePasswordForm',
+    'ChangeEmailRequestForm',
+]
 
 
 class LoginForm(forms.Form):  # noqa: F405
@@ -120,3 +126,99 @@ class SetNewPasswordForm(forms.Form):  # noqa: F405
         self.user.set_password(self.cleaned_data['new_password1'])
         self.user.save(update_fields=['password'])
         return self.user
+
+
+class ChangePasswordForm(SetNewPasswordForm):
+    """Change your own password from inside an authenticated session.
+
+    Extends the reset form with a current-password gate. That gate is the whole
+    point: without it, anyone who walks up to an unlocked browser — or who has
+    hijacked a session — can lock the real owner out of their own account.
+    """
+
+    current_password = forms.CharField(  # noqa: F405
+        label='Current password',
+        strip=False,
+        widget=forms.PasswordInput(attrs={  # noqa: F405
+            'autofocus': True,
+            'autocomplete': 'current-password',
+        }),
+    )
+
+    field_order = ['current_password', 'new_password1', 'new_password2']
+
+    def clean_current_password(self):
+        current = self.cleaned_data['current_password']
+        if not self.user.check_password(current):
+            raise ValidationError('That is not your current password.')  # noqa: F405
+        return current
+
+    def clean(self):
+        cleaned = super().clean()
+        current = cleaned.get('current_password')
+        new = cleaned.get('new_password1')
+        if current and new and current == new:
+            self.add_error(
+                'new_password1', 'The new password must differ from the current one.'
+            )
+        return cleaned
+
+
+class ChangeEmailRequestForm(forms.Form):  # noqa: F405
+    """Request a change of sign-in address.
+
+    Nothing is written here. A confirmation link goes to the NEW address and the
+    change only lands once that link is opened, so a typo cannot lock a user out of
+    their own account and an attacker cannot repoint an address they do not control.
+
+    The current password is required for the same reason as on the password form.
+    """
+
+    new_email = forms.EmailField(  # noqa: F405
+        label='New email address',
+        max_length=254,
+        widget=forms.EmailInput(attrs={  # noqa: F405
+            'autofocus': True,
+            'autocomplete': 'email',
+        }),
+    )
+    current_password = forms.CharField(  # noqa: F405
+        label='Current password',
+        strip=False,
+        widget=forms.PasswordInput(attrs={'autocomplete': 'current-password'}),  # noqa: F405
+    )
+
+    def __init__(self, *args, user=None, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+        style_widgets(self)  # noqa: F405
+
+    def clean_current_password(self):
+        current = self.cleaned_data['current_password']
+        if not self.user.check_password(current):
+            raise ValidationError('That is not your current password.')  # noqa: F405
+        return current
+
+    def clean_new_email(self):
+        from apps.accounts.models import User
+
+        new_email = self.cleaned_data['new_email'].strip()
+
+        if new_email.lower() == (self.user.email or '').lower():
+            raise ValidationError(  # noqa: F405
+                'That is already the address on this account.'
+            )
+
+        # `(tenant, email)` is unique, so check within THIS tenant only — the same
+        # address legitimately exists in other businesses. This is re-checked again
+        # at confirmation time, because the window between request and confirm is
+        # long enough for another user to take the address.
+        clash = User.objects.filter(
+            tenant=self.user.tenant, email__iexact=new_email
+        ).exclude(pk=self.user.pk)
+        if clash.exists():
+            raise ValidationError(  # noqa: F405
+                'Another user in this business already uses that address.'
+            )
+
+        return new_email
