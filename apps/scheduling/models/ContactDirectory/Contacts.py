@@ -44,7 +44,6 @@ class Contact(TenantOwned):  # noqa: F405
     phone_e164 = models.CharField(  # noqa: F405
         max_length=16,
         blank=True,
-        db_index=True,
         help_text='Stored in E.164 form (+13125550142). Normalised on save so a '
                   'repeat caller matches however the number was typed.',
     )
@@ -59,6 +58,17 @@ class Contact(TenantOwned):  # noqa: F405
         db_index=True,
     )
 
+    # Set when a data-subject erasure request is honoured. The row survives with
+    # its primary key intact — `Appointment.contact` is PROTECT, so hard-deleting
+    # a contact who has ever booked is refused, and the calendar must not grow
+    # holes to satisfy a privacy request. Everything identifying is blanked
+    # instead; what remains is an appointment that happened, attached to nobody.
+    #
+    # NOT in NavAIReceptionist-ERD.md. The ERD is intent and the code is truth:
+    # erasure has no other durable marker, and without one an erased contact is
+    # indistinguishable from a caller who simply never gave a name.
+    anonymized_at = models.DateTimeField(null=True, blank=True)  # noqa: F405
+
     class Meta:
         ordering = ['last_name', 'first_name', '-created_at']
         indexes = [
@@ -66,6 +76,12 @@ class Contact(TenantOwned):  # noqa: F405
             # ring. Deliberately NOT unique — a household, an office switchboard
             # or a shared mobile legitimately maps to several people, and a
             # unique constraint here would make the second one unsaveable.
+            #
+            # This composite is the ONLY index `phone_e164` needs. A bare
+            # single-column `db_index=True` on the field as well would serve no
+            # query in this app — every lookup is tenant-scoped by Invariant, so
+            # the composite's leading column already covers it — while costing a
+            # second index write on every insert.
             models.Index(fields=['tenant', 'phone_e164'],  # noqa: F405
                          name='idx_contact_tenant_phone'),
             models.Index(fields=['tenant', 'last_name', 'first_name'],  # noqa: F405
@@ -94,6 +110,8 @@ class Contact(TenantOwned):  # noqa: F405
         stable placeholder — a blank cell in the directory reads as a rendering
         bug rather than as "we do not know yet".
         """
+        if self.anonymized_at:
+            return 'Erased contact'
         full = f'{self.first_name} {self.last_name}'.strip()
         if full:
             return full
@@ -105,3 +123,37 @@ class Contact(TenantOwned):  # noqa: F405
     def has_name(self):
         """Whether anyone has actually told us who this is."""
         return bool(self.first_name or self.last_name)
+
+    @property
+    def is_anonymized(self):
+        """Whether this row has been through a data-subject erasure request."""
+        return self.anonymized_at is not None
+
+    def anonymize(self):
+        """Irreversibly blank every identifying field, keeping the row.
+
+        The GDPR/CCPA erasure path for a contact who cannot be hard-deleted
+        because they have booking history behind a PROTECT FK. This is the whole
+        reason the method exists: without it, "delete me" is unanswerable for
+        exactly the people who have used the business most.
+
+        Not idempotent-safe to call twice by accident, but harmless if it is —
+        the second call blanks already-blank fields and leaves the original
+        `anonymized_at` timestamp, which is the honest record of when erasure
+        actually happened.
+        """
+        if self.anonymized_at:
+            return self
+
+        self.first_name = ''
+        self.last_name = ''
+        self.phone_e164 = ''
+        self.email = ''
+        self.date_of_birth = None
+        self.notes = ''
+        self.anonymized_at = timezone.now()  # noqa: F405
+        self.save(update_fields=[
+            'first_name', 'last_name', 'phone_e164', 'email',
+            'date_of_birth', 'notes', 'anonymized_at', 'updated_at',
+        ])
+        return self
