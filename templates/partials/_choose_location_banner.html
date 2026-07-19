@@ -1,0 +1,33 @@
+{% comment %}
+  Forced location choice.
+
+  Shown when the user has assignments but none is active — which happens whenever
+  someone works at two or more sites, because the system deliberately does NOT
+  guess on their behalf. Until a location is chosen, `request.location` is None and
+  every location-scoped page correctly shows nothing, so without this banner the
+  product would just look empty for no visible reason.
+
+  Included globally from base.html so every location-scoped module built later
+  inherits the behaviour rather than reimplementing it.
+{% endcomment %}
+{% if user.is_authenticated and user_locations and not active_location and nav_urls.switch_location %}
+  <div class="alert alert-amber" role="status">
+    <i data-lucide="map-pin"></i>
+    <span class="grow">
+      <strong>Choose a location to work in.</strong>
+      You are assigned to {{ user_locations|length }} sites. Calendars, bookings and
+      call logs are per location, so nothing is shown until you pick one.
+    </span>
+    <form method="post" action="{{ nav_urls.switch_location }}" class="flex items-center gap-2">
+      {% csrf_token %}
+      <input type="hidden" name="next" value="{{ request.get_full_path }}">
+      <label class="sr-only" for="banner-location">Location</label>
+      <select class="form-select" id="banner-location" name="location">
+        {% for location in user_locations %}
+          <option value="{{ location.pk }}">{{ location.name }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-primary">Start working here</button>
+    </form>
+  </div>
+{% endif %}
