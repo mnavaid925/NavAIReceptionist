@@ -7,9 +7,20 @@ Sub-module folders, in build order:
 
 * `ContactDirectory/`   — 4.1  ContactForm
 * `ServicesResources/`  — 4.2  ServiceForm, ResourceForm
+* `Bookings/`           — 4.3  AppointmentForm, AppointmentCancelForm
 """
+from apps.scheduling.forms.Bookings.Appointments import (
+    AppointmentCancelForm,
+    AppointmentForm,
+)
 from apps.scheduling.forms.ContactDirectory.Contacts import ContactForm
 from apps.scheduling.forms.ServicesResources.Resources import ResourceForm
 from apps.scheduling.forms.ServicesResources.Services import ServiceForm
 
-__all__ = ['ContactForm', 'ServiceForm', 'ResourceForm']
+__all__ = [
+    'ContactForm',
+    'ServiceForm',
+    'ResourceForm',
+    'AppointmentForm',
+    'AppointmentCancelForm',
+]
