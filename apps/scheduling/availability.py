@@ -54,7 +54,10 @@ __all__ = [
     'SLOT_GRANULARITY_MINUTES',
     'MIN_BOOKING_NOTICE_MINUTES',
     'SEARCH_HORIZON_DAYS',
+    'MAX_SEARCH_SPAN_DAYS',
+    'SLOT_ERROR_CODES',
     'SlotError',
+    'local_day_bounds_utc',
     'mint_slot_token',
     'redeem_slot_token',
     'find_available_slots',
@@ -88,18 +91,61 @@ MIN_BOOKING_NOTICE_MINUTES = 60
 #: How far ahead a search may look, whatever the caller asks for.
 SEARCH_HORIZON_DAYS = 60
 
+#: The widest span a SINGLE search may scan. Bounds the work a caller can cause
+#: on a fully-booked calendar, where the "stop once we have enough slots"
+#: early-exit never fires.
+MAX_SEARCH_SPAN_DAYS = 21
+
+
+#: The CLOSED SET of error codes this module emits.
+#:
+#: Module 3.3 drops `SlotError.code` straight into the tool-result envelope's
+#: `error.code`, so the set has to be small, stable and lower_snake_case. An
+#: ad-hoc code invented at a raise site is a code the runtime has never seen and
+#: cannot branch on.
+SLOT_ERROR_CODES = frozenset({
+    'invalid_argument',   # the request itself is malformed
+    'not_permitted',      # right shape, wrong tenant/location/contact
+    'slot_expired',       # the offer aged out, or the time has passed
+    'slot_unavailable',   # someone else got there first
+})
+
 
 class SlotError(Exception):
     """A booking could not proceed.
 
-    Carries a lower_snake_case `code` so Module 3.3 can drop it straight into the
-    tool-result envelope's `error.code` without re-deriving one from prose.
+    Carries a lower_snake_case `code` from `SLOT_ERROR_CODES` so Module 3.3 can
+    drop it straight into the tool-result envelope without re-deriving one from
+    prose, and a `message` written to be SPOKEN — these strings reach a caller
+    through a voice agent, so they say what happens next rather than naming an
+    internal failure.
     """
 
     def __init__(self, code, message):
         super().__init__(message)
+        # Loud in development, harmless in production: a typo'd code silently
+        # becomes an envelope the runtime cannot branch on.
+        assert code in SLOT_ERROR_CODES, f'unknown SlotError code: {code!r}'
         self.code = code
         self.message = message
+
+
+def _assert_scope(appointment, tenant, location):
+    """Refuse an appointment that is not this tenant's and this location's.
+
+    Both HTTP call sites already fetch through a scoped queryset, so today this
+    is belt-and-braces. It exists for the caller that does NOT: Module 3.3's
+    tools receive an `appointment_id` the MODEL supplied, and Invariant 3 says
+    any model-supplied id is authorised server-side against tenant, location and
+    the identified contact. Putting the check in the service function means that
+    holds however the function is reached.
+    """
+    if appointment.tenant_id != tenant.pk or appointment.location_id != location.pk:
+        logger.warning(
+            'Appointment scope mismatch appointment_id=%s tenant_id=%s '
+            'location_id=%s', appointment.pk, tenant.pk, location.pk,
+        )
+        raise SlotError('not_permitted', 'That appointment is not available here.')
 
 
 # --------------------------------------------------------------------------- #
@@ -221,10 +267,10 @@ def redeem_slot_token(token, *, tenant, location):
             'Let me check what is available now.',
         )
     except signing.BadSignature:
-        raise SlotError('invalid_slot', 'That is not a slot I offered.')
+        raise SlotError('invalid_argument', 'That is not a slot I offered.')
 
     if not isinstance(payload, dict):
-        raise SlotError('invalid_slot', 'That is not a slot I offered.')
+        raise SlotError('invalid_argument', 'That is not a slot I offered.')
 
     if payload.get('t') != tenant.pk or payload.get('l') != location.pk:
         # Not merely wrong — this is the cross-tenant/cross-location replay case,
@@ -239,9 +285,9 @@ def redeem_slot_token(token, *, tenant, location):
     try:
         start_utc = datetime.fromisoformat(raw_start)
     except (TypeError, ValueError):
-        raise SlotError('invalid_slot', 'That is not a slot I offered.')
+        raise SlotError('invalid_argument', 'That is not a slot I offered.')
     if start_utc.tzinfo is None:
-        raise SlotError('invalid_slot', 'That is not a slot I offered.')
+        raise SlotError('invalid_argument', 'That is not a slot I offered.')
 
     payload['start_utc'] = start_utc.astimezone(dj_timezone.utc)
     return payload
@@ -375,6 +421,17 @@ def find_available_slots(*, tenant, location, service, date_from=None,
     if end_day < start_day:
         return []
 
+    # Cap the SPAN, not just the far end. Without this a caller-supplied range
+    # of `from=today&to=+60d` walks every day even though the result is capped
+    # at five slots, and the early-exit below only helps when slots are actually
+    # found — a fully-booked location would scan the lot.
+    end_day = min(end_day, start_day + timedelta(days=MAX_SEARCH_SPAN_DAYS))
+
+    # ONE query for the whole range, instead of one per candidate start.
+    window_start, _ = local_day_bounds_utc(location, start_day)
+    _, window_end = local_day_bounds_utc(location, end_day)
+    booked = _BookedIndex(tenant, location, window_start, window_end)
+
     providers = _candidate_providers(tenant, location, provider)
     resources = _candidate_resources(tenant, location, service, resource)
 
@@ -385,9 +442,17 @@ def find_available_slots(*, tenant, location, service, date_from=None,
     if not service.requires_resource and not resources:
         resources = [None]
     if not providers:
-        # No provider is a legitimate configuration for something like a phone
-        # consultation. It is NOT a fallback for a misconfigured provider — that
-        # case is caught above by get_provider_intervals returning [].
+        if provider is not None:
+            # A SPECIFIC person was asked for and they are not bookable here —
+            # suspended, unassigned, or not a provider at all. Falling through to
+            # the no-provider branch would answer "yes, Tuesday at ten" for a
+            # request that named someone who cannot take it, which is worse than
+            # offering nothing.
+            return []
+        # Otherwise: no provider at all is a legitimate configuration, for
+        # something like a phone consultation. It is NOT a fallback for a
+        # misconfigured provider — that case is `get_provider_intervals`
+        # returning [], which yields no windows and therefore no slots.
         providers = [None]
 
     span_minutes = service.duration_minutes
@@ -428,7 +493,7 @@ def find_available_slots(*, tenant, location, service, date_from=None,
                     block_end_utc = _advance(start_utc, block_minutes)
 
                     chosen_resource = _first_free_resource(
-                        tenant=tenant, location=location, resources=resources,
+                        booked=booked, resources=resources,
                         start_utc=start_utc, end_utc=block_end_utc,
                         provider=candidate_provider,
                     )
@@ -467,16 +532,84 @@ def find_available_slots(*, tenant, location, service, date_from=None,
 _NO_RESOURCE_FREE = object()
 
 
-def _first_free_resource(*, tenant, location, resources, start_utc, end_utc,
-                         provider):
-    """The first resource free for this span, or the no-free sentinel."""
-    for candidate in resources:
-        clash = overlapping_appointments(
-            tenant=tenant, location=location,
-            start_utc=start_utc, end_utc=end_utc,
-            provider=provider, resource=candidate,
+class _BookedIndex:
+    """The whole search range's existing bookings, loaded ONCE.
+
+    `find_available_slots` tests candidate starts on a 15-minute grid across
+    every provider and every resource for up to 60 days. Asking the database
+    per candidate turns one search into thousands of queries — measured at
+    >9,000 queries and 37 seconds for a busy two-provider location, on a path
+    a phone caller can trigger.
+
+    So the range is fetched once, bucketed by the two things a booking actually
+    contends for, and every candidate is tested in memory. The intervals stored
+    are BLOCKING spans: `[start_at, end_at + that row's own service buffer)`.
+
+    This is a read-side optimisation only. `book_slot` still re-checks under a
+    real row lock with a fresh locking SELECT — an in-memory snapshot cannot
+    serialise two concurrent writers, and must never be mistaken for something
+    that can.
+    """
+
+    def __init__(self, tenant, location, window_start, window_end):
+        from apps.scheduling.models import Appointment
+
+        self.by_provider = {}
+        self.by_resource = {}
+
+        widest = _widest_buffer_minutes(tenant)
+        rows = (
+            Appointment.objects.filter(
+                tenant=tenant, location=location,
+                status__in=BLOCKING_STATUSES,
+                start_at__lt=window_end,
+                end_at__gt=window_start - timedelta(minutes=widest),
+            )
+            .select_related('service')
+            .only('start_at', 'end_at', 'provider_id', 'resource_id',
+                  'service__buffer_minutes')
         )
-        if not clash.exists():
+
+        for row in rows:
+            buffer_minutes = (
+                row.service.buffer_minutes if row.service_id else 0
+            )
+            span = (row.start_at, row.end_at + timedelta(minutes=buffer_minutes))
+            if row.provider_id is not None:
+                self.by_provider.setdefault(row.provider_id, []).append(span)
+            if row.resource_id is not None:
+                self.by_resource.setdefault(row.resource_id, []).append(span)
+
+    def is_free(self, *, start_utc, end_utc, provider_id, resource_id):
+        """Whether nothing booked blocks `[start_utc, end_utc)`.
+
+        Mirrors `overlapping_appointments`: with neither a provider nor a
+        resource there is no exclusive entity to contend for, so the span is
+        free.
+        """
+        if provider_id is None and resource_id is None:
+            return True
+        for bucket, key in ((self.by_provider, provider_id),
+                            (self.by_resource, resource_id)):
+            if key is None:
+                continue
+            for booked_start, blocks_until in bucket.get(key, ()):
+                if booked_start < end_utc and blocks_until > start_utc:
+                    return False
+        return True
+
+
+def _first_free_resource(*, booked, resources, start_utc, end_utc, provider):
+    """The first resource free for this span, or the no-free sentinel.
+
+    Reads the prefetched index rather than the database — see `_BookedIndex`.
+    """
+    provider_id = getattr(provider, 'pk', None)
+    for candidate in resources:
+        if booked.is_free(
+            start_utc=start_utc, end_utc=end_utc,
+            provider_id=provider_id, resource_id=getattr(candidate, 'pk', None),
+        ):
             return candidate
     return _NO_RESOURCE_FREE
 
@@ -486,6 +619,10 @@ def _candidate_providers(tenant, location, provider):
     from apps.accounts.models import User
 
     if provider is not None:
+        # Even a PINNED provider is re-checked: a suspended user who cannot log
+        # in must not have slots minted against them.
+        if provider.status != User.STATUS_ACTIVE:
+            return []
         return [provider]
     return list(
         # `user_locations` is User -> UserLocation; `user_assignments` is the
@@ -493,7 +630,7 @@ def _candidate_providers(tenant, location, provider):
         User.objects.filter(
             tenant=tenant,
             is_provider=True,
-            status='active',
+            status=User.STATUS_ACTIVE,
             user_locations__location=location,
         ).distinct().order_by('pk')
     )
@@ -600,7 +737,7 @@ def book_slot(*, tenant, location, token, contact, reason='', notes='',
         # The token path bypasses the form, which is the only other place the
         # contact queryset is narrowed. A posted foreign-tenant contact pk would
         # otherwise never be checked at all.
-        raise SlotError('invalid_contact', 'That contact is not on file here.')
+        raise SlotError('not_permitted', 'That contact is not on file here.')
 
     start_utc = payload['start_utc']
     if start_utc < dj_timezone.now():
@@ -632,6 +769,7 @@ def book_slot(*, tenant, location, token, contact, reason='', notes='',
 
         provider = User.objects.filter(
             pk=payload['p'], tenant=tenant, is_provider=True,
+            status=User.STATUS_ACTIVE,
             user_locations__location=location,
         ).distinct().first()
         if provider is None:
@@ -697,16 +835,29 @@ def book_slot(*, tenant, location, token, contact, reason='', notes='',
     return appointment
 
 
-def reschedule_appointment(*, tenant, location, appointment, token, reason=''):
-    """Move an appointment onto a new slot token. Raises `SlotError`."""
+def reschedule_appointment(*, tenant, location, appointment, token, reason='',
+                           actor_contact=None):
+    """Move an appointment onto a new slot token. Raises `SlotError`.
+
+    `actor_contact`, when given, must be the contact the appointment is FOR.
+    Module 3.3 passes the contact it identified on the call, so a caller cannot
+    talk the agent into moving a stranger's booking by guessing an id.
+    """
     from django.db.utils import OperationalError
 
     from apps.scheduling.models import Appointment, Resource, Service
 
+    _assert_scope(appointment, tenant, location)
+
+    if actor_contact is not None and appointment.contact_id != actor_contact.pk:
+        raise SlotError(
+            'not_permitted', 'That appointment is not available here.'
+        )
+
     if appointment.status not in (Appointment.STATUS_SCHEDULED,
                                   Appointment.STATUS_CONFIRMED):
         raise SlotError(
-            'not_reschedulable',
+            'invalid_argument',
             'That appointment can no longer be moved.',
         )
 
@@ -734,6 +885,7 @@ def reschedule_appointment(*, tenant, location, appointment, token, reason=''):
 
         provider = User.objects.filter(
             pk=payload['p'], tenant=tenant, is_provider=True,
+            status=User.STATUS_ACTIVE,
             user_locations__location=location,
         ).distinct().first()
 
@@ -782,18 +934,31 @@ def reschedule_appointment(*, tenant, location, appointment, token, reason=''):
     return appointment
 
 
-def cancel_appointment(*, appointment, reason=''):
+def cancel_appointment(*, appointment, tenant, location, reason='',
+                       actor_contact=None):
     """Cancel, stamping the reason and the moment. Raises `SlotError`.
 
     Cancelling frees the slot (see `BLOCKING_STATUSES`) but keeps the row, so the
     calendar's history stays honest about what was booked and then dropped.
+
+    `tenant` and `location` are REQUIRED even though the HTTP view already
+    fetched through a scoped queryset: Module 3.3's `cancel_appointment` tool
+    will pass an `appointment_id` the model supplied, and cancelling someone
+    else's booking is exactly the damage Invariant 3 exists to prevent.
     """
     from apps.scheduling.models import Appointment
+
+    _assert_scope(appointment, tenant, location)
+
+    if actor_contact is not None and appointment.contact_id != actor_contact.pk:
+        raise SlotError(
+            'not_permitted', 'That appointment is not available here.'
+        )
 
     if appointment.status in (Appointment.STATUS_CANCELLED,
                               Appointment.STATUS_COMPLETED):
         raise SlotError(
-            'not_cancellable',
+            'invalid_argument',
             'That appointment has already been closed out.',
         )
 
