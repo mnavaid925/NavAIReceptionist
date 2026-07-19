@@ -20,10 +20,18 @@ Sub-modules seeded so far:
 * 4.2  Service, Resource — a catalogue mixing all-location and site-specific
        services, and rooms at BOTH locations of each tenant so a cross-location
        bug has somewhere to show up.
+* 4.3  Appointment — bookings at every demo location spanning all five statuses,
+       anchored to deterministic days so a re-run matches instead of duplicating.
 """
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
+from datetime import datetime, time as dt_time, timedelta
+
+from django.db.models import Q
+
+from apps.accounts.models import User
+from apps.scheduling.availability import _local_naive_to_utc
 from apps.scheduling.models import Contact, Resource, Service
 from apps.scheduling.services import normalize_e164
 from apps.tenants.models import Location, Tenant
@@ -189,9 +197,79 @@ DEMO_RESOURCES = {
 }
 
 
+# -- 4.3 Appointments -------------------------------------------------------- #
+#
+# `day_offset` is counted from the LOCATION's local today, and `hour`/`minute`
+# are LOCAL wall-clock times converted through `Location.tzinfo`. Both matter for
+# idempotency: a `now()`-derived start never matches on a second run and would
+# duplicate every appointment, every time (Seed Rule 1). The `(location, contact,
+# start_at)` triple is the dedupe key, so a fixed offset+hour reproduces exactly.
+#
+# Statuses deliberately span all five so every branch of the shared badge partial
+# has a row, and the cancelled one proves a cancelled slot is genuinely re-bookable.
+DEMO_APPOINTMENTS = {
+    'downtown': [
+        {'contact': ('Dana', 'Whitfield'), 'service': 'Routine check-up',
+         'resource': 'Surgery 1', 'day_offset': 1, 'hour': 9, 'minute': 0,
+         'status': 'scheduled', 'source': 'ai_phone',
+         'reason': 'Six-month check-up'},
+        {'contact': ('Marcus', 'Whitfield'), 'service': 'Emergency appointment',
+         'resource': 'Surgery 2', 'day_offset': 1, 'hour': 10, 'minute': 30,
+         'status': 'confirmed', 'source': 'ai_phone',
+         'reason': 'Broken filling, in pain'},
+        {'contact': ('Priya', 'Raman'), 'service': 'Teeth whitening',
+         'resource': 'Surgery 1', 'day_offset': 2, 'hour': 14, 'minute': 0,
+         'status': 'scheduled', 'source': 'web', 'reason': 'Whitening'},
+        {'contact': ('Owen', 'Baptiste'), 'service': 'Phone consultation',
+         'resource': None, 'day_offset': 2, 'hour': 11, 'minute': 0,
+         'status': 'scheduled', 'source': 'manual',
+         'reason': 'Wants to discuss options first'},
+        {'contact': ('Dana', 'Whitfield'), 'service': 'Routine check-up',
+         'resource': 'Surgery 1', 'day_offset': -14, 'hour': 9, 'minute': 30,
+         'status': 'completed', 'source': 'manual', 'reason': 'Previous visit'},
+        {'contact': ('Marcus', 'Whitfield'), 'service': 'Routine check-up',
+         'resource': 'Surgery 2', 'day_offset': -7, 'hour': 15, 'minute': 0,
+         'status': 'no_show', 'source': 'ai_phone', 'reason': 'Did not attend'},
+        {'contact': ('Priya', 'Raman'), 'service': 'Routine check-up',
+         'resource': 'Surgery 1', 'day_offset': 3, 'hour': 9, 'minute': 0,
+         'status': 'cancelled', 'source': 'ai_phone',
+         'reason': 'Called to cancel',
+         'cancellation_reason': 'Caller rearranged around work'},
+    ],
+    'uptown': [
+        {'contact': ('Dana', 'Whitfield'), 'service': 'Orthodontic review',
+         'resource': 'Surgery 1', 'day_offset': 1, 'hour': 9, 'minute': 30,
+         'status': 'scheduled', 'source': 'manual',
+         'reason': 'Brace adjustment'},
+        {'contact': ('Owen', 'Baptiste'), 'service': 'Routine check-up',
+         'resource': 'Consult room', 'day_offset': 2, 'hour': 15, 'minute': 0,
+         'status': 'confirmed', 'source': 'ai_phone', 'reason': 'Check-up'},
+    ],
+    'riverside': [
+        {'contact': ('Helena', 'Ostrom'), 'service': 'New patient assessment',
+         'resource': 'Consult room A', 'day_offset': 1, 'hour': 9, 'minute': 0,
+         'status': 'scheduled', 'source': 'ai_phone', 'reason': 'First visit'},
+        {'contact': ('Theo', 'Nakamura'), 'service': 'Physiotherapy session',
+         'resource': 'Physio gym', 'day_offset': 2, 'hour': 10, 'minute': 0,
+         'status': 'confirmed', 'source': 'manual', 'reason': 'Knee rehab'},
+        {'contact': ('Helena', 'Ostrom'), 'service': 'Telehealth call',
+         'resource': None, 'day_offset': 3, 'hour': 16, 'minute': 0,
+         'status': 'scheduled', 'source': 'web', 'reason': 'Follow-up by phone'},
+    ],
+    'lakeside': [
+        {'contact': ('Theo', 'Nakamura'), 'service': 'Follow-up',
+         'resource': 'Consult room A', 'day_offset': 1, 'hour': 11, 'minute': 0,
+         'status': 'scheduled', 'source': 'ai_phone', 'reason': 'Review'},
+        {'contact': ('Helena', 'Ostrom'), 'service': 'New patient assessment',
+         'resource': 'Consult room B', 'day_offset': 4, 'hour': 9, 'minute': 30,
+         'status': 'scheduled', 'source': 'manual', 'reason': 'New to Lakeside'},
+    ],
+}
+
+
 class Command(BaseCommand):
-    help = ('Seed demo contacts, services and resources for the calendar and '
-            'bookings module. Idempotent.')
+    help = ('Seed demo contacts, services, resources and appointments for the '
+            'calendar and bookings module. Idempotent.')
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -215,19 +293,31 @@ class Command(BaseCommand):
             return
 
         if options['flush']:
-            deleted, _ = Contact.objects.filter(
+            # ORDER MATTERS. `Appointment.contact` is PROTECT, so deleting
+            # contacts while any booking still references them raises
+            # ProtectedError and the whole flush rolls back. Children first,
+            # parents after — appointments, then the catalogue, then contacts.
+            from apps.scheduling.models import Appointment
+
+            deleted, _ = Appointment.objects.filter(
                 tenant__slug__in=slugs
             ).delete()
             self.stdout.write(self.style.WARNING(
-                f'Flushed {deleted} demo contact row(s).'
+                f'Flushed {deleted} demo appointment row(s).'
+            ))
+            deleted, _ = Resource.objects.filter(tenant__slug__in=slugs).delete()
+            self.stdout.write(self.style.WARNING(
+                f'Flushed {deleted} demo resource row(s).'
             ))
             deleted, _ = Service.objects.filter(tenant__slug__in=slugs).delete()
             self.stdout.write(self.style.WARNING(
                 f'Flushed {deleted} demo service row(s).'
             ))
-            deleted, _ = Resource.objects.filter(tenant__slug__in=slugs).delete()
+            deleted, _ = Contact.objects.filter(
+                tenant__slug__in=slugs
+            ).delete()
             self.stdout.write(self.style.WARNING(
-                f'Flushed {deleted} demo resource row(s).'
+                f'Flushed {deleted} demo contact row(s).'
             ))
 
         created = 0
@@ -264,6 +354,7 @@ class Command(BaseCommand):
 
         self._seed_services(tenants)
         self._seed_resources(tenants)
+        self._seed_appointments(tenants)
 
         self.stdout.write('')
         self.stdout.write('Sign in as a TENANT ADMIN to see this data:')
@@ -287,6 +378,114 @@ class Command(BaseCommand):
             '  Services with no location are offered everywhere; resources '
             'belong to ONE site, so switch location to see the other set.'
         )
+        self.stdout.write(
+            '  Appointments are location-scoped: each site has its own diary, '
+            'and availability only offers slots where a provider has hours.'
+        )
+
+    def _seed_appointments(self, tenants):
+        """Seed bookings at every demo location.
+
+        Dedupe key is `(location, contact, start_at)`. `start_at` is derived from
+        a FIXED day offset and local hour rather than from `now()`, which is what
+        makes a second run a no-op: a `now()`-relative start would differ by
+        milliseconds every time and duplicate the whole diary on every run.
+        """
+        from apps.scheduling.models import Appointment, Contact, Resource, Service
+
+        created = 0
+        skipped = 0
+        unresolved = 0
+
+        locations = {
+            location.slug: location
+            for location in Location.objects.filter(tenant__in=tenants.values())
+            .select_related('tenant')
+        }
+
+        for location_slug, specs in DEMO_APPOINTMENTS.items():
+            location = locations.get(location_slug)
+            if location is None:
+                continue
+            tenant = location.tenant
+            today_local = location.local_now().date()
+
+            for spec in specs:
+                first, last = spec['contact']
+                contact = Contact.objects.filter(
+                    tenant=tenant, first_name=first, last_name=last
+                ).first()
+                service = (
+                    Service.objects.filter(tenant=tenant, name=spec['service'])
+                    .filter(
+                        Q(location=location) | Q(location__isnull=True)
+                    ).first()
+                )
+                if contact is None or service is None:
+                    unresolved += 1
+                    continue
+
+                resource = None
+                if spec['resource']:
+                    resource = Resource.objects.filter(
+                        location=location, name=spec['resource']
+                    ).first()
+
+                # Local wall time -> UTC through THIS location's zone. A naive
+                # `make_aware` against the server default would put a Denver
+                # booking an hour out from a Chicago one.
+                local_day = today_local + timedelta(days=spec['day_offset'])
+                start_utc = _local_naive_to_utc(
+                    datetime.combine(
+                        local_day, dt_time(spec['hour'], spec['minute'])
+                    ),
+                    location.tzinfo,
+                )
+                if start_utc is None:
+                    # The chosen wall time falls in a DST gap at this location.
+                    unresolved += 1
+                    continue
+
+                if Appointment.objects.filter(
+                    tenant=tenant, location=location, contact=contact,
+                    start_at=start_utc,
+                ).exists():
+                    skipped += 1
+                    continue
+
+                provider = User.objects.filter(
+                    tenant=tenant, is_provider=True,
+                    user_locations__location=location,
+                ).distinct().first()
+
+                appointment = Appointment.objects.create(
+                    tenant=tenant, location=location, contact=contact,
+                    provider=provider, resource=resource, service=service,
+                    start_at=start_utc,
+                    end_at=start_utc + timedelta(
+                        minutes=service.duration_minutes
+                    ),
+                    status=spec['status'], reason=spec.get('reason', ''),
+                    source=spec['source'],
+                )
+                if spec['status'] == Appointment.STATUS_CANCELLED:
+                    appointment.cancelled_at = start_utc - timedelta(days=1)
+                    appointment.cancellation_reason = spec.get(
+                        'cancellation_reason', ''
+                    )
+                    appointment.save(update_fields=[
+                        'cancelled_at', 'cancellation_reason', 'updated_at',
+                    ])
+                created += 1
+
+        self.stdout.write(self.style.SUCCESS(
+            f'Appointments: {created} created, {skipped} already present.'
+        ))
+        if unresolved:
+            self.stdout.write(self.style.WARNING(
+                f'  {unresolved} appointment(s) skipped — a contact, service or '
+                'time could not be resolved at that location.'
+            ))
 
     # -- 4.2 ---------------------------------------------------------------- #
 
