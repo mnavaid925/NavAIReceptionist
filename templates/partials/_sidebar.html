@@ -37,8 +37,15 @@
       </button>
 
       <ul class="nav-sub" id="{{ module.dom_id }}" {% if not module.is_active %}hidden{% endif %}>
+        {% comment %}
+          Three states, not two:
+            - built WITH pages     -> one link per LIVE_LINKS entry
+            - built with NO pages  -> the title, plain (0.1 is login/logout/reset,
+                                      which are pre-auth or topbar surfaces)
+            - not built            -> greyed roadmap placeholder
+        {% endcomment %}
         {% for submodule in module.submodules %}
-          {% if submodule.is_live %}
+          {% if submodule.links %}
             {% for link in submodule.links %}
               <li>
                 <a class="nav-link {% if link.is_active %}active{% endif %}" href="{{ link.url }}">
@@ -46,6 +53,12 @@
                 </a>
               </li>
             {% endfor %}
+          {% elif submodule.is_live %}
+            <li>
+              <span class="nav-link" title="Built — no page to open from here">
+                <span class="nav-text">{{ submodule.title }}</span>
+              </span>
+            </li>
           {% else %}
             <li>
               <span class="nav-link is-roadmap" title="Not built yet">
