@@ -120,6 +120,17 @@ class AppointmentForm(TenantLocationModelForm):  # noqa: F405
         else:
             contact_field.queryset = Contact.objects.none()
 
+        # `cancelled` is NOT selectable here. Cancelling stamps `cancelled_at`
+        # and `cancellation_reason`, which only `availability.cancel_appointment`
+        # does — setting the status through this form would free the slot while
+        # leaving no record of when or why, and flipping back off `cancelled`
+        # would strand a stale timestamp. `completed` and `no_show` stay, because
+        # this form is their only transition path.
+        self.fields['status'].choices = [
+            (value, label) for value, label in Appointment.STATUS_CHOICES
+            if value != Appointment.STATUS_CANCELLED
+        ]
+
         self.fields['provider'].required = False
         self.fields['resource'].required = False
         self.fields['start_at'].input_formats = [
@@ -157,6 +168,13 @@ class AppointmentForm(TenantLocationModelForm):  # noqa: F405
                 f'{service.name} needs a room or resource. Pick one.',
             )
 
+        # Moving off `cancelled` must not leave the cancellation stamps behind,
+        # or the record would read as both live and cancelled.
+        status = cleaned.get('status')
+        if status and status != Appointment.STATUS_CANCELLED:
+            self.instance.cancelled_at = None
+            self.instance.cancellation_reason = ''
+
         if service is not None and start_at is not None:
             # `end_at` is derived, never posted: duration is the service's, and a
             # user-supplied end could silently disagree with it.
@@ -164,10 +182,14 @@ class AppointmentForm(TenantLocationModelForm):  # noqa: F405
                 minutes=service.duration_minutes
             )
 
-            # Same conflict rule the token path enforces, so a manual booking
-            # cannot quietly double-book what the agent would have refused. This
-            # is a pre-check for a good error message; `book_slot`'s locked
-            # re-check remains the real enforcement.
+            # A FRIENDLY PRE-CHECK ONLY — not the enforcement.
+            #
+            # This runs unlocked, so between it and the insert another writer can
+            # take the slot. The view wraps the save in `transaction.atomic()`,
+            # locks the contended rows and re-runs this check with
+            # `for_update=True`; that locked re-check is what actually prevents a
+            # double booking. This one exists so the common case gets a good
+            # message pointing at the field, instead of a bare form error.
             if self.tenant is not None and self.location is not None:
                 from apps.scheduling.availability import overlapping_appointments
 
