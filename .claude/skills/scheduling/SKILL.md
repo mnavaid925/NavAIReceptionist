@@ -17,7 +17,7 @@ though this module itself has **no realtime surface**.
 | Sub-module | Status | Adds |
 |---|---|---|
 | 4.1 Contact Directory | **BUILT** | `Contact` |
-| 4.2 Services & Resources | not built | `Service`, `Resource` |
+| 4.2 Services & Resources | **BUILT** | `Service`, `Resource` |
 | 4.3 Availability & Booking | not built | `Appointment` |
 | 4.4 Calendar Views | not built | none — a **view** sub-module |
 | 4.5 Bookings List & Callback Requests | not built | `CallbackRequest` |
@@ -54,6 +54,32 @@ Indexes: `idx_contact_tenant_phone` on `(tenant, phone_e164)` — the inbound-ca
 Members: `save()` (normalises `phone_e164` on **every** write), `display_name`, `has_name`,
 `is_anonymized`, `anonymize()`.
 
+### `Service` — 4.2 · `models/ServicesResources/Services.py`
+
+Base `TenantOwned`, but with a **hand-declared NULLABLE `location` FK** — the one shape in the project no
+abstract base expresses. `location=None` means offered at every site; a set location means that site only.
+`TenantOwned` alone would lose the per-site case; `TenantLocationOwned` would force a duplicate row per
+location for a service every branch offers.
+
+Fields: `name`, `description` (what the agent says aloud), `duration_minutes`, `buffer_minutes` (held
+**after** the appointment), `requires_resource`, `is_active`, `display_order`.
+Index `idx_service_tenant_loc_active` on `(tenant, location, is_active)`. Ordering `['display_order', 'name']`.
+
+Members: `is_all_locations`, `location_label`, `total_minutes` (duration + buffer — **this**, not
+`duration_minutes`, is what 4.3 must subtract from a working window), `is_offered_at(location)`.
+
+### `Resource` — 4.2 · `models/ServicesResources/Resources.py`
+
+Base `TenantLocationOwned` — fully location-scoped. A room is at one site by definition.
+
+Fields: `name`, `resource_number`, `description`, `is_active`, `display_order`.
+Unique constraint `uniq_resource_location_name` on **`(location, name)`** — Downtown and Uptown may each have
+a "Surgery 1". Index on `(tenant, location, is_active)`. Member: `display_label`.
+
+Deliberately **no `capacity`** (a room is exclusive; there is no group-class or attendee model) and
+**no FK to the user model** (the provider is a separate concern from the room — merging them would make
+"room 2 is busy" and "Dr Chen is busy" the same constraint when they are independent).
+
 ## Routes
 
 `urls/` is a **package** (not the flat module `tenants`/`accounts` use), because this app is headed for five
@@ -64,15 +90,22 @@ across the **whole concatenated list** — check any new greedy route against al
 `contact_list` · `contact_create` · `contact_detail` · `contact_edit` · `contact_delete` (POST) ·
 `contact_forget` (POST)
 
+**4.2** — `urls/ServicesResources/{Services,Resources}.py`:
+`service_list` · `service_create` · `service_detail` · `service_edit` · `service_delete` (POST) ·
+`resource_list` · `resource_create` · `resource_detail` · `resource_edit` · `resource_delete` (POST)
+
 ## Templates
 
 `templates/scheduling/directory/contact/` — `list.html`, `detail.html`, `form.html`, `_filters.html`.
+`templates/scheduling/catalog/service/` and `templates/scheduling/catalog/resource/` — same four each.
 Shared partials used: `partials/_pagination.html`, `_empty_state.html`, and (once 4.3 / Module 5 land)
 `_appointment_status_badge.html` / `_call_status_badge.html` — **both take `obj=`**, not
 `appointment=`/`session=`.
 
-The list header shows the **business name and "all locations"**, not an active-location indicator, because
-Contact is not location-scoped. Showing one would imply a filter that does not exist.
+**Each list header says something different, on purpose, because each model is scoped differently:**
+contacts → the business name and "all locations" (not location-scoped); services → the business name plus
+which site you are working at (nullable location); resources → the **active location name** (fully
+location-scoped, so the rows change on a switch and nothing else on screen would explain why).
 
 ## Tools & prompt surface
 
@@ -104,12 +137,40 @@ to look tidy: an anonymous caller with a number and no name, **two people sharin
 (`+13125550101`), an email-only web enquiry with no number, a deliberately **unnormalised** number
 (`3125550188`) that proves `save()` normalises the seeder's writes too, and all three `source` values.
 
+**4.2 seeds 9 services and 10 resources.** The services mix all-location and site-pinned entries, include an
+inactive one and a `requires_resource=False` phone consultation. The resources cover **all four** demo
+locations, with "Surgery 1" deliberately duplicated across Downtown and Uptown to prove the unique
+constraint is location-scoped. Services key on `(tenant, location, name)`; resources on `(location, name)` —
+the same tuples their forms validate.
+
 > **The dedupe lookup must normalise before comparing.** `Contact.save()` normalises on write, so keying on
 > the raw spec value re-creates the unnormalised row on every run. That bug shipped once and was caught by
 > the second-run check.
 
 ## Conventions & gotchas
 
+* **THE nullable-location trap (4.2).** `Service.location` may be `NULL`. Anywhere you filter services by
+  location, the filter must be **ADDITIVE** —
+  `Q(location=here) | Q(location__isnull=True)` — never a plain `filter(location=here)`, which silently
+  hides every business-wide service, i.e. most of a typical catalogue. `_bookable_here()` in
+  `views/ServicesResources/Services.py` is the canonical implementation; reuse it rather than rewriting it.
+* **Site-pinned services: business-wide READ, location-gated WRITE.** The catalogue is readable from any
+  site, but `service_edit_view` and `service_delete_view` refuse when the user is not assigned to a pinned
+  service's `location` — those fields decide what the agent offers and books there. An all-locations
+  service stays editable by anyone.
+* **`ServiceForm` renders `location`; it is the ONLY form in the project that does.** Justified because it
+  is a real product choice, not an identity field. Two things keep it safe: the queryset is narrowed to
+  `user.assigned_locations()`, and the instance's **current** location is UNIONed in — without that union
+  an unassigned editor's select renders with no option selected, the browser falls back to the blank
+  "All locations", and an unrelated edit silently widens the service to every site.
+* **Excluding a field from a form silences Django's `UniqueConstraint` check.** `ResourceForm` excludes
+  `location`, so Django cannot build the `(location, name)` tuple and skips validation entirely — a
+  duplicate would 500 with a raw `IntegrityError`. `ResourceForm.clean_name` enforces it by hand. Any
+  future form that excludes part of a constraint needs the same treatment.
+* **`.isdecimal()`, never `.isdigit()`, before `int()`.** `isdigit()` is `True` for `'²'` and fullwidth
+  `'１'`, which `int()` then refuses — turning a query-string filter into a 500.
+* **`save_or_report_conflict` (`views/_helpers.py`)** wraps `form.save()` for every form with a hand-rolled
+  uniqueness check, converting a lost race into a form error instead of a 500. Use it in 4.3/4.5 too.
 * **Access tier (module-wide, confirmed with the user).** list/detail/create/edit are open to **any signed-in
   tenant user** — taking bookings is front-desk work. Only **delete and forget** are
   `@tier_required(*MANAGEMENT_TIERS)`. This deliberately differs from `tenants`/`agents`, where every CRUD
@@ -156,12 +217,15 @@ rows.
 
 ```python
 '4.1': {'Contacts': 'scheduling:contact_list'},
+'4.2': {'Services': 'scheduling:service_list',
+        'Resources': 'scheduling:resource_list'},
 ```
 
 ## Tests
 
-`apps/scheduling/tests/` — `test_models.py`, `test_services.py`, `test_forms.py`, `test_views.py`,
-`test_security.py`. **89 passing.** Run with
+`apps/scheduling/tests/` — 4.1: `test_models.py`, `test_services.py`, `test_forms.py`, `test_views.py`,
+`test_security.py`; 4.2: `test_catalog_models.py`, `test_catalog_forms.py`, `test_catalog_views.py`,
+`test_catalog_security.py`. **224 passing.** Run with
 `venv\Scripts\python.exe -m pytest -q apps/scheduling`. Fixtures live in the repo-root `conftest.py` (two
 tenants, three locations, owner/manager/staff users, and client fixtures that activate a location through the
 real `accounts:switch_location` endpoint rather than poking the session).
