@@ -1,0 +1,58 @@
+{% comment %}
+  Filter bar for the user directory.
+
+  Comparison rules that matter here: choice fields compare with `==` against the
+  raw GET string; a FK pk would need `|stringformat:"d"` and never `|slugify`,
+  which produces a value that can never match and silently forgets the selection
+  after every submit. Every select carries a blank "All ..." first option so the
+  filter can be cleared.
+
+  The view validates each value against the model's real choices, so a junk
+  parameter degrades to no filter rather than raising.
+{% endcomment %}
+<form class="card card-body flex flex-wrap items-end gap-3" method="get">
+
+  <div class="form-group grow">
+    <label class="form-label" for="f-q">Search</label>
+    <input class="form-input" type="search" id="f-q" name="q"
+           placeholder="Name, email, username or phone"
+           value="{{ request.GET.q|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-tier">Role</label>
+    <select class="form-select" id="f-tier" name="tier">
+      <option value="">All roles</option>
+      {% for value, label in tier_choices %}
+        <option value="{{ value }}" {% if request.GET.tier == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-status">Status</label>
+    <select class="form-select" id="f-status" name="status">
+      <option value="">All statuses</option>
+      {% for value, label in status_choices %}
+        <option value="{{ value }}" {% if request.GET.status == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-provider">Bookable</label>
+    <select class="form-select" id="f-provider" name="provider">
+      <option value="">Everyone</option>
+      <option value="yes" {% if request.GET.provider == 'yes' %}selected{% endif %}>Providers only</option>
+      <option value="no" {% if request.GET.provider == 'no' %}selected{% endif %}>Non-providers</option>
+    </select>
+  </div>
+
+  <div class="form-group">
+    <span class="flex gap-2">
+      <button type="submit" class="btn btn-primary"><i data-lucide="filter"></i> Filter</button>
+      <a class="btn btn-outline" href="{{ request.path }}">Reset</a>
+    </span>
+  </div>
+
+</form>
