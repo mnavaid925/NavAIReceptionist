@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}Edit business settings{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Edit business settings</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'tenants:business_settings' %}">Business</a></li>
+      <li>Edit</li>
+    </ol>
+  </nav>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-header"><span>Business details</span></div>
+
+        <div class="card-body grid gap-4">
+          {% if form.non_field_errors %}
+            <div class="alert alert-red" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+
+        <div class="card-header">
+          <a class="btn btn-outline" href="{% url 'tenants:business_settings' %}">Cancel</a>
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i> Save settings
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside>
+    <div class="card">
+      <div class="card-header"><span>Where these appear</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          The business name is spoken to callers and printed on booking
+          confirmations. The timezone is the default for new locations only &mdash;
+          each location keeps its own, and appointment times are always evaluated
+          in the location's, never this one.
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
