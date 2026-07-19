@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from apps.scheduling.models import Contact, Resource, Service
+from apps.scheduling.models import Appointment, Contact, Resource, Service
 
 
 @admin.register(Contact)
@@ -39,3 +39,21 @@ class ResourceAdmin(admin.ModelAdmin):
     search_fields = ('name', 'resource_number', 'description')
     list_select_related = ('tenant', 'location')
     ordering = ('tenant__name', 'location__name', 'display_order', 'name')
+
+
+@admin.register(Appointment)
+class AppointmentAdmin(admin.ModelAdmin):
+    list_display = ('start_at', 'contact', 'service', 'provider', 'resource',
+                    'location', 'status', 'source')
+    list_filter = ('status', 'source', 'tenant', 'location')
+    search_fields = ('contact__first_name', 'contact__last_name',
+                     'contact__phone_e164', 'reason')
+    list_select_related = ('tenant', 'location', 'contact', 'service',
+                           'resource', 'provider')
+    date_hierarchy = 'start_at'
+    ordering = ('-start_at',)
+    # `end_at` is derived from the service duration and `source` is provenance;
+    # both are server-owned. Editable here only because the admin is a break-glass
+    # tool, but the cancellation stamps stay readonly so a cancellation cannot be
+    # backdated into looking like something it was not.
+    readonly_fields = ('created_at', 'updated_at', 'cancelled_at')
