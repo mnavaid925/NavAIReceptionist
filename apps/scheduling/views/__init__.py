@@ -14,6 +14,7 @@ from apps.scheduling.views.ContactDirectory.Contacts import (
     contact_delete_view,
     contact_detail_view,
     contact_edit_view,
+    contact_forget_view,
     contact_list_view,
 )
 
@@ -23,4 +24,5 @@ __all__ = [
     'contact_detail_view',
     'contact_edit_view',
     'contact_delete_view',
+    'contact_forget_view',
 ]
