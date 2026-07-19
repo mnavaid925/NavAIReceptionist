@@ -2208,3 +2208,56 @@ Carried over verbatim from `research-scheduling-4.4.md`'s own Deferred section:
 ## Review notes
 
 (filled in at the end)
+
+## Review notes — 4.4 Calendar Views
+
+### Built
+
+A **VIEW sub-module**: zero models, **zero migrations** (`makemigrations scheduling --check` →
+"No changes detected"). Two views (`calendar_day`, `calendar_week`), three templates, two `theme.css`
+rules, shared helpers promoted to `views/_helpers.py`. Verified 76/76 by `temp/verify_4_4.py`, rendered
+and measured in a real browser, and the suite went 377 → **424 passing**.
+
+### The bug only the browser could find
+
+`temp/verify_4_4.py` was **76/76 green while every clickable slot had zero height.** Empty slots are `<a>`
+elements, and `height` does not apply to a non-replaced inline element — so the grid's rows and the entire
+click-to-book surface were invisible. The page returned 200, the context assertions passed, and the
+appointment blocks even positioned correctly. Fixed with `display: block` on `.calendar-slot`.
+
+**Lesson: for anything visual, assertions prove behaviour, not appearance. Look at it.**
+
+### What the pre-code critique caught
+
+* **The sticky column head is still IN FLOW**, so events positioned against `.calendar-column` land one
+  head-height above their gridline — and the offset varies with font size and zoom, so no constant fixes
+  it. Hence `.calendar-column-body`.
+* **A float in a CSS custom property renders as `112,666`** under a non-English locale, invalidating the
+  `calc()` and snapping every block to `top: 0`. Every value is an `int`.
+* **`?date=9999-12-31` was an uncaught `OverflowError` 500** via `local_day_bounds_utc`'s
+  `day + timedelta(days=1)` — and it already reached 4.3's `?from=`/`?to=`. `parse_local_date` now clamps.
+* **Column membership, not FK null-ness**: a booking on a deactivated resource has a non-null FK and no
+  column, and would have vanished from the grid entirely.
+* **`no_show` frees its slot** (it is not in `BLOCKING_STATUSES`), so it must not occupy grid time.
+
+### What the post-code review caught
+
+* The week header counted all statuses while the grid painted only live ones — and unlike the day view it
+  has no freed-bookings table to explain the gap.
+* `bookable_resources as _location_resources` made one name mean two opposite things in the same app:
+  4.2's own `_location_resources` deliberately does NOT filter `is_active`. Aliases dropped.
+* `.calendar-event.confirmed` and `.completed` were byte-identical green — the only two statuses a live
+  grid normally shows, with colour as their sole carrier. `completed` is now muted.
+* Status reached screen readers nowhere: colour only, and `title` is dropped from the accessible name once
+  an anchor has text content. Every event now carries an `aria-label`.
+
+### Verified geometry (measured in-browser at 1280×800)
+
+09:30 → `top: 156px` (90 min × 26/15) · 14:30 → 676 · 30/60/15-min → 52/104/26px ·
+40 slots × 26 = 1040px column body · the 09:30 block sits exactly on the 09:30 row ·
+week is Monday-anchored with exactly one now-line.
+
+### Note
+
+The dev Daphne on :8000 predates these changes and does not auto-reload — **restart it to see 4.4**. A
+second launch entry on :8001 was added so a preview can run without colliding with it.
