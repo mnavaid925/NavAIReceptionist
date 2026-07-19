@@ -397,6 +397,77 @@ supported until April 2026.
 
 ---
 
+## Module 2 — Agent Setup & Telephony (2.1-2.4) — built and verified
+
+Research in `research-agents-2.{1,2,3,4}.md`, plans in `todo-2-2.{1,2,3,4}.md`
+(produced by a parallel research→plan workflow). Mounted at `/agent/`. Skill at
+`.claude/skills/agents/SKILL.md`.
+
+**One new model — `agents.AgentSetting`, the 5th of the eleven.** Only 2.1 added
+it; 2.2, 2.3 and 2.4 edit different field groups of the same row and added no
+migration.
+
+### The two constraints that carry the module
+
+`inbound_phone_number` is unique **globally, across every tenant** — an inbound
+webhook has no session and resolves tenant + location from the dialled number, so
+two businesses owning one DID would be a cross-tenant leak. The column is
+**nullable rather than blank-defaulted**, because NULLs are distinct in a unique
+index and empty strings are not.
+
+`twilio_auth_token` is encrypted at rest and **absent from `Meta.fields`**. A
+`ModelForm` binds every field it names to its current value, so listing it would
+render a live credential into the edit page's `value=` attribute.
+
+### Measured findings
+
+* A 32-character token encrypts to **~147 characters**, so the ERD's `Char(128)`
+  cannot hold the ciphertext. Column is 512; the deviation is recorded.
+* `ENCRYPTION_KEY` in `.env.example` was **not a valid Fernet key** — the first
+  credential save would have raised. Replaced, with a generation command and a
+  rotation warning.
+* `deconstruct` must NOT hide `max_length`: stripping it left the column width
+  unpinned, so a later default change would alter the schema with no migration.
+
+### Adopted from research rather than planned by me
+
+**The test call takes no destination field at all.** The number is read
+server-side from the signed-in user's own profile. An endpoint that dials a
+client-supplied number is a toll-fraud gadget, and validating the number is not
+sufficient — "valid E.164" and "safe to dial" are different questions.
+
+### Bug found while building
+
+`{% verbatim %}` inside `{% comment %}` breaks the template: verbatim is handled
+by the **lexer**, so it swallows the `{% endcomment %}` and the comment never
+closes. Caught by the edit hook; recorded in the skill.
+
+### Verification evidence
+
+`temp/smoke_module2.py` — **101/101**, including: the plaintext token never
+present in the database column (raw SQL check); ciphertext fitting the column;
+the mask hiding the secret; duplicate inbound numbers refused across locations
+AND across tenants; an unset number stored as NULL; tenant-authored template
+syntax not executed; `resolve_transfer_number` never returning a caller-supplied
+value; the fake backend importing no provider SDK; the live backend refusing to
+initialise; blank-token submit leaving the stored token alone; a cross-tenant
+number collision message that does not disclose the other business; every one of
+8 pages checked for the token; and a structural assertion that **no agents route
+accepts a pk**.
+
+Regressions: Module 1 **115/115**, Module 0 **61/61** and **156/156**. Live
+Daphne run: all 8 pages render, zero template-tag leaks, no token leak.
+
+### Still outstanding across Modules 0, 1 AND 2
+
+Steps 4-11 have not run for ANY sub-module: `code-reviewer`, `explorer`,
+`frontend-reviewer`, `performance-reviewer`, `realtime-reviewer`,
+`qa-smoke-tester`, `security-reviewer`, `test-writer`. **There is still no
+committed pytest suite** — no app has a `tests/` directory, and all 433 checks
+live in gitignored `temp/` scripts.
+
+---
+
 ## Module 1 — Business & Locations (1.1-1.4) — built and verified
 
 Plans in `todo-1.1-1.2.md` and `todo-1.3-1.4.md`; research in
