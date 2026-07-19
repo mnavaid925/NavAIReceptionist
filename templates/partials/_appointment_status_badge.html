@@ -1,0 +1,23 @@
+{% comment %}
+  Appointment status badge.
+
+    scheduled -> badge-info   confirmed -> badge-green   completed -> badge-green
+    cancelled -> badge-red    no_show   -> badge-amber
+
+  Values are the exact model choices: 'no_show', not 'noshow'.
+
+  Usage: {% include "partials/_appointment_status_badge.html" with obj=appointment %}
+{% endcomment %}
+{% if obj.status == 'scheduled' %}
+  <span class="badge badge-info">Scheduled</span>
+{% elif obj.status == 'confirmed' %}
+  <span class="badge badge-green">Confirmed</span>
+{% elif obj.status == 'completed' %}
+  <span class="badge badge-green">Completed</span>
+{% elif obj.status == 'cancelled' %}
+  <span class="badge badge-red">Cancelled</span>
+{% elif obj.status == 'no_show' %}
+  <span class="badge badge-amber">No Show</span>
+{% else %}
+  <span class="badge badge-muted">{{ obj.get_status_display }}</span>
+{% endif %}
