@@ -1,0 +1,58 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{% block title %}Sign in{% endblock %} &middot; NavAIReceptionist</title>
+
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232563eb'/><text x='16' y='22' font-size='17' font-family='sans-serif' font-weight='bold' fill='white' text-anchor='middle'>N</text></svg>">
+
+  {% comment %}
+    Shell-less base for the pre-authentication pages. The application sidebar has
+    nowhere to point an anonymous request, so these pages use the .auth-page /
+    .auth-card block from theme.css instead of base.html's shell — but they share
+    the same stylesheet and the same layout engine, so a user's chosen theme
+    survives sign-out and sign-in.
+  {% endcomment %}
+  <script src="{% static 'js/layout.js' %}?v=1"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="{% static 'css/theme.css' %}?v=1">
+</head>
+
+<body>
+<div class="auth-page">
+  <div class="auth-card">
+
+    <div class="auth-brand">
+      <span class="brand-mark" aria-hidden="true"><i data-lucide="phone-call"></i></span>
+      <span>NavAIReceptionist</span>
+    </div>
+
+    {% if messages %}
+      <div role="status" aria-live="polite">
+        {% for message in messages %}
+          <div class="alert
+            {% if message.level_tag == 'success' %}alert-green
+            {% elif message.level_tag == 'error' %}alert-red
+            {% elif message.level_tag == 'warning' %}alert-amber
+            {% else %}alert-info{% endif %}">
+            <span>{{ message }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% block content %}{% endblock %}
+
+    <p class="text-muted text-center text-sm" style="margin-block-start: 18px;">
+      &copy; {% now "Y" %} NavAIReceptionist
+    </p>
+
+  </div>
+</div>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>lucide.createIcons();</script>
+</body>
+</html>
