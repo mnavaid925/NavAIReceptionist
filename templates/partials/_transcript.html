@@ -1,0 +1,36 @@
+{% comment %}
+  Speaker-attributed transcript.
+
+  Reads `session.transcript` — a JSON LIST on the calls.CallSession row, entries
+  shaped {sequence, role, text, at, offset}. There is no transcript table and
+  there must never be one: that is Invariant 2.
+
+  Caller speech is untrusted input that reached us through a phone line and a
+  speech model. It is rendered as plain escaped text — never |safe, never inside
+  an inline style, never interpolated into inline JS.
+
+  Usage: {% include "partials/_transcript.html" with session=session %}
+{% endcomment %}
+<div class="card">
+  <div class="card-header">
+    <span>Transcript</span>
+    <span class="text-muted">{{ session.transcript|length }} turn{{ session.transcript|length|pluralize }}</span>
+  </div>
+  <div class="card-body">
+    {% if session.transcript %}
+      <div class="transcript-scroll" tabindex="0" role="log" aria-label="Call transcript">
+        {% for turn in session.transcript %}
+          <div class="transcript-turn {% if turn.role == 'agent' %}agent{% else %}user{% endif %}{% if turn.partial %} is-partial{% endif %}">
+            <span class="transcript-speaker">
+              {% if turn.role == 'agent' %}Agent{% else %}Caller{% endif %}
+            </span>
+            {% if turn.at %}<time datetime="{{ turn.at }}">{{ turn.offset|default:0 }}s</time>{% endif %}
+            <p>{{ turn.text }}</p>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      {% include "partials/_empty_state.html" with icon="message-square-off" title="No transcript" message="This call ended before any speech was captured." %}
+    {% endif %}
+  </div>
+</div>
