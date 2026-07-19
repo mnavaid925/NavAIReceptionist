@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}Find a slot{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Find a slot</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li><a href="{% url 'scheduling:appointment_list' %}">Appointments</a></li>
+        <li>Find a slot</li>
+      </ol>
+    </nav>
+  </div>
+</div>
+
+{% comment %}
+  This page runs the SAME availability engine the voice agent will call, so what
+  you see here is exactly what a caller would be offered. Each slot carries an
+  opaque signed token; booking posts that token back rather than a time, which is
+  what stops a slot being invented, edited or replayed from another location.
+{% endcomment %}
+
+<form class="card card-body flex flex-wrap items-end gap-3" method="get">
+  <div class="form-group grow">
+    <label class="form-label" for="f-service">Service</label>
+    <select class="form-select" id="f-service" name="service">
+      <option value="">Choose a service&hellip;</option>
+      {% for s in services %}
+        <option value="{{ s.pk }}" {% if service and service.pk == s.pk %}selected{% endif %}>
+          {{ s.name }} ({{ s.duration_minutes }} min)
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-provider">With</label>
+    <select class="form-select" id="f-provider" name="provider">
+      <option value="">Anyone</option>
+      {% for p in providers %}
+        <option value="{{ p.pk }}" {% if request.GET.provider == p.pk|stringformat:"d" %}selected{% endif %}>{{ p.display_name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-from">From</label>
+    <input class="form-input" type="date" id="f-from" name="from"
+           value="{{ request.GET.from|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-to">To</label>
+    <input class="form-input" type="date" id="f-to" name="to"
+           value="{{ request.GET.to|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <span class="flex gap-2">
+      <button type="submit" class="btn btn-primary"><i data-lucide="search"></i> Search</button>
+      <a class="btn btn-outline" href="{{ request.path }}">Reset</a>
+    </span>
+  </div>
+</form>
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header">
+    <span>
+      {% if searched %}
+        {{ slots|length }} slot{{ slots|length|pluralize }} offered
+      {% else %}
+        Open slots
+      {% endif %}
+    </span>
+    <span class="text-muted">
+      {% if active_location %}{{ active_location.name }}{% endif %}
+    </span>
+  </div>
+  <div class="card-body">
+
+    {% if slots %}
+      <p class="text-muted">
+        At most {{ max_slots }} slots are offered at a time &mdash; the same cap
+        the agent works to, so a caller is never read a long list. Choose who the
+        appointment is for, then book.
+      </p>
+
+      <div class="table-wrap" style="margin-block-start: 12px;">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">When</th>
+              <th scope="col">With</th>
+              <th scope="col">Where</th>
+              <th scope="col">For</th>
+              <th scope="col" class="text-right">Book</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for slot in slots %}
+              <tr>
+                <td>
+                  <time datetime="{{ slot.start|date:'c' }}">{{ slot.start|date:"D j M, H:i" }}</time>
+                  <span class="block text-muted text-xs">to {{ slot.end|date:"H:i" }}</span>
+                </td>
+                <td>
+                  {% if slot.provider %}
+                    {{ slot.provider.display_name }}
+                  {% else %}
+                    <span class="text-muted">Anyone</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if slot.resource %}
+                    {{ slot.resource.display_label }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td colspan="2">
+                  <form method="post" action="{% url 'scheduling:appointment_book' %}"
+                        class="flex flex-wrap items-end gap-2">
+                    {% csrf_token %}
+                    {% comment %}
+                      The token IS the slot. No time, provider or resource field
+                      is posted — those come from what the server signed.
+                    {% endcomment %}
+                    <input type="hidden" name="token" value="{{ slot.token }}">
+
+                    <span class="form-group grow" style="margin:0;">
+                      <label class="form-label" for="c-{{ forloop.counter }}">Contact</label>
+                      <select class="form-select" id="c-{{ forloop.counter }}" name="contact" required>
+                        <option value="">Who is this for?</option>
+                        {% for c in contacts %}
+                          <option value="{{ c.pk }}">{{ c.display_name }}</option>
+                        {% endfor %}
+                      </select>
+                    </span>
+
+                    <span class="form-group grow" style="margin:0;">
+                      <label class="form-label" for="r-{{ forloop.counter }}">Reason</label>
+                      <input class="form-input" type="text" id="r-{{ forloop.counter }}"
+                             name="reason" maxlength="255" placeholder="Optional">
+                    </span>
+
+                    <button type="submit" class="btn btn-primary">
+                      <i data-lucide="check"></i> Book
+                    </button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+    {% elif searched %}
+      {% include "partials/_empty_state.html" with icon="calendar-x" title="Nothing open" message="No slots match. A slot needs a provider with working hours at this location, a free room where the service needs one, and enough notice before it starts." %}
+    {% else %}
+      {% include "partials/_empty_state.html" with icon="calendar-search" title="Choose a service" message="Pick a service and the calendar is searched for open slots, exactly as the agent would." %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
