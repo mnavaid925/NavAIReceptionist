@@ -209,6 +209,24 @@ DEMO_RESOURCES = {
 # has a row, and the cancelled one proves a cancelled slot is genuinely re-bookable.
 DEMO_APPOINTMENTS = {
     'downtown': [
+        # day_offset 0 — TODAY. The calendar opens on today by default, so
+        # without these the very first thing a new developer sees is an empty
+        # grid that looks broken. Spread across the working day and across both
+        # rooms so the by-resource column view has something in every column.
+        {'contact': ('Dana', 'Whitfield'), 'service': 'Routine check-up',
+         'resource': 'Surgery 1', 'day_offset': 0, 'hour': 9, 'minute': 30,
+         'status': 'confirmed', 'source': 'ai_phone', 'reason': 'Check-up'},
+        {'contact': ('Marcus', 'Whitfield'), 'service': 'Routine check-up',
+         'resource': 'Surgery 2', 'day_offset': 0, 'hour': 10, 'minute': 0,
+         'status': 'scheduled', 'source': 'manual', 'reason': 'Cleaning'},
+        {'contact': ('Priya', 'Raman'), 'service': 'Phone consultation',
+         'resource': None, 'day_offset': 0, 'hour': 11, 'minute': 15,
+         'status': 'scheduled', 'source': 'web',
+         'reason': 'Quick question about treatment'},
+        {'contact': ('Owen', 'Baptiste'), 'service': 'Teeth whitening',
+         'resource': 'Surgery 1', 'day_offset': 0, 'hour': 14, 'minute': 30,
+         'status': 'scheduled', 'source': 'ai_phone', 'reason': 'Whitening'},
+
         {'contact': ('Dana', 'Whitfield'), 'service': 'Routine check-up',
          'resource': 'Surgery 1', 'day_offset': 1, 'hour': 9, 'minute': 0,
          'status': 'scheduled', 'source': 'ai_phone',
@@ -246,6 +264,14 @@ DEMO_APPOINTMENTS = {
          'status': 'confirmed', 'source': 'ai_phone', 'reason': 'Check-up'},
     ],
     'riverside': [
+        # TODAY at the other tenant's site too, so switching tenant or location
+        # never lands on an empty calendar.
+        {'contact': ('Helena', 'Ostrom'), 'service': 'Follow-up',
+         'resource': 'Consult room A', 'day_offset': 0, 'hour': 10, 'minute': 0,
+         'status': 'confirmed', 'source': 'ai_phone', 'reason': 'Review'},
+        {'contact': ('Theo', 'Nakamura'), 'service': 'Physiotherapy session',
+         'resource': 'Physio gym', 'day_offset': 0, 'hour': 15, 'minute': 0,
+         'status': 'scheduled', 'source': 'manual', 'reason': 'Knee rehab'},
         {'contact': ('Helena', 'Ostrom'), 'service': 'New patient assessment',
          'resource': 'Consult room A', 'day_offset': 1, 'hour': 9, 'minute': 0,
          'status': 'scheduled', 'source': 'ai_phone', 'reason': 'First visit'},
