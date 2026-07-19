@@ -10,9 +10,21 @@ password or email, calendar, bookings, agent setup + Twilio, call transfer, user
 **Multi-tenant means multi-location.** A business (tenant) adds locations, and Twilio numbers, agent
 setup, calendar and staff are configured **per location**.
 
-> **This repository is greenfield.** Nothing is built yet — there is no `apps/` directory. The module
-> catalog and the project layout below describe the **planned** structure that the build sequence will
-> produce, one sub-module at a time. Do not read any path in this file as a claim that the code exists.
+> **Build state — read this before trusting any path below.**
+>
+> The foundation and **sub-module 0.1 (Authentication & Session)** are built and running. Everything
+> else in the module catalog is **not built yet**, and the sidebar reflects that honestly: 25 of the 26
+> sub-modules render as greyed-out roadmap rows.
+>
+> | Built | Not built |
+> |---|---|
+> | `config/` (settings, ASGI + Channels, urls), `manage.py` | Modules 2–5 entirely (`agents`, `runtime`, `scheduling`, `calls`) |
+> | `apps/tenants` — `Tenant` + `Location` models, admin, `seed_tenants` | Module 1's views, CRUD and templates |
+> | `apps/accounts` — `User` + `UserLocation`, login/logout, password reset, throttling, middleware, `seed_accounts` | Sub-modules 0.2 (change password/email), 0.3 (user directory), 0.4 (location switcher) |
+> | The design system — `static/css/theme.css`, `static/js/layout.js`, `templates/base.html` + partials | |
+>
+> A path in the "Project layout" section at the end of this file is a **plan**, not a claim that the
+> code exists. Grep before you rely on one.
 
 ---
 
@@ -109,21 +121,29 @@ venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
 # then edit .env — at minimum SECRET_KEY, DB_*, and leave PROVIDER_MODE=fake
 
-# 3. Database (MySQL/MariaDB, e.g. XAMPP)
-mysql -u root -e "CREATE DATABASE navai_receptionist CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-
-# Steps 4-6 apply once the Module 0/1 foundation exists (see the greenfield note above) —
-# there is no manage.py and no apps/ in a fresh checkout, so they cannot run yet.
+# 3. Database (MySQL/MariaDB, e.g. XAMPP — start it from the XAMPP control panel first)
+C:\xampp\mysql\bin\mysql.exe -u root -e "CREATE DATABASE IF NOT EXISTS navai_receptionist CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # 4. Migrate
 venv\Scripts\python.exe manage.py check; venv\Scripts\python.exe manage.py migrate
 
-# 5. Seed demo data (foundation first, then any built module's seed_<slug>)
-venv\Scripts\python.exe manage.py seed_tenants; venv\Scripts\python.exe manage.py seed_accounts
+# 5. Seed demo data — seed_accounts calls seed_tenants automatically if no business exists
+venv\Scripts\python.exe manage.py seed_accounts
 
-# 6. Platform superuser
-venv\Scripts\python.exe manage.py createsuperuser
+# 6. Run it (Daphne, never runserver)
+venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
 ```
+
+Then open **http://127.0.0.1:8000/login/** and sign in with one of the demo accounts below.
+
+Both seeders are **idempotent** — running them again prints `Data already exists. Use --flush to
+re-seed.` and changes nothing. `seed_accounts --flush` rebuilds the demo users from scratch.
+
+> **Database version.** This project is pinned to **Django 4.2 LTS** because Django 5.1+ requires
+> MariaDB 10.5 or later, and XAMPP currently ships 10.4. If you see
+> `NotSupportedError: MariaDB 10.5 or later is required`, your Django is too new for your database —
+> either reinstall from `requirements.txt` or upgrade MariaDB. Note that 4.2 LTS support ends in
+> **April 2026**, so the database upgrade belongs on the roadmap rather than deferred indefinitely.
 
 > ⚠️ **`AUTH_USER_MODEL = 'accounts.User'` must be set in `config/settings.py` before the very first
 > `makemigrations`.** The `accounts` app ships the custom user model (it carries a `tenant` FK), and other
@@ -133,9 +153,53 @@ venv\Scripts\python.exe manage.py createsuperuser
 > migrations exist requires a **destructive reset** — drop the database and regenerate every migration. Get it
 > right on day one.
 
-> **The superuser has no tenant.** Every tenant-scoped view filters by `tenant=request.tenant`, so
-> logging in as the superuser shows empty lists by design. To see seeded data, log in as a tenant
-> admin created by the seeder (for example `admin_acme`), which also has an active location.
+---
+
+## Signing in for the first time
+
+`seed_accounts` creates two demo businesses with two locations each, and four users. The login form at
+**http://127.0.0.1:8000/login/** takes **three** fields — the Customer ID resolves the business
+*before* any credential is checked, which is what lets the same email address exist in more than one
+business.
+
+**Password for every demo account: `navai-demo-2026`**
+
+| Business | Customer ID | Email | Username | Role | Can switch into |
+|---|---|---|---|---|---|
+| Acme Dental Group | `ACME-1001` | `admin@acme.test` | `admin_acme` | Owner | Downtown + Uptown |
+| Acme Dental Group | `ACME-1001` | `downtown.manager@acme.test` | `acme_downtown` | Manager | Downtown only |
+| Globex Health | `GLBX-2002` | `admin@globex.test` | `admin_globex` | Owner | Lakeside + Riverside |
+| Globex Health | `GLBX-2002` | `riverside.staff@globex.test` | `globex_riverside` | Staff | Riverside only |
+
+**Start with `ACME-1001` / `admin@acme.test`.** The middle field accepts the email *or* the username
+interchangeably, and both are case-insensitive, as is the Customer ID.
+
+The seeder prints all of this at the end of its run, so `manage.py seed_accounts` is always the
+authoritative source — read its output rather than trusting this table if the two ever disagree.
+
+### Three things that look like bugs but are not
+
+- **"Active location: Not selected"** on either Owner account. Both are assigned to two locations, and
+  the switcher that lets a user choose between them is sub-module **0.4**, not built yet. A user with
+  exactly one assignment auto-activates it — sign in as `downtown.manager@acme.test` to see an active
+  location resolved.
+- **Almost the entire sidebar is greyed out.** Only sub-module 0.1's Dashboard link is live; the other
+  25 rows are roadmap placeholders. The sidebar is driven by the `LIVE_LINKS` ledger in
+  `apps/accounts/navigation.py`, so it can only ever show what genuinely exists.
+- **The superuser sees no data at all.** `admin@navai.local` (same password) signs in at **/admin/**
+  with no Customer ID, because it deliberately has `tenant=None`. Every tenant-scoped view filters by
+  `tenant=request.tenant`, so an empty result is correct behaviour, not a broken page. Use a tenant
+  admin to see seeded data.
+
+### Why login may fail
+
+Every failure — wrong Customer ID, unknown user, wrong password, deactivated business, suspended
+account — returns the **same** message on purpose, so the form cannot be used to discover which
+accounts exist. If you are locked out, check the Customer ID first; it is the field people miss.
+
+After 5 failed attempts within 15 minutes the account **and** your IP are throttled, and a *correct*
+password will still be refused until the window expires. That is the throttle working. To clear it
+during development, restart the server — the counters live in the local-memory cache.
 
 ---
 
