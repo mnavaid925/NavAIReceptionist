@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Twilio connection{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Edit Twilio connection</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'agents:twilio_connection' %}">Twilio</a></li>
+      <li>Edit</li>
+    </ol>
+  </nav>
+</div>
+
+{% include "agents/_tabs.html" %}
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    {% comment %}
+      The auth token input is rendered by a form field that is NEVER bound to the
+      stored value — the model field is deliberately absent from Meta.fields. So
+      this page's source can never contain the credential, however it is reached.
+    {% endcomment %}
+    <form method="post" novalidate autocomplete="off">
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-header"><span>{{ active_location.name }}</span></div>
+
+        <div class="card-body grid gap-4">
+          {% if form.non_field_errors %}
+            <div class="alert alert-red" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% if setting.has_auth_token %}
+            <div class="alert alert-info">
+              <span>
+                A token is already stored ({{ setting.masked_auth_token }}). Leave
+                the token box blank to keep it.
+              </span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+
+        <div class="card-header">
+          <a class="btn btn-outline" href="{% url 'agents:twilio_connection' %}">Cancel</a>
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i> Save connection
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside>
+    <div class="card">
+      <div class="card-header"><span>Handling the token</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          The auth token is stored encrypted and is never rendered back into this
+          page, written to a log, or included in a message. That is why it cannot
+          be shown to you again &mdash; only replaced.
+        </p>
+        <p class="text-muted" style="margin-block-start: 10px;">
+          The account SID is an identifier rather than a secret, so it is shown
+          normally. Treat the pair together as full access to the Twilio account.
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
