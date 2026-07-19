@@ -1,0 +1,91 @@
+{% comment %}
+  The application topbar.
+
+  `nav_urls` entries are resolved defensively in the context processor, so a link
+  whose sub-module has not been built yet is simply absent rather than a
+  NoReverseMatch on every page. The location switcher is a POST form because it
+  mutates session state, and the chosen id is re-validated against the user's
+  UserLocation rows server-side — this control is UI, never authorization.
+{% endcomment %}
+<header class="app-topbar">
+
+  <button type="button" class="btn btn-icon" data-action="toggle-sidebar"
+          aria-label="Toggle navigation">
+    <i data-lucide="menu"></i>
+  </button>
+
+  <div class="topbar-search">
+    <i data-lucide="search"></i>
+    <label class="sr-only" for="topbar-search">Search</label>
+    <input class="form-input" type="search" id="topbar-search" name="q"
+           placeholder="Search..." autocomplete="off">
+    <kbd>&#8984;K</kbd>
+  </div>
+
+  <div class="flex items-center gap-2 ms-auto">
+
+    {% if active_location %}
+      {% if nav_urls.switch_location and user_locations %}
+        <form class="location-switcher" method="post" action="{{ nav_urls.switch_location }}">
+          {% csrf_token %}
+          <i data-lucide="map-pin" aria-hidden="true"></i>
+          <label class="sr-only" for="active-location">Active location</label>
+          <select class="form-select" id="active-location" name="location"
+                  onchange="this.form.submit()">
+            {% for location in user_locations %}
+              <option value="{{ location.pk }}"
+                {% if location.pk == active_location.pk %}selected{% endif %}>
+                {{ location.name }}
+              </option>
+            {% endfor %}
+          </select>
+          <noscript><button type="submit" class="btn btn-outline">Switch</button></noscript>
+        </form>
+      {% else %}
+        <span class="location-switcher">
+          <i data-lucide="map-pin" aria-hidden="true"></i>
+          <span class="text-muted">{{ active_location.name }}</span>
+        </span>
+      {% endif %}
+    {% endif %}
+
+    {% if live_call_count %}
+      <span class="live-badge" aria-label="{{ live_call_count }} call{{ live_call_count|pluralize }} in progress">
+        {{ live_call_count }} live
+      </span>
+    {% endif %}
+
+    <button type="button" class="btn btn-icon" data-action="toggle-theme"
+            aria-label="Toggle dark mode" title="Toggle dark mode">
+      <i data-lucide="moon"></i>
+    </button>
+
+    <button type="button" class="btn btn-icon topbar-dot" aria-label="Notifications" title="Notifications">
+      <i data-lucide="bell"></i>
+    </button>
+
+    <button type="button" class="btn btn-icon" data-action="open-settings"
+            aria-label="Layout settings" title="Layout settings">
+      <i data-lucide="settings"></i>
+    </button>
+
+    {% if user.is_authenticated %}
+      <div class="flex items-center gap-2">
+        <span class="avatar-initial" aria-hidden="true">{{ user.initials }}</span>
+        <span class="hidden sm:block">
+          <span class="block font-semibold leading-tight">{{ user.display_name }}</span>
+          <span class="block text-muted text-xs leading-tight">{{ user.get_tier_display }}</span>
+        </span>
+      </div>
+      {% if nav_urls.logout %}
+        <form method="post" action="{{ nav_urls.logout }}">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-icon" aria-label="Sign out" title="Sign out">
+            <i data-lucide="log-out"></i>
+          </button>
+        </form>
+      {% endif %}
+    {% endif %}
+
+  </div>
+</header>
