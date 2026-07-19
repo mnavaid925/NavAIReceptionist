@@ -1,0 +1,55 @@
+{% comment %}
+  Filter bar for the service catalogue.
+
+  `scope` is a string compared with `==`, EXCEPT the per-location options, whose
+  value is a pk and so compare with |stringformat:"d". The view authorises that
+  pk against the user's own assigned locations before filtering — a raw pk from a
+  query string is not trusted even for a read.
+
+  "Bookable here" is additive (this site + all-sites), never a hard
+  location= filter, or every business-wide service would vanish.
+{% endcomment %}
+<form class="card card-body flex flex-wrap items-end gap-3" method="get">
+
+  <div class="form-group grow">
+    <label class="form-label" for="f-q">Search</label>
+    <input class="form-input" type="search" id="f-q" name="q"
+           placeholder="Service name or description"
+           value="{{ request.GET.q|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-scope">Offered at</label>
+    <select class="form-select" id="f-scope" name="scope">
+      <option value="">Everywhere</option>
+      <option value="here" {% if request.GET.scope == 'here' %}selected{% endif %}>
+        Bookable at this location
+      </option>
+      <option value="all_locations" {% if request.GET.scope == 'all_locations' %}selected{% endif %}>
+        All-location services only
+      </option>
+      {% for loc in locations %}
+        <option value="{{ loc.pk }}" {% if request.GET.scope == loc.pk|stringformat:"d" %}selected{% endif %}>
+          {{ loc.name }} only
+        </option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-status">Status</label>
+    <select class="form-select" id="f-status" name="status">
+      <option value="">All statuses</option>
+      <option value="active" {% if request.GET.status == 'active' %}selected{% endif %}>Active only</option>
+      <option value="inactive" {% if request.GET.status == 'inactive' %}selected{% endif %}>Inactive only</option>
+    </select>
+  </div>
+
+  <div class="form-group">
+    <span class="flex gap-2">
+      <button type="submit" class="btn btn-primary"><i data-lucide="filter"></i> Filter</button>
+      <a class="btn btn-outline" href="{{ request.path }}">Reset</a>
+    </span>
+  </div>
+
+</form>
