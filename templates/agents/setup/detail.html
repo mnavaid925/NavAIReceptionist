@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+
+{% block title %}Agent setup{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Agent setup</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Agent Setup &amp; Telephony</li>
+        <li>{{ active_location.name }}</li>
+      </ol>
+    </nav>
+    <a class="btn btn-outline" href="{% url 'agents:agent_preview' %}">
+      <i data-lucide="eye"></i> Preview
+    </a>
+    <a class="btn btn-primary" href="{% url 'agents:agent_setup_edit' %}">
+      <i data-lucide="pencil"></i> Edit
+    </a>
+  </div>
+</div>
+
+{% include "agents/_tabs.html" %}
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 space-y-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>{{ active_location.name }}</span>
+        {% if setting.enabled %}
+          <span class="badge badge-green">Enabled</span>
+        {% else %}
+          <span class="badge badge-muted">Disabled</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <dl class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <dt class="form-label">Voice mode</dt>
+            <dd class="m-0">{{ setting.get_voice_provider_display }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Prompt variables</dt>
+            <dd class="m-0">{{ variable_count }} defined</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Greeting</span>
+        <span class="badge badge-info">Spoken instantly</span>
+      </div>
+      <div class="card-body">
+        {% if setting.greeting %}
+          <p class="text-muted text-sm">As the caller will hear it:</p>
+          <p style="font-size: 15px;">&ldquo;{{ rendered_greeting }}&rdquo;</p>
+          {% comment %}
+            The greeting is rendered server-side and costs zero LLM tokens, which
+            is why the caller never waits in silence when the agent answers.
+          {% endcomment %}
+        {% else %}
+          <p class="text-muted">
+            No greeting set. The caller would hear silence when the agent picks up.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>System prompt</span></div>
+      <div class="card-body">
+        {% if setting.prompt_text %}
+          <pre style="white-space: pre-wrap; margin: 0; font: inherit;">{{ setting.prompt_text }}</pre>
+        {% else %}
+          <p class="text-muted">No prompt set. The agent has no instructions.</p>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="space-y-4">
+    <div class="card">
+      <div class="card-header">
+        <span>Readiness</span>
+        {% if issues %}
+          <span class="badge badge-amber">{{ issues|length }} to fix</span>
+        {% else %}
+          <span class="badge badge-green">Ready</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        {% if issues %}
+          <ul class="grid gap-2" style="margin: 0; padding-inline-start: 18px;">
+            {% for issue in issues %}
+              <li class="text-sm">{{ issue }}</li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="text-muted">
+            Everything needed to take a live call is configured.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
