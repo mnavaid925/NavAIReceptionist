@@ -9,24 +9,34 @@ cannot compensate for it.
 """
 import logging
 
-from django.contrib.auth import authenticate, get_user_model, login, logout
+from django.contrib.auth import (
+    authenticate,
+    get_user_model,
+    login,
+    logout,
+    update_session_auth_hash,
+)
 from django.contrib.auth.tokens import default_token_generator
+from django.core import signing
 from django.core.mail import send_mail
 from django.utils.encoding import force_bytes, force_str
-from django.utils.http import (
-    url_has_allowed_host_and_scheme,
-    urlsafe_base64_decode,
-    urlsafe_base64_encode,
-)
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from apps.accounts import throttling
 from apps.accounts.forms import (
+    ChangeEmailRequestForm,
+    ChangePasswordForm,
     LoginForm,
     PasswordResetRequestForm,
     SetNewPasswordForm,
 )
 from apps.accounts.views._common import *  # noqa: F401,F403
-from apps.accounts.views._helpers import activate_sole_location, get_client_ip
+from apps.accounts.views._helpers import (
+    activate_sole_location,
+    get_client_ip,
+    safe_redirect_target,
+    send_credential_change_notice,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +45,9 @@ __all__ = [
     'logout_view',
     'password_reset_request_view',
     'password_reset_confirm_view',
+    'change_password_view',
+    'change_email_request_view',
+    'email_change_confirm_view',
 ]
 
 # ONE message for every failure path. Do not add a second.
@@ -66,14 +79,9 @@ The link can be used once and expires shortly. If you did not request this, you
 can safely ignore this email — your password has not changed.
 """
 
-CHANGED_EMAIL_SUBJECT = 'Your NavAIReceptionist password was changed'
-CHANGED_EMAIL_BODY = """Hello {name},
-
-The password for your NavAIReceptionist account at {business} has just been changed.
-
-If this was you, no action is needed. If it was not, contact your administrator
-immediately — someone else may have access to your account.
-"""
+# The password-changed and email-changed notices now live in views/_helpers.py as
+# `send_credential_change_notice`, shared by the reset flow here and by both 0.2
+# credential flows — one wording, one call path, no drift between them.
 
 
 # --------------------------------------------------------------------------- #
@@ -107,7 +115,7 @@ def login_view(request):
                 activate_sole_location(request, user)
                 logger.info('Login succeeded for user_id=%s tenant_id=%s',
                             user.pk, user.tenant_id)
-                return redirect(_safe_next(request))  # noqa: F405
+                return redirect(safe_redirect_target(request))  # noqa: F405
             # Never say WHICH part was wrong.
             form.add_error(None, UNIFORM_LOGIN_ERROR)
 
@@ -125,22 +133,6 @@ def logout_view(request):
     logout(request)
     messages.success(request, 'You have been signed out.')  # noqa: F405
     return redirect('accounts:login')  # noqa: F405
-
-
-def _safe_next(request):
-    """Resolve `?next=`, refusing anything off-site.
-
-    An unchecked `next` is an open redirect: a phishing link can send a user
-    through a genuine login form and out to an attacker's page.
-    """
-    candidate = request.POST.get('next') or request.GET.get('next') or ''
-    if candidate and url_has_allowed_host_and_scheme(
-        candidate,
-        allowed_hosts={request.get_host()},
-        require_https=request.is_secure(),
-    ):
-        return candidate
-    return 'accounts:dashboard'
 
 
 # --------------------------------------------------------------------------- #
@@ -235,7 +227,7 @@ def password_reset_confirm_view(request, uidb64, token):
 
     if request.method == 'POST' and form.is_valid():
         form.save()
-        _send_password_changed_email(user)
+        send_credential_change_notice(user, 'password')
         logger.info('Password reset completed for user_id=%s', user.pk)
         messages.success(  # noqa: F405
             request, 'Your password has been changed. Please sign in.'
@@ -258,22 +250,186 @@ def _user_from_uid(uidb64):
     return User.objects.filter(pk=pk).select_related('tenant').first()
 
 
-def _send_password_changed_email(user):
-    """Tell the account holder their password changed — the takeover tripwire.
+# --------------------------------------------------------------------------- #
+# 0.2 — Credential management
+# --------------------------------------------------------------------------- #
 
-    Sub-module 0.2 generalises this into the shared Credential Change Notice; it is
-    deliberately local until then rather than a premature abstraction.
+EMAIL_CHANGE_SALT = 'accounts.email-change'
+
+EMAIL_CHANGE_SUBJECT = 'Confirm your new NavAIReceptionist email address'
+EMAIL_CHANGE_BODY = """Hello {name},
+
+You asked to change the sign-in address on your NavAIReceptionist account at
+{business} to this one.
+
+Open this link to confirm the change:
+
+{url}
+
+The link can be used once and expires shortly. Until you open it, nothing has
+changed and your existing address still signs you in. If you did not request this,
+ignore this email.
+"""
+
+
+@login_required  # noqa: F405
+@require_http_methods(['GET', 'POST'])  # noqa: F405
+def change_password_view(request):
+    """Change your own password, gated on the current one."""
+    form = ChangePasswordForm(request.POST or None, user=request.user)
+    keys = throttling.build_keys(
+        'change_password', request.user.pk, get_client_ip(request)
+    )
+
+    if request.method == 'POST':
+        if throttling.is_throttled(keys):
+            form.add_error(None, THROTTLED_ERROR)
+        elif form.is_valid():
+            form.save()
+            throttling.clear(keys)
+            # Keeps THIS session signed in. Django rotates the session auth hash on
+            # a password change, so without this the user is bounced to the login
+            # page immediately after succeeding — and every other session for this
+            # account is invalidated, which is the behaviour we want.
+            update_session_auth_hash(request, request.user)
+            send_credential_change_notice(request.user, 'password')
+            logger.info('Password changed for user_id=%s', request.user.pk)
+            messages.success(  # noqa: F405
+                request,
+                'Your password has been changed. Any other sessions have been '
+                'signed out.',
+            )
+            return redirect('accounts:change_password')  # noqa: F405
+        else:
+            throttling.register_failure(keys)
+
+    return render(request, 'accounts/credentials/change_password.html', {  # noqa: F405
+        'form': form,
+    })
+
+
+@login_required  # noqa: F405
+@require_http_methods(['GET', 'POST'])  # noqa: F405
+def change_email_request_view(request):
+    """Request a new sign-in address.
+
+    Writes NOTHING. The address changes only when the confirmation link sent to the
+    new address is opened, so a typo cannot lock anyone out and nobody can repoint
+    an account at an address they do not control.
     """
+    form = ChangeEmailRequestForm(request.POST or None, user=request.user)
+    keys = throttling.build_keys(
+        'change_email', request.user.pk, get_client_ip(request)
+    )
+    sent_to = None
+
+    if request.method == 'POST':
+        if throttling.is_throttled(keys):
+            form.add_error(None, THROTTLED_ERROR)
+        elif form.is_valid():
+            new_email = form.cleaned_data['new_email']
+            _send_email_change_link(request, request.user, new_email)
+            throttling.register_failure(keys)
+            sent_to = new_email
+            logger.info('Email change requested for user_id=%s', request.user.pk)
+        else:
+            throttling.register_failure(keys)
+
+    return render(request, 'accounts/credentials/change_email.html', {  # noqa: F405
+        'form': form,
+        'sent_to': sent_to,
+    })
+
+
+def _send_email_change_link(request, user, new_email):
+    """Email a signed, short-TTL confirmation link to the NEW address.
+
+    The pending change lives entirely inside the signed token — there is no pending
+    -email table, which keeps the model count where the ERD fixes it. Embedding the
+    CURRENT email makes the token self-invalidating: once the change lands, the
+    stored email no longer matches and any copy of the link stops verifying, so it
+    is single-use without any server-side state to expire.
+    """
+    token = signing.dumps(
+        {'uid': user.pk, 'new_email': new_email, 'current_email': user.email},
+        salt=EMAIL_CHANGE_SALT,
+    )
+    url = request.build_absolute_uri(
+        reverse('accounts:email_change_confirm', kwargs={'token': token})  # noqa: F405
+    )
     try:
         send_mail(
-            CHANGED_EMAIL_SUBJECT,
-            CHANGED_EMAIL_BODY.format(
+            EMAIL_CHANGE_SUBJECT,
+            EMAIL_CHANGE_BODY.format(
                 name=user.display_name,
-                business=user.tenant.name if user.tenant else 'your business',
+                business=user.tenant.name if user.tenant_id else 'your business',
+                url=url,
             ),
             settings.DEFAULT_FROM_EMAIL,  # noqa: F405
-            [user.email],
-            fail_silently=True,
+            [new_email],
+            fail_silently=False,
         )
     except Exception:
-        logger.exception('Password-changed notice failed for user_id=%s', user.pk)
+        logger.exception('Email-change link failed for user_id=%s', user.pk)
+
+
+@login_required  # noqa: F405
+@require_http_methods(['GET'])  # noqa: F405
+def email_change_confirm_view(request, token):
+    """Apply a confirmed email change.
+
+    Requires a signed-in session as well as the token: a link leaked from an inbox
+    is not, on its own, enough to repoint an account.
+    """
+    from apps.accounts.models import User
+
+    try:
+        payload = signing.loads(
+            token,
+            salt=EMAIL_CHANGE_SALT,
+            max_age=settings.EMAIL_CHANGE_TOKEN_MAX_AGE,  # noqa: F405
+        )
+    except signing.BadSignature:
+        # Covers tampering, a wrong salt, and expiry.
+        return render(request, 'accounts/credentials/email_change_confirm.html', {  # noqa: F405
+            'valid': False,
+        })
+
+    user = request.user
+    old_email = payload.get('current_email')
+    new_email = payload.get('new_email')
+
+    # The token must belong to the signed-in user, and must still describe the
+    # account's CURRENT address — that second check is what makes it single-use.
+    if payload.get('uid') != user.pk or old_email != user.email:
+        return render(request, 'accounts/credentials/email_change_confirm.html', {  # noqa: F405
+            'valid': False,
+        })
+
+    # Re-check uniqueness at APPLY time, not just at request time. Between the two
+    # someone else in this business may have taken the address, and the DB
+    # constraint would surface as an IntegrityError 500 rather than a message.
+    taken = User.objects.filter(
+        tenant=user.tenant, email__iexact=new_email
+    ).exclude(pk=user.pk).exists()
+    if taken:
+        return render(request, 'accounts/credentials/email_change_confirm.html', {  # noqa: F405
+            'valid': False,
+            'taken': True,
+        })
+
+    user.email = new_email
+    user.save(update_fields=['email', 'updated_at'])
+
+    # The tripwire goes to the OLD address. Sending only to the new one would tell
+    # an attacker who just took the account and nobody else.
+    send_credential_change_notice(
+        user, 'email', to_email=old_email, detail=f' to {new_email}'
+    )
+    logger.info('Email changed for user_id=%s', user.pk)
+
+    messages.success(request, 'Your sign-in email address has been updated.')  # noqa: F405
+    return render(request, 'accounts/credentials/email_change_confirm.html', {  # noqa: F405
+        'valid': True,
+        'new_email': new_email,
+    })
