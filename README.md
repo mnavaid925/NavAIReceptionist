@@ -12,16 +12,27 @@ setup, calendar and staff are configured **per location**.
 
 > **Build state — read this before trusting any path below.**
 >
-> The foundation and **sub-module 0.1 (Authentication & Session)** are built and running. Everything
-> else in the module catalog is **not built yet**, and the sidebar reflects that honestly: 25 of the 26
-> sub-modules render as greyed-out roadmap rows.
+> **13 of the 26 sub-modules are built.** The remaining 13 render as greyed-out roadmap rows in the
+> sidebar, which reflects the truth honestly. `LIVE_LINKS` in `apps/accounts/navigation.py` is the
+> build-state ledger — a sub-module is built if and only if it has an entry there.
 >
-> | Built | Not built |
-> |---|---|
-> | `config/` (settings, ASGI + Channels, urls), `manage.py` | Modules 2–5 entirely (`agents`, `runtime`, `scheduling`, `calls`) |
-> | `apps/tenants` — `Tenant` + `Location` models, admin, `seed_tenants` | Module 1's views, CRUD and templates |
-> | `apps/accounts` — `User` + `UserLocation`, login/logout, password reset, throttling, middleware, `seed_accounts` | Sub-modules 0.2 (change password/email), 0.3 (user directory), 0.4 (location switcher) |
-> | The design system — `static/css/theme.css`, `static/js/layout.js`, `templates/base.html` + partials | |
+> | Module | Built | Not built |
+> |---|---|---|
+> | **0 · Accounts & Access** (`apps/accounts`) | 0.1 auth & session · 0.2 change password/email · 0.3 user directory & profile · 0.4 location switcher | — |
+> | **1 · Business & Locations** (`apps/tenants`) | 1.1 business settings · 1.2 location directory · 1.3 staff assignment · 1.4 provider working hours | — |
+> | **2 · Agent Setup & Telephony** (`apps/agents`) | 2.1 agent setup · 2.2 Twilio connection · 2.3 transfer settings · 2.4 test call | — |
+> | **3 · Call Runtime** (`apps/runtime`) | — | **the whole module.** The app does not exist. `config/asgi.py`'s `websocket_urlpatterns` is still `[]`, waiting on `apps/runtime/routing.py` |
+> | **4 · Calendar & Bookings** (`apps/scheduling`) | **4.1 contact directory** | 4.2 services & resources · 4.3 availability & booking · 4.4 calendar views · 4.5 bookings & callbacks |
+> | **5 · Call Logs** (`apps/calls`) | — | the whole module. The app does not exist |
+>
+> Also built: `config/` (settings, ASGI + Channels, urls), the design system
+> (`static/css/theme.css`, `static/js/layout.js`, `templates/base.html` + partials), and the test suite
+> (`conftest.py` + `apps/scheduling/tests/`, 89 passing).
+>
+> **Build order note.** Module 3 is numbered before 4 and 5 but depends on both — it writes
+> `calls.CallSession` and `scheduling.Appointment`/`CallbackRequest`/`Contact`, and reads `Service` and
+> `Resource`. So Modules 4 and 5 are being built first, then 3. `calls.CallSession.contact` FKs
+> `scheduling.Contact`, which is why 4 precedes 5.
 >
 > A path in the "Project layout" section at the end of this file is a **plan**, not a claim that the
 > code exists. Grep before you rely on one.
@@ -129,6 +140,8 @@ venv\Scripts\python.exe manage.py check; venv\Scripts\python.exe manage.py migra
 
 # 5. Seed demo data — seed_accounts calls seed_tenants automatically if no business exists
 venv\Scripts\python.exe manage.py seed_accounts
+venv\Scripts\python.exe manage.py seed_agents
+venv\Scripts\python.exe manage.py seed_scheduling
 
 # 6. Run it (Daphne, never runserver)
 venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
@@ -136,8 +149,17 @@ venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
 
 Then open **http://127.0.0.1:8000/login/** and sign in with one of the demo accounts below.
 
-Both seeders are **idempotent** — running them again prints `Data already exists. Use --flush to
-re-seed.` and changes nothing. `seed_accounts --flush` rebuilds the demo users from scratch.
+Every seeder is **idempotent** — running one again prints `Data already exists. Use --flush to
+re-seed.` and changes nothing. `--flush` on any of them rebuilds that seeder's demo rows from scratch.
+
+> **Pipe a seeder to `tail`, never `head`.** `head` closes the pipe, the command dies on
+> `BrokenPipeError`, and the `@transaction.atomic` seeder rolls back — which looks exactly like a real
+> idempotency failure and is not one.
+
+`seed_scheduling` creates 8 demo contacts across the two businesses, shaped to exercise the real edge
+cases: an anonymous caller with a number and no name, two people sharing one household line, an
+email-only web enquiry, and a deliberately unnormalised number that proves phone normalisation runs on
+the seeder's writes too.
 
 > **Database version.** This project is pinned to **Django 4.2 LTS** because Django 5.1+ requires
 > MariaDB 10.5 or later, and XAMPP currently ships 10.4. If you see
