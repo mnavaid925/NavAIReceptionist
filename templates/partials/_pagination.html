@@ -1,0 +1,54 @@
+{% load ui %}{% comment %}
+  Pagination.
+
+  Context: `page_obj` (required), `elided_page_range` (optional — views with many
+  pages pass paginator.get_elided_page_range(page_obj.number); otherwise the full
+  range is used).
+
+  `previous_page_number` / `next_page_number` RAISE EmptyPage when there is no such
+  page. With small seed data page 2 never exists, so an unguarded call is invisible
+  in development and a 500 in production — hence the has_previous / has_next
+  guards around every single use.
+
+  querystring_without_page carries the active filters across page links; without
+  it, page 2 silently shows the unfiltered list.
+{% endcomment %}
+{% if page_obj.paginator.num_pages > 1 %}
+  {% querystring_without_page as qs %}
+  <nav class="pagination" aria-label="Pagination">
+
+    <span class="text-muted">
+      Showing {{ page_obj.start_index }}&ndash;{{ page_obj.end_index }}
+      of {{ page_obj.paginator.count }}
+    </span>
+
+    <div class="pagination-pages">
+      {% if page_obj.has_previous %}
+        <a class="btn btn-icon" aria-label="Previous page"
+           href="?page={{ page_obj.previous_page_number }}{{ qs }}">
+          <i data-lucide="chevron-left"></i>
+        </a>
+      {% endif %}
+
+      {% with pages=elided_page_range|default:page_obj.paginator.page_range %}
+        {% for n in pages %}
+          {% if n == page_obj.paginator.ELLIPSIS %}
+            <span class="btn btn-outline" aria-hidden="true">{{ n }}</span>
+          {% elif n == page_obj.number %}
+            <span class="btn btn-primary" aria-current="page">{{ n }}</span>
+          {% else %}
+            <a class="btn btn-outline" href="?page={{ n }}{{ qs }}">{{ n }}</a>
+          {% endif %}
+        {% endfor %}
+      {% endwith %}
+
+      {% if page_obj.has_next %}
+        <a class="btn btn-icon" aria-label="Next page"
+           href="?page={{ page_obj.next_page_number }}{{ qs }}">
+          <i data-lucide="chevron-right"></i>
+        </a>
+      {% endif %}
+    </div>
+
+  </nav>
+{% endif %}
