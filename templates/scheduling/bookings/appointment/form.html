@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}{% if is_edit %}Edit appointment{% else %}Book manually{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{% if is_edit %}Edit appointment{% else %}Book manually{% endif %}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'scheduling:appointment_list' %}">Appointments</a></li>
+      <li>{% if is_edit %}Edit{% else %}Book{% endif %}</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  One template serves create and edit.
+
+  Neither `tenant` nor `location` is rendered — TenantLocationModelForm stamps
+  both from the request. `end_at` is not a field either: it is derived from the
+  service's duration, and a user-supplied end could silently disagree with it.
+  `source` is provenance and is server-stamped.
+
+  The times entered here are LOCAL to this location. Every FK choice list is
+  narrowed to this location too, so the dropdowns cannot reach another site.
+{% endcomment %}
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-body grid gap-4 sm:grid-cols-2">
+
+          {% if form.non_field_errors %}
+            <div class="alert alert-red sm:col-span-2" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group{% if field.name == 'notes' or field.name == 'reason' %} sm:col-span-2{% endif %}">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+
+        </div>
+
+        <div class="card-header">
+          {% if is_edit %}
+            <a class="btn btn-outline" href="{% url 'scheduling:appointment_detail' obj.pk %}">Cancel</a>
+          {% else %}
+            <a class="btn btn-outline" href="{% url 'scheduling:appointment_list' %}">Cancel</a>
+          {% endif %}
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i>
+            {% if is_edit %}Save changes{% else %}Book appointment{% endif %}
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Prefer the slot search</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          Booking here writes straight into the diary and only warns you about a
+          clash after you submit. <a href="{% url 'scheduling:appointment_slots' %}">Find a slot</a>
+          instead and you are offered only times that are genuinely free &mdash;
+          the same times the agent would offer a caller.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Times are local</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          {% if active_location %}
+            Enter the time as it reads on the wall at {{ active_location.name }}
+            ({{ active_location.timezone }}). It is stored in UTC and shown back
+            to you in this site's own zone.
+          {% else %}
+            Choose a location first &mdash; appointment times are interpreted in
+            that site's timezone.
+          {% endif %}
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Duration and buffer</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          The end time comes from the service's duration, so you do not set it.
+          A service's buffer is held <em>after</em> the appointment and blocks the
+          next booking without making this one look longer than it is.
+        </p>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
