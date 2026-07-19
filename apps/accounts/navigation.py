@@ -62,6 +62,10 @@ LIVE_LINKS = {
     '0.3': {'My Profile': 'accounts:profile',
             'Users': 'accounts:user_list'},
     '0.4': {'My Locations': 'accounts:my_locations'},
+    '1.1': {'Business Settings': 'tenants:business_settings'},
+    '1.2': {'Locations': 'tenants:location_list'},
+    '1.3': {'Staff & Locations': 'tenants:staff_locations'},
+    '1.4': {'Working Hours': 'tenants:provider_hours_report'},
 }
 
 
