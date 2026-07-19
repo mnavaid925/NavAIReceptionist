@@ -28,10 +28,63 @@ from apps.scheduling.availability import (
 )
 from apps.scheduling.forms import AppointmentCancelForm, AppointmentForm
 from apps.scheduling.models import Appointment, Contact, Resource, Service
+from apps.scheduling.availability import (
+    _lock_contended_rows,
+    overlapping_appointments,
+)
 from apps.scheduling.views._common import *  # noqa: F401,F403
-from apps.scheduling.views._helpers import save_or_report_conflict
 
 logger = logging.getLogger(__name__)
+
+
+def _save_booking_under_lock(form, request):
+    """Persist a manual booking with the SAME race protection as the token path.
+
+    `save_or_report_conflict` cannot help here: it converts an `IntegrityError`,
+    and `Appointment` declares no database constraint that could raise one — MySQL
+    cannot express "these two time ranges must not overlap". So without this, the
+    form's unlocked pre-check plus a plain `save()` is textbook check-then-act and
+    two receptionists submitting at once BOTH succeed.
+
+    Returns the saved appointment, or None after adding an error to the form.
+    """
+    from django.db import transaction
+    from django.db.utils import OperationalError
+
+    instance = form.instance
+    provider = form.cleaned_data.get('provider')
+    resource = form.cleaned_data.get('resource')
+    service = form.cleaned_data.get('service')
+    start_at = form.cleaned_data.get('start_at')
+
+    try:
+        with transaction.atomic():
+            _lock_contended_rows(
+                tenant=request.tenant, location=request.location,
+                provider_id=getattr(provider, 'pk', None),
+                resource_id=getattr(resource, 'pk', None),
+            )
+            if service is not None and start_at is not None:
+                clash = overlapping_appointments(
+                    tenant=request.tenant, location=request.location,
+                    start_utc=start_at,
+                    end_utc=start_at + timedelta(minutes=service.total_minutes),
+                    provider=provider, resource=resource,
+                    exclude_pk=instance.pk or None,
+                    for_update=True,
+                )
+                if clash.exists():
+                    form.add_error(
+                        None,
+                        'Someone just booked that time. Pick another.',
+                    )
+                    return None
+            return form.save()
+    except OperationalError as exc:
+        # Deadlock (1213) or lock-wait timeout (1205): another writer got there.
+        logger.warning('Manual booking lost a lock race: %s', exc)
+        form.add_error(None, 'Someone just booked that time. Pick another.')
+        return None
 
 __all__ = [
     'appointment_list_view',
@@ -207,9 +260,7 @@ def appointment_create_view(request):
     form = AppointmentForm(request.POST or None, request=request)
 
     if request.method == 'POST' and form.is_valid():
-        obj = save_or_report_conflict(
-            form, 'Someone just booked that time. Pick another.'
-        )
+        obj = _save_booking_under_lock(form, request)
         if obj is not None:
             # Provenance is a server fact. A booking made through this form was
             # made by a person at a desk, whatever the client posted.
@@ -239,12 +290,22 @@ def appointment_create_view(request):
 def appointment_edit_view(request, pk):
     """Edit a booking. Moving it in time is `reschedule`, not this."""
     obj = get_object_or_404(_location_appointments(request), pk=pk)  # noqa: F405
+
+    # A closed-out booking is a record of what happened. Without this guard a
+    # direct POST could reopen a cancelled appointment, or flip a completed one
+    # back to scheduled, with no audit of either.
+    if not obj.is_open:
+        messages.error(  # noqa: F405
+            request,
+            f'This appointment is {obj.get_status_display().lower()} and can no '
+            'longer be changed. Book a new one instead.',
+        )
+        return redirect('scheduling:appointment_detail', pk=obj.pk)  # noqa: F405
+
     form = AppointmentForm(request.POST or None, instance=obj, request=request)
 
     if request.method == 'POST' and form.is_valid():
-        if save_or_report_conflict(
-            form, 'Someone just booked that time. Pick another.'
-        ) is not None:
+        if _save_booking_under_lock(form, request) is not None:
             logger.info('Appointment updated appointment_id=%s by user_id=%s',
                         obj.pk, request.user.pk)
             messages.success(request, 'Appointment updated.')  # noqa: F405
@@ -311,6 +372,24 @@ def appointment_slots_view(request):
     date_from = _parse_local_date(request.GET.get('from'))
     date_to = _parse_local_date(request.GET.get('to'))
 
+    # RESCHEDULE MODE. `?reschedule=<pk>` turns this page into "find a new time
+    # for THIS booking" — the slot forms then post to `appointment_reschedule`,
+    # which MOVES the existing row. Without it the page always posts to
+    # `appointment_book`, so a staff "reschedule" would silently create a second
+    # live appointment and leave the original standing.
+    #
+    # Resolved through the scoped queryset, so a foreign pk cannot be rescheduled
+    # and simply falls back to normal booking.
+    rescheduling = _authorised_pk(
+        request, _location_appointments(request), request.GET.get('reschedule')
+    )
+    if rescheduling is not None and not rescheduling.is_open:
+        messages.error(  # noqa: F405
+            request,
+            'That appointment is closed out and can no longer be moved.',
+        )
+        return redirect('scheduling:appointment_detail', pk=rescheduling.pk)  # noqa: F405
+
     slots = []
     if service is not None:
         slots = find_available_slots(
@@ -325,6 +404,7 @@ def appointment_slots_view(request):
         'services': services,
         'providers': providers,
         'resources': resources,
+        'rescheduling': rescheduling,
         'contacts': Contact.objects.filter(
             tenant=request.tenant, anonymized_at__isnull=True
         ).order_by('last_name', 'first_name')[:500],
@@ -393,7 +473,12 @@ def appointment_reschedule_view(request, pk):
     except SlotError as exc:
         logger.info('Reschedule refused code=%s appointment_id=%s', exc.code, obj.pk)
         messages.error(request, exc.message)  # noqa: F405
-        return redirect('scheduling:appointment_detail', pk=obj.pk)  # noqa: F405
+        # Back to the slot search, still in reschedule mode, so the user can pick
+        # a different time rather than losing what they were doing.
+        return redirect(
+            f"{reverse('scheduling:appointment_slots')}?reschedule={obj.pk}"  # noqa: F405
+            f"{'&service=' + str(obj.service_id) if obj.service_id else ''}"
+        )
 
     messages.success(  # noqa: F405
         request, f'Moved to {obj.local_start():%a %d %b at %H:%M}.'
@@ -410,7 +495,10 @@ def appointment_cancel_view(request, pk):
     reason = form.cleaned_data.get('reason', '') if form.is_valid() else ''
 
     try:
-        cancel_appointment(appointment=obj, reason=reason)
+        cancel_appointment(
+            appointment=obj, tenant=request.tenant, location=request.location,
+            reason=reason,
+        )
     except SlotError as exc:
         messages.error(request, exc.message)  # noqa: F405
         return redirect('scheduling:appointment_detail', pk=obj.pk)  # noqa: F405
