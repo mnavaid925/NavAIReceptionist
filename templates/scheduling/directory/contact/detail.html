@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}{{ obj.display_name }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{{ obj.display_name }}</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li><a href="{% url 'scheduling:contact_list' %}">Contacts</a></li>
+        <li>{{ obj.display_name }}</li>
+      </ol>
+    </nav>
+  </div>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 grid gap-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Details</span>
+        {% if obj.source == 'ai_phone' %}
+          <span class="badge badge-info">AI phone call</span>
+        {% elif obj.source == 'manual' %}
+          <span class="badge badge-slate">Added manually</span>
+        {% elif obj.source == 'web' %}
+          <span class="badge badge-green">Web</span>
+        {% else %}
+          <span class="badge badge-muted">{{ obj.get_source_display }}</span>
+        {% endif %}
+      </div>
+      <div class="card-body grid gap-4 sm:grid-cols-2">
+
+        <div>
+          <span class="form-label">Name</span>
+          {% if obj.has_name %}
+            <p>{{ obj.first_name }} {{ obj.last_name }}</p>
+          {% else %}
+            <p class="text-muted">Not given yet</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Phone</span>
+          {% if obj.phone_e164 %}
+            <p><a href="tel:{{ obj.phone_e164 }}">{{ obj.phone_e164|phone_e164 }}</a></p>
+          {% else %}
+            <p class="text-muted">&mdash;</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Email</span>
+          {% if obj.email %}
+            <p><a href="mailto:{{ obj.email }}">{{ obj.email }}</a></p>
+          {% else %}
+            <p class="text-muted">&mdash;</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Date of birth</span>
+          {% if obj.date_of_birth %}
+            <p><time datetime="{{ obj.date_of_birth|date:'c' }}">{{ obj.date_of_birth|date:"j M Y" }}</time></p>
+          {% else %}
+            <p class="text-muted">&mdash;</p>
+          {% endif %}
+        </div>
+
+        <div class="sm:col-span-2">
+          <span class="form-label">Notes</span>
+          {% if obj.notes %}
+            {% comment %}
+              linebreaks, never |safe. Notes can be dictated by a caller through
+              the agent, which makes them untrusted input on a staff-facing page.
+            {% endcomment %}
+            <p>{{ obj.notes|linebreaksbr }}</p>
+          {% else %}
+            <p class="text-muted">No notes.</p>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+
+    {% if also_on_this_number %}
+      <div class="card">
+        <div class="card-header">
+          <span>Also on this number</span>
+          <span class="text-muted">{{ obj.phone_e164|phone_e164 }}</span>
+        </div>
+        <div class="card-body">
+          <p class="text-muted">
+            A phone number can legitimately belong to more than one person &mdash;
+            a household, a shared mobile, an office line. The agent sees this same
+            ambiguity when the number rings and will ask who is calling.
+          </p>
+          <div class="table-wrap" style="margin-block-start: 12px;">
+            <table class="table">
+              <tbody>
+                {% for other in also_on_this_number %}
+                  <tr>
+                    <td>
+                      <a href="{% url 'scheduling:contact_detail' other.pk %}">{{ other.display_name }}</a>
+                    </td>
+                    <td>{{ other.get_source_display }}</td>
+                    <td class="text-right">
+                      <a class="btn btn-icon" href="{% url 'scheduling:contact_detail' other.pk %}"
+                         aria-label="View {{ other.display_name }}" title="View">
+                        <i data-lucide="eye"></i>
+                      </a>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <div class="card">
+      <div class="card-header"><span>Appointments</span></div>
+      <div class="card-body">
+        {% comment %}
+          `appointments` is None until sub-module 4.3 builds the Appointment
+          model, an empty queryset once it exists but this contact has none. The
+          two states read differently on purpose — "not built yet" is not the
+          same as "nothing booked".
+        {% endcomment %}
+        {% if appointments is None %}
+          <p class="text-muted">
+            Booking history appears here once the appointments sub-module is built.
+          </p>
+        {% elif appointments %}
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Service</th>
+                  <th scope="col">Location</th>
+                  <th scope="col">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for appt in appointments %}
+                  <tr>
+                    <td><time datetime="{{ appt.starts_at|date:'c' }}">{{ appt.starts_at|date:"j M Y, H:i" }}</time></td>
+                    <td>{{ appt.service }}</td>
+                    <td>{{ appt.location.name }}</td>
+                    <td>{% include "partials/_appointment_status_badge.html" with obj=appt %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="text-muted">Nothing booked.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Calls</span></div>
+      <div class="card-body">
+        {% if call_sessions is None %}
+          <p class="text-muted">
+            Call history appears here once the call logs module is built.
+          </p>
+        {% elif call_sessions %}
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th scope="col">Started</th>
+                  <th scope="col">Location</th>
+                  <th scope="col">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for session in call_sessions %}
+                  <tr>
+                    <td><time datetime="{{ session.started_at|date:'c' }}">{{ session.started_at|date:"j M Y, H:i" }}</time></td>
+                    <td>{{ session.location.name }}</td>
+                    <td>{% include "partials/_call_status_badge.html" with obj=session %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="text-muted">No calls on record.</p>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Actions</span></div>
+      <div class="card-body grid gap-2">
+        <a class="btn btn-primary" href="{% url 'scheduling:contact_edit' obj.pk %}">
+          <i data-lucide="pencil"></i> Edit contact
+        </a>
+        {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+          <form method="post" action="{% url 'scheduling:contact_delete' obj.pk %}"
+                onclick="return confirm('Delete {{ obj.display_name|escapejs }}? This cannot be undone.');">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger">
+              <i data-lucide="trash-2"></i> Delete contact
+            </button>
+          </form>
+        {% endif %}
+        <a class="btn btn-outline" href="{% url 'scheduling:contact_list' %}">
+          Back to contacts
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Business-wide</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          This contact belongs to {{ active_tenant.name }}, not to one site. They
+          can be booked at any of your locations, and the agent recognises them
+          whichever number they ring.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Record</span></div>
+      <div class="card-body grid gap-2">
+        <div>
+          <span class="form-label">Added</span>
+          <p><time datetime="{{ obj.created_at|date:'c' }}">{{ obj.created_at|date:"j M Y, H:i" }}</time></p>
+        </div>
+        <div>
+          <span class="form-label">Last updated</span>
+          <p><time datetime="{{ obj.updated_at|date:'c' }}">{{ obj.updated_at|date:"j M Y, H:i" }}</time></p>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
