@@ -66,6 +66,10 @@ LIVE_LINKS = {
     '1.2': {'Locations': 'tenants:location_list'},
     '1.3': {'Staff & Locations': 'tenants:staff_locations'},
     '1.4': {'Working Hours': 'tenants:provider_hours_report'},
+    '2.1': {'Agent Setup': 'agents:agent_setup'},
+    '2.2': {'Twilio Connection': 'agents:twilio_connection'},
+    '2.3': {'Transfer Settings': 'agents:transfer_settings'},
+    '2.4': {'Test Call': 'agents:test_call'},
 }
 
 
