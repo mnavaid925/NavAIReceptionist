@@ -75,7 +75,12 @@ def service_list_view(request):
         queryset = _bookable_here(queryset, request.location)
     elif scope == 'all_locations':
         queryset = queryset.filter(location__isnull=True)
-    elif scope.isdigit():
+    elif scope.isdecimal():
+        # `isdecimal`, NOT `isdigit`: `isdigit` is True for characters like '²'
+        # and fullwidth '１' that `int()` then refuses, so an `isdigit` guard
+        # turns `?scope=²` into an unhandled ValueError — a 500 from a query
+        # string, which the project's filter rule explicitly forbids.
+        #
         # Authorise the id against the user's own assignments — a raw pk from a
         # query string is never trusted, even for a read-only filter.
         allowed = request.user.assigned_locations().filter(pk=int(scope)).first()
@@ -153,6 +158,22 @@ def service_create_view(request):
 def service_edit_view(request, pk):
     """Edit a service. This is also how an inactive one is brought back."""
     obj = get_object_or_404(_tenant_services(request), pk=pk)  # noqa: F405
+
+    # READING the catalogue is business-wide; WRITING to a site-pinned service is
+    # not. `duration_minutes`, `is_active` and `requires_resource` decide what the
+    # agent offers and books at that site, so editing them from a branch you are
+    # not assigned to is a change to someone else's operation. An all-locations
+    # service (`location_id is None`) belongs to everyone and stays editable.
+    if obj.location_id and not request.user.assigned_locations().filter(
+        pk=obj.location_id
+    ).exists():
+        messages.error(  # noqa: F405
+            request,
+            f'{obj.name} is offered only at {obj.location.name}, and you are not '
+            'assigned to that location. Ask someone who works there to change it.',
+        )
+        return redirect('scheduling:service_detail', pk=obj.pk)  # noqa: F405
+
     form = ServiceForm(request.POST or None, instance=obj, request=request)
 
     if request.method == 'POST' and form.is_valid():
@@ -184,6 +205,17 @@ def service_delete_view(request, pk):
     """
     obj = get_object_or_404(_tenant_services(request), pk=pk)  # noqa: F405
     label = obj.name
+
+    # Same rule as the edit view: a site-pinned service is that site's to remove.
+    if obj.location_id and not request.user.assigned_locations().filter(
+        pk=obj.location_id
+    ).exists():
+        messages.error(  # noqa: F405
+            request,
+            f'{label} is offered only at {obj.location.name}, and you are not '
+            'assigned to that location.',
+        )
+        return redirect('scheduling:service_detail', pk=obj.pk)  # noqa: F405
 
     booked = _appointment_count(obj)
     if booked:
