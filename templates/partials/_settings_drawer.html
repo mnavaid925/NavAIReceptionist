@@ -3,15 +3,27 @@
 
   Every control is a plain button carrying data-option / data-value. static/js/layout.js
   delegates a single click listener over the whole document, writes the value to
-  <html data-*>, persists it to localStorage and syncs aria-pressed across any
-  other control rendering the same option. Adding an option here needs no new JS —
-  only a matching entry in the OPTIONS map in layout.js.
+  <html data-*>, persists it to localStorage and syncs aria-pressed across every
+  control rendering the same option. Adding an option here needs no new JS — only a
+  matching entry in the OPTIONS map in layout.js.
+
+  Three control shapes, chosen by what the option actually is:
+    - segmented ...... two or three text choices (on/off, light/dark)
+    - preview-card ... arrangement choices, drawn as a CSS schematic so the
+                       difference is visible rather than a word to decode
+    - swatch ......... colour choices, shown as the actual colour
+
+  The pressed state is styled, not just announced, because a settings panel where
+  nothing looks selected tells the user nothing about their current setup.
 {% endcomment %}
 <div class="settings-drawer" id="settings-drawer" role="dialog" aria-label="Layout settings" aria-modal="false">
   <div class="drawer-backdrop" data-action="close-settings"></div>
 
-  <div class="card-header">
-    <span>Layout settings</span>
+  <div class="drawer-head">
+    <div>
+      <h2>Appearance</h2>
+      <p>Personal to you, saved in this browser.</p>
+    </div>
     <button type="button" class="btn btn-icon" data-action="close-settings" aria-label="Close settings">
       <i data-lucide="x"></i>
     </button>
@@ -19,85 +31,147 @@
 
   <div class="drawer-body">
 
-    <div class="form-group">
-      <span class="form-label">Colour scheme</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="theme" data-value="light">Light</button>
-        <button type="button" class="option-swatch" data-option="theme" data-value="dark">Dark</button>
+    <div class="setting">
+      <span class="setting-label">Colour scheme</span>
+      <div class="segmented" role="group" aria-label="Colour scheme">
+        <button type="button" data-option="theme" data-value="light" aria-pressed="false">
+          <i data-lucide="sun"></i> Light
+        </button>
+        <button type="button" data-option="theme" data-value="dark" aria-pressed="false">
+          <i data-lucide="moon"></i> Dark
+        </button>
       </div>
     </div>
 
-    <div class="form-group">
-      <span class="form-label">Layout</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="layout" data-value="vertical">Vertical</button>
-        <button type="button" class="option-swatch" data-option="layout" data-value="horizontal">Horizontal</button>
-        <button type="button" class="option-swatch" data-option="layout" data-value="detached">Detached</button>
+    <div class="setting">
+      <span class="setting-label">Navigation layout</span>
+      <div class="preview-grid" role="group" aria-label="Navigation layout">
+        <button type="button" class="preview-card" data-option="layout" data-value="vertical" aria-pressed="false">
+          <span class="pv" aria-hidden="true">
+            <span class="pv-rail"></span>
+            <span class="pv-col"><span class="pv-bar"></span><span class="pv-fill"></span></span>
+          </span>
+          <span class="preview-name">Vertical</span>
+        </button>
+        <button type="button" class="preview-card" data-option="layout" data-value="horizontal" aria-pressed="false">
+          <span class="pv stacked" aria-hidden="true">
+            <span class="pv-bar"></span>
+            <span class="pv-bar"></span>
+            <span class="pv-fill"></span>
+          </span>
+          <span class="preview-name">Horizontal</span>
+        </button>
+        <button type="button" class="preview-card" data-option="layout" data-value="detached" aria-pressed="false">
+          <span class="pv detached" aria-hidden="true">
+            <span class="pv-rail"></span>
+            <span class="pv-col"><span class="pv-bar"></span><span class="pv-fill"></span></span>
+          </span>
+          <span class="preview-name">Detached</span>
+        </button>
       </div>
     </div>
 
-    <div class="form-group">
-      <span class="form-label">Sidebar size</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="sidebar-size" data-value="default">Default</button>
-        <button type="button" class="option-swatch" data-option="sidebar-size" data-value="compact">Compact</button>
-        <button type="button" class="option-swatch" data-option="sidebar-size" data-value="small">Small icon</button>
-        <button type="button" class="option-swatch" data-option="sidebar-size" data-value="hover">Icon hovered</button>
+    <div class="setting">
+      <span class="setting-label">Sidebar size</span>
+      <div class="preview-grid cols-4" role="group" aria-label="Sidebar size">
+        <button type="button" class="preview-card" data-option="sidebar-size" data-value="default" aria-pressed="false">
+          <span class="pv" aria-hidden="true">
+            <span class="pv-rail wide"></span>
+            <span class="pv-col"><span class="pv-bar"></span><span class="pv-fill"></span></span>
+          </span>
+          <span class="preview-name">Default</span>
+        </button>
+        <button type="button" class="preview-card" data-option="sidebar-size" data-value="compact" aria-pressed="false">
+          <span class="pv" aria-hidden="true">
+            <span class="pv-rail"></span>
+            <span class="pv-col"><span class="pv-bar"></span><span class="pv-fill"></span></span>
+          </span>
+          <span class="preview-name">Compact</span>
+        </button>
+        <button type="button" class="preview-card" data-option="sidebar-size" data-value="small" aria-pressed="false">
+          <span class="pv" aria-hidden="true">
+            <span class="pv-rail narrow"></span>
+            <span class="pv-col"><span class="pv-bar"></span><span class="pv-fill"></span></span>
+          </span>
+          <span class="preview-name">Icons</span>
+        </button>
+        <button type="button" class="preview-card" data-option="sidebar-size" data-value="hover" aria-pressed="false">
+          <span class="pv" aria-hidden="true">
+            <span class="pv-rail narrow"></span>
+            <span class="pv-col"><span class="pv-bar"></span><span class="pv-fill"></span></span>
+          </span>
+          <span class="preview-name">On hover</span>
+        </button>
       </div>
     </div>
 
-    <div class="form-group">
-      <span class="form-label">Sidebar colour</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="sidebar-theme" data-value="light">Light</button>
-        <button type="button" class="option-swatch" data-option="sidebar-theme" data-value="dark">Dark</button>
-        <button type="button" class="option-swatch" data-option="sidebar-theme" data-value="brand">Coloured</button>
+    <div class="setting">
+      <span class="setting-label">Sidebar colour</span>
+      <div class="swatch-row" role="group" aria-label="Sidebar colour">
+        <button type="button" class="swatch" data-option="sidebar-theme" data-value="light" aria-pressed="false">
+          <span class="dot is-light" aria-hidden="true"></span>
+          <span class="swatch-name">Light</span>
+        </button>
+        <button type="button" class="swatch" data-option="sidebar-theme" data-value="dark" aria-pressed="false">
+          <span class="dot is-dark" aria-hidden="true"></span>
+          <span class="swatch-name">Dark</span>
+        </button>
+        <button type="button" class="swatch" data-option="sidebar-theme" data-value="brand" aria-pressed="false">
+          <span class="dot is-brand" aria-hidden="true"></span>
+          <span class="swatch-name">Brand</span>
+        </button>
       </div>
     </div>
 
-    <div class="form-group">
-      <span class="form-label">Topbar</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="topbar" data-value="light">Light</button>
-        <button type="button" class="option-swatch" data-option="topbar" data-value="dark">Dark</button>
+    <div class="setting">
+      <span class="setting-label">Top bar</span>
+      <div class="segmented" role="group" aria-label="Top bar">
+        <button type="button" data-option="topbar" data-value="light" aria-pressed="false">Light</button>
+        <button type="button" data-option="topbar" data-value="dark" aria-pressed="false">Dark</button>
       </div>
     </div>
 
-    <div class="form-group">
-      <span class="form-label">Width</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="width" data-value="fluid">Fluid</button>
-        <button type="button" class="option-swatch" data-option="width" data-value="boxed">Boxed</button>
+    <div class="setting">
+      <span class="setting-label">Content width</span>
+      <div class="segmented" role="group" aria-label="Content width">
+        <button type="button" data-option="width" data-value="fluid" aria-pressed="false">
+          <i data-lucide="move-horizontal"></i> Fluid
+        </button>
+        <button type="button" data-option="width" data-value="boxed" aria-pressed="false">
+          <i data-lucide="square"></i> Boxed
+        </button>
       </div>
     </div>
 
-    <div class="form-group">
-      <span class="form-label">Position</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="position" data-value="fixed">Fixed</button>
-        <button type="button" class="option-swatch" data-option="position" data-value="scrollable">Scrollable</button>
+    <div class="setting">
+      <span class="setting-label">Chrome position</span>
+      <div class="segmented" role="group" aria-label="Chrome position">
+        <button type="button" data-option="position" data-value="fixed" aria-pressed="false">Fixed</button>
+        <button type="button" data-option="position" data-value="scrollable" aria-pressed="false">Scrolls</button>
       </div>
     </div>
 
-    <div class="form-group">
-      <span class="form-label">Direction</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="direction" data-value="ltr">LTR</button>
-        <button type="button" class="option-swatch" data-option="direction" data-value="rtl">RTL</button>
+    <div class="setting">
+      <span class="setting-label">Text direction</span>
+      <div class="segmented" role="group" aria-label="Text direction">
+        <button type="button" data-option="direction" data-value="ltr" aria-pressed="false">Left to right</button>
+        <button type="button" data-option="direction" data-value="rtl" aria-pressed="false">Right to left</button>
       </div>
     </div>
 
-    <div class="form-group">
-      <span class="form-label">Preloader</span>
-      <div class="option-grid">
-        <button type="button" class="option-swatch" data-option="preloader" data-value="enable">On</button>
-        <button type="button" class="option-swatch" data-option="preloader" data-value="disable">Off</button>
+    <div class="setting">
+      <span class="setting-label">Loading screen</span>
+      <div class="segmented" role="group" aria-label="Loading screen">
+        <button type="button" data-option="preloader" data-value="enable" aria-pressed="false">Show</button>
+        <button type="button" data-option="preloader" data-value="disable" aria-pressed="false">Hide</button>
       </div>
     </div>
 
+  </div>
+
+  <div class="drawer-foot">
     <button type="button" class="btn btn-outline w-full" data-action="reset-layout">
       <i data-lucide="rotate-ccw"></i> Reset to defaults
     </button>
-
   </div>
 </div>
