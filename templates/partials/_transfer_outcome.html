@@ -1,0 +1,62 @@
+{% load ui %}{% comment %}
+  Human-handoff outcome for one call.
+
+  Reads the `transfer` JSON dict on calls.CallSession. Rendered defensively: most
+  calls never attempt a transfer, so every field may be absent.
+
+    connected -> badge-green   off_hours -> badge-amber
+    disabled  -> badge-muted   failed    -> badge-red
+
+  The destination shown is always the location's CONFIGURED number — a number the
+  caller or the model produced is never dialable and never displayed as one.
+
+  Usage: {% include "partials/_transfer_outcome.html" with transfer=session.transfer %}
+{% endcomment %}
+{% if transfer %}
+  <div class="card">
+    <div class="card-header">
+      <span>Transfer outcome</span>
+      {% if transfer.result == 'connected' %}
+        <span class="badge badge-green">Connected</span>
+      {% elif transfer.result == 'off_hours' %}
+        <span class="badge badge-amber">Off hours</span>
+      {% elif transfer.result == 'disabled' %}
+        <span class="badge badge-muted">Disabled</span>
+      {% elif transfer.result == 'failed' %}
+        <span class="badge badge-red">Failed</span>
+      {% elif transfer.result == 'no_answer' %}
+        <span class="badge badge-amber">No answer</span>
+      {% else %}
+        <span class="badge badge-muted">{{ transfer.result|default:"Unknown" }}</span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+      <dl class="grid gap-3 sm:grid-cols-2">
+        {% if transfer.reason %}
+          <div>
+            <dt class="form-label">Reason</dt>
+            <dd class="m-0">{{ transfer.reason }}</dd>
+          </div>
+        {% endif %}
+        {% if transfer.destination %}
+          <div>
+            <dt class="form-label">Destination</dt>
+            <dd class="m-0">{{ transfer.destination|phone_e164 }}</dd>
+          </div>
+        {% endif %}
+        {% if transfer.initiated_at %}
+          <div>
+            <dt class="form-label">Initiated</dt>
+            <dd class="m-0"><time datetime="{{ transfer.initiated_at }}">{{ transfer.initiated_at }}</time></dd>
+          </div>
+        {% endif %}
+        {% if transfer.duration_seconds %}
+          <div>
+            <dt class="form-label">Bridged for</dt>
+            <dd class="m-0">{{ transfer.duration_seconds }}s</dd>
+          </div>
+        {% endif %}
+      </dl>
+    </div>
+  </div>
+{% endif %}
