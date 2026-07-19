@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Test call{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Test call</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li>Agent Setup &amp; Telephony</li>
+      <li>Test call</li>
+    </ol>
+  </nav>
+</div>
+
+{% include "agents/_tabs.html" %}
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 space-y-4">
+
+    {% if is_simulated %}
+      <div class="alert alert-info">
+        <i data-lucide="info"></i>
+        <span>
+          <strong>Simulated.</strong> <code>PROVIDER_MODE</code> is
+          <code>{{ provider_mode }}</code>, so the whole path runs against the fake
+          provider &mdash; no call is placed and nothing is billed. Only
+          <code>live</code> reaches a carrier.
+        </span>
+      </div>
+    {% else %}
+      <div class="alert alert-red">
+        <i data-lucide="alert-triangle"></i>
+        <span>
+          <strong>Live mode.</strong> This will place a real call and bill your
+          Twilio account.
+        </span>
+      </div>
+    {% endif %}
+
+    <div class="card">
+      <div class="card-header">
+        <span>Ring yourself</span>
+        {% if issues %}
+          <span class="badge badge-amber">{{ issues|length }} to fix</span>
+        {% else %}
+          <span class="badge badge-green">Ready</span>
+        {% endif %}
+      </div>
+      <div class="card-body grid gap-4">
+
+        {% comment %}
+          There is deliberately NO destination field. The number is read from the
+          signed-in user's own profile, server-side. An endpoint that dials a
+          client-supplied number would let any authenticated user ring
+          premium-rate numbers on the tenant's Twilio account.
+        {% endcomment %}
+        <dl class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <dt class="form-label">Calling from</dt>
+            <dd class="m-0">
+              {% if setting.inbound_phone_number %}
+                {{ setting.inbound_phone_number|phone_e164 }}
+              {% else %}
+                <span class="text-muted">No inbound number set</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Calling you on</dt>
+            <dd class="m-0">
+              {% if destination %}
+                {{ destination|phone_e164 }}
+              {% else %}
+                <span class="text-muted">No number on your profile</span>
+              {% endif %}
+            </dd>
+          </div>
+        </dl>
+
+        {% if not destination %}
+          <div class="alert alert-amber">
+            <span>
+              The test call rings <strong>you</strong>, so it needs a phone number
+              on your profile. It is never sent to a number typed into this page.
+              <a href="{% url 'accounts:profile' %}">Add one to your profile</a>.
+            </span>
+          </div>
+        {% endif %}
+
+        {% if issues %}
+          <div>
+            <p class="form-label">Fix before calling</p>
+            <ul class="grid gap-2" style="margin: 6px 0 0; padding-inline-start: 18px;">
+              {% for issue in issues %}
+                <li class="text-sm">{{ issue }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+
+        <form method="post">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-primary"
+                  {% if issues or not destination %}disabled aria-disabled="true"{% endif %}
+                  {% if not is_simulated %}onclick="return confirm('This places a REAL call and will be billed. Continue?');"{% endif %}>
+            <i data-lucide="phone-call"></i>
+            {% if is_simulated %}Run simulated test{% else %}Place real test call{% endif %}
+          </button>
+          <span class="text-muted text-sm" style="margin-inline-start: 10px;">
+            {{ attempts_left }} left this hour
+          </span>
+        </form>
+
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="space-y-4">
+    <div class="card">
+      <div class="card-header"><span>What this checks</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          That this location has everything a real caller would need: a greeting,
+          a prompt, an inbound number, Twilio credentials, and a transfer target
+          if transfer is switched on.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Why you cannot pick a number</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          The destination comes from your own profile rather than a field on this
+          page. An endpoint that dialled any number given to it could be used to
+          ring premium-rate lines at the business's expense.
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
