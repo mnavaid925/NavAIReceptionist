@@ -8,6 +8,11 @@ user came to make: is this service offered at one site or all of them? The leak
 is closed by narrowing the queryset to the locations THIS user is assigned to,
 not merely to the tenant's.
 """
+# `Q` is imported explicitly: the `_common` star-import chain re-exports `forms`
+# and `ValidationError` but nothing from `django.db.models`. Assuming otherwise is
+# the same NameError trap that broke 4.1's date-of-birth validation.
+from django.db.models import Q
+
 from apps.scheduling.forms._common import *  # noqa: F401,F403
 from apps.scheduling.models import Service
 
@@ -46,19 +51,37 @@ class ServiceForm(TenantModelForm):  # noqa: F405
         # which is what we want here — see the module docstring. Narrow it to the
         # user's OWN assigned locations: filtering by tenant alone would let a
         # single-site receptionist pin a service to a branch they cannot reach.
+        from apps.tenants.models import Location
+
         location_field = self.fields['location']
         user = getattr(self.request, 'user', None) if self.request else None
         if user is not None and user.is_authenticated:
-            location_field.queryset = user.assigned_locations()
+            allowed = user.assigned_locations()
         elif self.tenant is not None:
-            from apps.tenants.models import Location
-
-            location_field.queryset = Location.objects.filter(
-                tenant=self.tenant, is_active=True
-            )
+            allowed = Location.objects.filter(tenant=self.tenant, is_active=True)
         else:
-            location_field.queryset = location_field.queryset.none()
+            allowed = Location.objects.none()
 
+        # The service's CURRENT location must stay in the choices even when the
+        # editor is not assigned to it.
+        #
+        # `service_edit_view` deliberately lets any signed-in tenant user open any
+        # service — the catalogue is business-wide. So a Downtown-only receptionist
+        # can legitimately open an Uptown-pinned service to fix a typo. If Uptown
+        # were missing from the options, nothing would render as selected, the
+        # browser would fall back to the first option — the blank "All locations"
+        # — and saving an unrelated description edit would SILENTLY widen the
+        # service to every site. No error, no warning, wrong data.
+        #
+        # This union keeps the current value selectable and selected. Narrowing
+        # still holds for everything else: the user cannot MOVE the service to a
+        # third site they have no access to.
+        if self.instance.pk and self.instance.location_id:
+            allowed = Location.objects.filter(
+                Q(pk__in=allowed.values('pk')) | Q(pk=self.instance.location_id)
+            )
+
+        location_field.queryset = allowed
         location_field.required = False
         location_field.empty_label = 'All locations'
 
