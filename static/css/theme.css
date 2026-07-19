@@ -906,6 +906,100 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--brand-600); wi
   color: var(--fg-muted);
 }
 
+/* Dropdown — the topbar user menu. Plain CSS visibility toggled by a class, so it
+   works without a popover library and degrades to a normal block if JS is off. */
+.dropdown { position: relative; }
+.dropdown-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: start;
+}
+.dropdown-toggle:hover { background: var(--surface-hover); }
+
+.dropdown-menu {
+  position: absolute;
+  inset-inline-end: 0;
+  top: calc(100% + 8px);
+  z-index: 50;
+  min-width: 244px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  display: none;
+}
+.dropdown-menu.is-open { display: block; }
+
+.dropdown-header {
+  padding: 9px 12px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.dropdown-divider { height: 1px; margin: 6px 4px; background: var(--border); }
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--fg-soft);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.dropdown-item:hover { background: var(--surface-hover); color: var(--fg); }
+.dropdown-item svg { width: 16px; height: 16px; flex: none; color: var(--fg-muted); }
+.dropdown-item.is-danger { color: var(--red-fg); }
+.dropdown-item.is-danger svg { color: var(--red-fg); }
+.dropdown-menu form { margin: 0; }
+
+/* Tab strip — the account area, whose sections are Module 0's sub-modules. */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-block-end: 18px;
+  border-block-end: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-block-end: -1px;
+  border: 1px solid transparent;
+  border-block-end: 2px solid transparent;
+  border-radius: var(--radius) var(--radius) 0 0;
+  color: var(--fg-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tab:hover { color: var(--fg); background: var(--surface-hover); }
+.tab svg { width: 16px; height: 16px; }
+.tab.active {
+  color: var(--brand-700);
+  border-block-end-color: var(--brand-600);
+  font-weight: 600;
+  background: none;
+}
+
 .topbar-dot { position: relative; }
 .topbar-dot::after {
   content: "";
