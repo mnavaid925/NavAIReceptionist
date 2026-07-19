@@ -31,6 +31,14 @@ from apps.scheduling.availability import (
 from apps.scheduling.forms import AppointmentCancelForm, AppointmentForm
 from apps.scheduling.models import Appointment, Contact, Resource, Service
 from apps.scheduling.views._common import *  # noqa: F401,F403
+from apps.scheduling.views._helpers import (
+    authorised_pk as _authorised_pk,
+    bookable_providers as _location_providers,
+    bookable_resources as _location_resources,
+    bookable_services as _bookable_services,
+    location_appointments as _location_appointments,
+    parse_local_date as _parse_local_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +53,33 @@ __all__ = [
     'appointment_reschedule_view',
     'appointment_cancel_view',
 ]
+
+
+def _parse_local_datetime(request, raw):
+    """Parse a `YYYY-MM-DDTHH:MM` click-through value, or None. Never raises.
+
+    Interpreted in the LOCATION's timezone, because that is the clock the
+    calendar grid was drawn against — parsing it as UTC would land the pre-filled
+    booking hours away from the cell the user actually clicked.
+
+    Returns a NAIVE local datetime: `AppointmentForm.start_at` renders through a
+    `datetime-local` input and Django localises it on the way back in, so handing
+    it an aware UTC value would display the wrong wall clock in the field.
+    """
+    raw = (raw or '').strip()
+    if not raw or request.location is None:
+        return None
+    for fmt in ('%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M'):
+        try:
+            naive = datetime.strptime(raw, fmt)
+        except (TypeError, ValueError):
+            continue
+        # Sanity-bound it the same way `parse_local_date` bounds a date, so a
+        # absurd year cannot reach the arithmetic downstream.
+        if not (1900 <= naive.year <= 2200):
+            return None
+        return naive
+    return None
 
 
 def _save_booking_under_lock(form, request):
@@ -97,43 +132,7 @@ def _save_booking_under_lock(form, request):
         return None
 
 
-def _location_appointments(request):
-    """The base queryset. Tenant AND location scoped, always.
 
-    Returns nothing when no location is active — the safe direction. A user who
-    has not chosen a site sees an empty calendar and the global
-    "choose a location" banner, never another site's bookings.
-    """
-    if request.location is None:
-        return Appointment.objects.none()
-    return Appointment.objects.filter(
-        tenant=request.tenant, location=request.location
-    ).select_related('contact', 'service', 'resource', 'provider', 'location')
-
-
-def _parse_local_date(raw):
-    """Parse `YYYY-MM-DD` from a query string, or None. Never raises."""
-    raw = (raw or '').strip()
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except (TypeError, ValueError):
-        return None
-
-
-def _authorised_pk(request, model_queryset, raw):
-    """Resolve a pk from a query string against an already-scoped queryset.
-
-    `.isdecimal()`, not `.isdigit()`: `isdigit()` is True for characters such as
-    '²' and fullwidth '１' that `int()` then refuses, turning a junk filter into
-    a 500. Returns None for anything not found, so a foreign pk degrades to
-    "no filter" rather than leaking or raising.
-    """
-    raw = (raw or '').strip()
-    if not raw.isdecimal():
-        return None
-    return model_queryset.filter(pk=int(raw)).first()
 
 
 @login_required  # noqa: F405
@@ -168,15 +167,15 @@ def appointment_list_view(request):
     services = _bookable_services(request)
     resources = _location_resources(request)
 
-    provider = _authorised_pk(request, providers, request.GET.get('provider'))
+    provider = _authorised_pk(providers, request.GET.get('provider'))
     if provider is not None:
         queryset = queryset.filter(provider=provider)
 
-    service = _authorised_pk(request, services, request.GET.get('service'))
+    service = _authorised_pk(services, request.GET.get('service'))
     if service is not None:
         queryset = queryset.filter(service=service)
 
-    resource = _authorised_pk(request, resources, request.GET.get('resource'))
+    resource = _authorised_pk(resources, request.GET.get('resource'))
     if resource is not None:
         queryset = queryset.filter(resource=resource)
 
@@ -197,48 +196,7 @@ def appointment_list_view(request):
     })
 
 
-def _location_providers(request):
-    """Providers assigned to the active location.
 
-    `status=User.STATUS_ACTIVE` mirrors `availability._candidate_providers` — a
-    suspended provider must not appear in the filter dropdown or the slot-search
-    provider list any more than they can be booked. Leaving this out would offer
-    a person availability.py itself refuses to mint a single slot for.
-    """
-    from apps.accounts.models import User
-
-    if request.location is None:
-        return User.objects.none()
-    return User.objects.filter(
-        tenant=request.tenant,
-        is_provider=True,
-        status=User.STATUS_ACTIVE,
-        user_locations__location=request.location,
-    ).distinct().order_by('full_name', 'email')
-
-
-def _bookable_services(request):
-    """Services bookable at the active location — this site's PLUS all-location.
-
-    Additive, never `filter(location=...)`, which would hide every business-wide
-    service.
-    """
-    if request.tenant is None:
-        return Service.objects.none()
-    queryset = Service.objects.filter(tenant=request.tenant, is_active=True)
-    if request.location is not None:
-        queryset = queryset.filter(
-            Q(location=request.location) | Q(location__isnull=True)
-        )
-    return queryset.order_by('display_order', 'name')
-
-
-def _location_resources(request):
-    if request.location is None:
-        return Resource.objects.none()
-    return Resource.objects.filter(
-        tenant=request.tenant, location=request.location, is_active=True
-    ).order_by('display_order', 'name')
 
 
 @login_required  # noqa: F405
@@ -262,7 +220,29 @@ def appointment_create_view(request):
         )
         return redirect('scheduling:appointment_list')  # noqa: F405
 
-    form = AppointmentForm(request.POST or None, request=request)
+    # Slot click-through from 4.4's calendar: `?start=…&resource=…&provider=…`.
+    # Every id is authorised against an already-scoped queryset before it is
+    # offered as an initial value — a raw pk from a query string is never trusted,
+    # even to pre-fill a form the user must still submit.
+    initial = {}
+    if request.method == 'GET':
+        start_at = _parse_local_datetime(request, request.GET.get('start'))
+        if start_at is not None:
+            initial['start_at'] = start_at
+        resource = _authorised_pk(
+            _location_resources(request), request.GET.get('resource')
+        )
+        if resource is not None:
+            initial['resource'] = resource.pk
+        provider = _authorised_pk(
+            _location_providers(request), request.GET.get('provider')
+        )
+        if provider is not None:
+            initial['provider'] = provider.pk
+
+    form = AppointmentForm(
+        request.POST or None, request=request, initial=initial or None
+    )
 
     if request.method == 'POST' and form.is_valid():
         obj = _save_booking_under_lock(form, request)
@@ -370,9 +350,9 @@ def appointment_slots_view(request):
     providers = _location_providers(request)
     resources = _location_resources(request)
 
-    service = _authorised_pk(request, services, request.GET.get('service'))
-    provider = _authorised_pk(request, providers, request.GET.get('provider'))
-    resource = _authorised_pk(request, resources, request.GET.get('resource'))
+    service = _authorised_pk(services, request.GET.get('service'))
+    provider = _authorised_pk(providers, request.GET.get('provider'))
+    resource = _authorised_pk(resources, request.GET.get('resource'))
 
     date_from = _parse_local_date(request.GET.get('from'))
     date_to = _parse_local_date(request.GET.get('to'))
@@ -386,7 +366,7 @@ def appointment_slots_view(request):
     # Resolved through the scoped queryset, so a foreign pk cannot be rescheduled
     # and simply falls back to normal booking.
     rescheduling = _authorised_pk(
-        request, _location_appointments(request), request.GET.get('reschedule')
+        _location_appointments(request), request.GET.get('reschedule')
     )
     if rescheduling is not None and not rescheduling.is_open:
         messages.error(  # noqa: F405
@@ -434,7 +414,6 @@ def appointment_book_view(request):
 
     token = (request.POST.get('token') or '').strip()
     contact = _authorised_pk(
-        request,
         Contact.objects.filter(tenant=request.tenant, anonymized_at__isnull=True),
         request.POST.get('contact'),
     )
