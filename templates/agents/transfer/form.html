@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}Edit transfer settings{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Edit transfer settings</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'agents:transfer_settings' %}">Transfer</a></li>
+      <li>Edit</li>
+    </ol>
+  </nav>
+</div>
+
+{% include "agents/_tabs.html" %}
+
+<form method="post" novalidate>
+  {% csrf_token %}
+
+  <div class="grid gap-4 lg:grid-cols-3">
+
+    <div class="lg:col-span-2 space-y-4">
+
+      <div class="card">
+        <div class="card-header"><span>Destinations</span></div>
+        <div class="card-body grid gap-4 sm:grid-cols-2">
+          {% if form.non_field_errors %}
+            <div class="alert alert-red sm:col-span-2" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            {% if field.name == 'transfer_enabled' or field.name == 'transfer_phone_number' or field.name == 'transfer_secondary_number' or field.name == 'transfer_timezone' %}
+              <div class="form-group">
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}
+                  <span class="text-muted text-sm">{{ field.help_text }}</span>
+                {% endif %}
+                {% if field.errors %}
+                  <span class="form-error">{{ field.errors|join:" " }}</span>
+                {% endif %}
+              </div>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span>Weekly windows</span>
+          <span class="text-muted">Leave all days off for no restriction</span>
+        </div>
+        <div class="card-body">
+          {% comment %}
+            day_rows is built in the FORM, not here: a Django template cannot
+            compose a field name from a loop variable, and faking it with a filter
+            chain is how a schedule editor writes Tuesday's hours into Monday.
+          {% endcomment %}
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th scope="col">Day</th>
+                  <th scope="col">Offer transfer</th>
+                  <th scope="col">From</th>
+                  <th scope="col">To</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for label, enabled_field, start_field, end_field in form.day_rows %}
+                  <tr>
+                    <td>{{ label }}</td>
+                    <td>{{ enabled_field }}</td>
+                    <td>
+                      {{ start_field }}
+                      {% if start_field.errors %}
+                        <span class="form-error">{{ start_field.errors|join:" " }}</span>
+                      {% endif %}
+                    </td>
+                    <td>
+                      {{ end_field }}
+                      {% if end_field.errors %}
+                        <span class="form-error">{{ end_field.errors|join:" " }}</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span>Escalation phrases</span></div>
+        <div class="card-body grid gap-4">
+          <div class="form-group">
+            <label class="form-label" for="{{ form.keywords_text.id_for_label }}">
+              {{ form.keywords_text.label }}
+            </label>
+            {{ form.keywords_text }}
+            <span class="text-muted text-sm">{{ form.keywords_text.help_text }}</span>
+            {% if form.keywords_text.errors %}
+              <span class="form-error">{{ form.keywords_text.errors|join:" " }}</span>
+            {% endif %}
+          </div>
+          <div>
+            <p class="text-muted text-sm">Always active, whatever you set here:</p>
+            <p style="margin-block-start: 6px;">
+              {% for keyword in builtin_keywords %}
+                <span class="badge badge-slate">{{ keyword }}</span>
+              {% endfor %}
+            </p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <aside>
+      <div class="card">
+        <div class="card-header"><span>Save</span></div>
+        <div class="card-body grid gap-2">
+          <button type="submit" class="btn btn-primary w-full">
+            <i data-lucide="check"></i> Save transfer settings
+          </button>
+          <a class="btn btn-outline w-full" href="{% url 'agents:transfer_settings' %}">Cancel</a>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+</form>
+{% endblock %}
