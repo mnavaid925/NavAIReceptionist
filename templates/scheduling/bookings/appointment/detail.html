@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+
+{% block title %}{{ obj.contact.display_name }} — {{ obj.start_at|date:"j M" }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{{ obj.contact.display_name }}</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li><a href="{% url 'scheduling:appointment_list' %}">Appointments</a></li>
+        <li>{{ obj.start_at|date:"j M Y, H:i" }}</li>
+      </ol>
+    </nav>
+  </div>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 grid gap-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Appointment</span>
+        {% include "partials/_appointment_status_badge.html" with obj=obj %}
+      </div>
+      <div class="card-body grid gap-4 sm:grid-cols-2">
+
+        {% if obj.is_cancelled %}
+          <div class="alert alert-red sm:col-span-2" role="status">
+            <span>
+              Cancelled{% if obj.cancelled_at %} on
+              <time datetime="{{ obj.cancelled_at|date:'c' }}">{{ obj.cancelled_at|date:"j M Y, H:i" }}</time>{% endif %}.
+              {% if obj.cancellation_reason %}
+                Reason: {{ obj.cancellation_reason }}
+              {% endif %}
+              The slot has been freed for someone else; this record is kept.
+            </span>
+          </div>
+        {% endif %}
+
+        <div>
+          <span class="form-label">Starts</span>
+          <p><time datetime="{{ obj.start_at|date:'c' }}">{{ obj.start_at|date:"l j F Y, H:i" }}</time></p>
+        </div>
+
+        <div>
+          <span class="form-label">Ends</span>
+          <p>
+            <time datetime="{{ obj.end_at|date:'c' }}">{{ obj.end_at|date:"H:i" }}</time>
+            <span class="block text-muted text-xs">{{ obj.duration_minutes }} minutes</span>
+          </p>
+        </div>
+
+        <div>
+          <span class="form-label">Contact</span>
+          <p><a href="{% url 'scheduling:contact_detail' obj.contact.pk %}">{{ obj.contact.display_name }}</a></p>
+        </div>
+
+        <div>
+          <span class="form-label">Service</span>
+          {% if obj.service %}
+            <p>
+              <a href="{% url 'scheduling:service_detail' obj.service.pk %}">{{ obj.service.name }}</a>
+              {% if obj.buffer_minutes %}
+                <span class="block text-muted text-xs">
+                  Plus {{ obj.buffer_minutes }} min turnaround before the next booking
+                </span>
+              {% endif %}
+            </p>
+          {% else %}
+            <p class="text-muted">The service has since been removed.</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">With</span>
+          {% if obj.provider %}
+            <p>{{ obj.provider.display_name }}</p>
+          {% else %}
+            <p class="text-muted">Nobody in particular</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Where</span>
+          {% if obj.resource %}
+            <p><a href="{% url 'scheduling:resource_detail' obj.resource.pk %}">{{ obj.resource.display_label }}</a></p>
+          {% else %}
+            <p class="text-muted">No room needed</p>
+          {% endif %}
+        </div>
+
+        <div class="sm:col-span-2">
+          <span class="form-label">Reason for visit</span>
+          {% comment %}
+            Caller-dictated through the agent, so untrusted — linebreaksbr,
+            never |safe.
+          {% endcomment %}
+          {% if obj.reason %}
+            <p>{{ obj.reason|linebreaksbr }}</p>
+          {% else %}
+            <p class="text-muted">Not given.</p>
+          {% endif %}
+        </div>
+
+        <div class="sm:col-span-2">
+          <span class="form-label">Notes</span>
+          {% if obj.notes %}
+            <p>{{ obj.notes|linebreaksbr }}</p>
+          {% else %}
+            <p class="text-muted">No notes.</p>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+
+    {% if obj.is_open %}
+      <div class="card">
+        <div class="card-header"><span>Cancel this appointment</span></div>
+        <div class="card-body">
+          <p class="text-muted">
+            Cancelling frees the slot for someone else and keeps the record, so
+            the diary stays honest about what was booked and then called off.
+            Prefer this to deleting.
+          </p>
+          <form method="post" action="{% url 'scheduling:appointment_cancel' obj.pk %}"
+                style="margin-block-start: 12px;"
+                onclick="return confirm('Cancel this appointment? The slot will be freed.');">
+            {% csrf_token %}
+            {% for field in cancel_form %}
+              <div class="form-group">
+                <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}
+                  <span class="text-muted text-sm">{{ field.help_text }}</span>
+                {% endif %}
+              </div>
+            {% endfor %}
+            <button type="submit" class="btn btn-danger">
+              <i data-lucide="calendar-x"></i> Cancel appointment
+            </button>
+          </form>
+        </div>
+      </div>
+    {% endif %}
+
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Actions</span></div>
+      <div class="card-body grid gap-2">
+        {% if obj.is_open %}
+          <a class="btn btn-primary" href="{% url 'scheduling:appointment_edit' obj.pk %}">
+            <i data-lucide="pencil"></i> Edit details
+          </a>
+          {% comment %}
+            Moving an appointment goes through the slot search, not a free-text
+            time field: a rescheduled booking must clear the same availability
+            and conflict checks as a new one.
+          {% endcomment %}
+          <a class="btn btn-outline"
+             href="{% url 'scheduling:appointment_slots' %}{% if obj.service_id %}?service={{ obj.service_id }}{% endif %}">
+            <i data-lucide="calendar-clock"></i> Find a new time
+          </a>
+        {% else %}
+          <p class="text-muted">
+            This appointment is {{ obj.get_status_display|lower }}, so it can no
+            longer be changed or moved.
+          </p>
+        {% endif %}
+        {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+          <form method="post" action="{% url 'scheduling:appointment_delete' obj.pk %}"
+                onclick="return confirm('Delete this booking outright? To keep a record of a booking that was called off, cancel it instead.');">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger">
+              <i data-lucide="trash-2"></i> Delete booking
+            </button>
+          </form>
+        {% endif %}
+        <a class="btn btn-outline" href="{% url 'scheduling:appointment_list' %}">
+          Back to appointments
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>How this was booked</span></div>
+      <div class="card-body grid gap-2">
+        <div>
+          <span class="form-label">Source</span>
+          <p>
+            {% if obj.source == 'ai_phone' %}
+              <span class="badge badge-info">AI phone call</span>
+            {% elif obj.source == 'manual' %}
+              <span class="badge badge-slate">Booked manually</span>
+            {% elif obj.source == 'web' %}
+              <span class="badge badge-green">Web</span>
+            {% else %}
+              <span class="badge badge-muted">{{ obj.get_source_display }}</span>
+            {% endif %}
+          </p>
+        </div>
+        {% comment %}
+          The link to the originating CallSession is deliberately absent: the
+          calls app does not exist yet, so Appointment carries no
+          booked_by_session FK. Module 5 adds both the column and this panel's
+          link. Saying so beats a dead placeholder.
+        {% endcomment %}
+        {% if obj.source == 'ai_phone' %}
+          <p class="text-muted">
+            The recording and transcript of the call that made this booking will
+            link here once the call logs module is built.
+          </p>
+        {% endif %}
+        <div>
+          <span class="form-label">Location</span>
+          <p>{{ obj.location.name }}</p>
+        </div>
+        <div>
+          <span class="form-label">Created</span>
+          <p><time datetime="{{ obj.created_at|date:'c' }}">{{ obj.created_at|date:"j M Y, H:i" }}</time></p>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
