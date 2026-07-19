@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block title %}{% if is_edit %}Edit {{ obj.name }}{% else %}Add service{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{% if is_edit %}Edit {{ obj.name }}{% else %}Add service{% endif %}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'scheduling:service_list' %}">Services</a></li>
+      <li>{% if is_edit %}Edit{% else %}Add{% endif %}</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  One template serves create and edit.
+
+  `location` IS rendered here, unlike every other form in this project — it is the
+  actual product choice (one site or all of them), not an identity field. The
+  form narrows its queryset to the locations THIS user is assigned to, so it
+  cannot be used to reach a site they have no access to.
+{% endcomment %}
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-body grid gap-4 sm:grid-cols-2">
+
+          {% if form.non_field_errors %}
+            <div class="alert alert-red sm:col-span-2" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group{% if field.name == 'description' or field.name == 'name' %} sm:col-span-2{% endif %}">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+
+        </div>
+
+        <div class="card-header">
+          {% if is_edit %}
+            <a class="btn btn-outline" href="{% url 'scheduling:service_detail' obj.pk %}">Cancel</a>
+          {% else %}
+            <a class="btn btn-outline" href="{% url 'scheduling:service_list' %}">Cancel</a>
+          {% endif %}
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i>
+            {% if is_edit %}Save changes{% else %}Add service{% endif %}
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Duration and buffer</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          Duration is the appointment itself. Buffer is extra time held
+          <em>after</em> it &mdash; cleaning down, notes, turnaround. The next
+          booking cannot start inside the buffer, so a 30-minute service with a
+          10-minute buffer occupies 40 minutes of the day.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>One site or all of them</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          Leave &ldquo;Offered at&rdquo; blank and every location can book this
+          service. Pick a location and only that site offers it. Most businesses
+          leave it blank for their core services and pin only the specialised ones.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>What the agent says</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          The description is read aloud when a caller asks what a service
+          involves. Write it the way you would say it on the phone, not the way
+          you would print it on a price list.
+        </p>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
