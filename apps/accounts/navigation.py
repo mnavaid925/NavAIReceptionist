@@ -73,6 +73,8 @@ LIVE_LINKS = {
     '4.1': {'Contacts': 'scheduling:contact_list'},
     '4.2': {'Services': 'scheduling:service_list',
             'Resources': 'scheduling:resource_list'},
+    '4.3': {'Appointments': 'scheduling:appointment_list',
+            'Find a slot': 'scheduling:appointment_slots'},
 }
 
 
