@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+
+{% block title %}{{ obj.name }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{{ obj.name }}</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li><a href="{% url 'scheduling:service_list' %}">Services</a></li>
+        <li>{{ obj.name }}</li>
+      </ol>
+    </nav>
+  </div>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 grid gap-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Details</span>
+        {% if obj.is_active %}
+          <span class="badge badge-green">Active</span>
+        {% else %}
+          <span class="badge badge-muted">Inactive</span>
+        {% endif %}
+      </div>
+      <div class="card-body grid gap-4 sm:grid-cols-2">
+
+        {% if not obj.is_active %}
+          <div class="alert alert-amber sm:col-span-2" role="status">
+            <span>
+              This service is inactive, so the agent will never offer it to a
+              caller. Existing bookings are unaffected.
+            </span>
+          </div>
+        {% endif %}
+
+        <div class="sm:col-span-2">
+          <span class="form-label">What the agent says</span>
+          {% if obj.description %}
+            <p>{{ obj.description|linebreaksbr }}</p>
+          {% else %}
+            <p class="text-muted">
+              No description. The agent can book this service but cannot explain
+              what it involves.
+            </p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Offered at</span>
+          {% if obj.is_all_locations %}
+            <p><span class="badge badge-info">All locations</span></p>
+          {% else %}
+            <p>{{ obj.location.name }}</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Bookable where you are</span>
+          {% if bookable_here %}
+            <p><span class="badge badge-green">Yes</span></p>
+          {% else %}
+            <p>
+              <span class="badge badge-muted">No</span>
+              <span class="block text-muted text-xs">
+                Switch to {{ obj.location.name }} to book it.
+              </span>
+            </p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Duration</span>
+          <p>{{ obj.duration_minutes }} minutes</p>
+        </div>
+
+        <div>
+          <span class="form-label">Buffer after</span>
+          {% if obj.buffer_minutes %}
+            <p>{{ obj.buffer_minutes }} minutes</p>
+          {% else %}
+            <p class="text-muted">None</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Total time held</span>
+          <p>{{ obj.total_minutes }} minutes</p>
+        </div>
+
+        <div>
+          <span class="form-label">Needs a room or resource</span>
+          {% if obj.requires_resource %}
+            <p><span class="badge badge-slate">Yes</span></p>
+          {% else %}
+            <p class="text-muted">No</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Display order</span>
+          <p>{{ obj.display_order }}</p>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Actions</span></div>
+      <div class="card-body grid gap-2">
+        <a class="btn btn-primary" href="{% url 'scheduling:service_edit' obj.pk %}">
+          <i data-lucide="pencil"></i> Edit service
+        </a>
+        {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+          <form method="post" action="{% url 'scheduling:service_delete' obj.pk %}"
+                onclick="return confirm('Delete {{ obj.name|escapejs }}? If it has been booked, untick Active instead.');">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger">
+              <i data-lucide="trash-2"></i> Delete service
+            </button>
+          </form>
+        {% endif %}
+        <a class="btn btn-outline" href="{% url 'scheduling:service_list' %}">
+          Back to services
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Bookings</span></div>
+      <div class="card-body">
+        {% comment %}
+          `appointment_count` is None until 4.3 builds Appointment, 0 once it
+          exists but nothing is booked. The two states read differently on
+          purpose — "not built yet" is not "never booked".
+        {% endcomment %}
+        {% if appointment_count is None %}
+          <p class="text-muted">
+            Booking counts appear here once the appointments sub-module is built.
+          </p>
+        {% elif appointment_count %}
+          <p>
+            On <strong>{{ appointment_count }}</strong> appointment{{ appointment_count|pluralize }}.
+          </p>
+          <p class="text-muted">
+            Because of that, this service cannot be deleted &mdash; doing so would
+            blank the service on every one of them. Untick &ldquo;Active&rdquo;
+            instead.
+          </p>
+        {% else %}
+          <p class="text-muted">Never booked.</p>
+        {% endif %}
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
