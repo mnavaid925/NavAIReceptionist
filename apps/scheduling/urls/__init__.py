@@ -15,6 +15,9 @@ from apps.scheduling.urls.ContactDirectory.Contacts import (
 from apps.scheduling.urls.ServicesResources.Resources import (
     urlpatterns as resource_urlpatterns,
 )
+from apps.scheduling.urls.Bookings.Appointments import (
+    urlpatterns as appointment_urlpatterns,
+)
 from apps.scheduling.urls.ServicesResources.Services import (
     urlpatterns as service_urlpatterns,
 )
@@ -29,3 +32,9 @@ urlpatterns = list(contact_directory_urlpatterns)
 # here can shadow 4.1. Check that again before adding any `<str:...>` route.
 urlpatterns += service_urlpatterns
 urlpatterns += resource_urlpatterns
+
+# -- 4.3 Availability & Booking -------------------------------------------- #
+# `appointments/` prefix, distinct from contacts/services/resources. Its own
+# module keeps `slots/` and `book/` ahead of `<int:pk>`; nothing above uses a
+# greedy converter that could swallow them.
+urlpatterns += appointment_urlpatterns
