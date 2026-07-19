@@ -9,7 +9,19 @@ Sub-module folders, in build order:
 
 * `ContactDirectory/`   — 4.1  contact CRUD
 * `ServicesResources/`  — 4.2  service CRUD, resource CRUD
+* `Bookings/`           — 4.3  appointment CRUD + slots/book/reschedule/cancel
 """
+from apps.scheduling.views.Bookings.Appointments import (
+    appointment_book_view,
+    appointment_cancel_view,
+    appointment_create_view,
+    appointment_delete_view,
+    appointment_detail_view,
+    appointment_edit_view,
+    appointment_list_view,
+    appointment_reschedule_view,
+    appointment_slots_view,
+)
 from apps.scheduling.views.ContactDirectory.Contacts import (
     contact_create_view,
     contact_delete_view,
@@ -50,4 +62,13 @@ __all__ = [
     'resource_detail_view',
     'resource_edit_view',
     'resource_delete_view',
+    'appointment_list_view',
+    'appointment_create_view',
+    'appointment_detail_view',
+    'appointment_edit_view',
+    'appointment_delete_view',
+    'appointment_slots_view',
+    'appointment_book_view',
+    'appointment_reschedule_view',
+    'appointment_cancel_view',
 ]
