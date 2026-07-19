@@ -14,6 +14,8 @@
   </nav>
 </div>
 
+{% include "partials/_account_tabs.html" %}
+
 {% comment %}
   One template serves create and edit; the view passes the bound-or-empty form
   plus `is_edit`. There is no password field: a new user is emailed a link and
