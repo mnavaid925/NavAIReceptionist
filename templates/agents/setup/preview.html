@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Agent preview{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Agent preview</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li><a href="{% url 'agents:agent_setup' %}">Agent Setup</a></li>
+        <li>Preview</li>
+      </ol>
+    </nav>
+    <a class="btn btn-outline" href="{% url 'agents:agent_setup_edit' %}">
+      <i data-lucide="pencil"></i> Edit
+    </a>
+  </div>
+</div>
+
+{% include "agents/_tabs.html" %}
+
+{% comment %}
+  Rendered through the same services.render_template the runtime calls, against a
+  representative context — so this is what a caller actually gets, not a separate
+  approximation that could drift from the live path.
+{% endcomment %}
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 space-y-4">
+    <div class="card">
+      <div class="card-header">
+        <span>Greeting, as spoken</span>
+        <span class="badge badge-info">0 tokens</span>
+      </div>
+      <div class="card-body">
+        {% if rendered_greeting %}
+          <p style="font-size: 15px;">&ldquo;{{ rendered_greeting }}&rdquo;</p>
+        {% else %}
+          <p class="text-muted">No greeting set.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>System prompt, as sent</span></div>
+      <div class="card-body">
+        {% if rendered_prompt %}
+          <pre style="white-space: pre-wrap; margin: 0; font: inherit;">{{ rendered_prompt }}</pre>
+        {% else %}
+          <p class="text-muted">No prompt set.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <aside>
+    <div class="card">
+      <div class="card-header"><span>Values used</span></div>
+      <div class="card-body">
+        <dl class="grid gap-2">
+          {% for name, value in context %}
+            <div class="flex items-start justify-between gap-3">
+              <dt class="form-label" style="margin: 0;"><code>{{ name }}</code></dt>
+              <dd class="m-0 text-sm text-right">{{ value|default:"&mdash;" }}</dd>
+            </div>
+          {% endfor %}
+        </dl>
+        <p class="text-muted text-sm" style="margin-block-start: 12px;">
+          Time-based values are recomputed on every turn of a real call, so a long
+          call never asserts a stale time.
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
