@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+
+{% block title %}Calendar{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Calendar</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Calendar &amp; Bookings</li>
+        <li>Day</li>
+      </ol>
+    </nav>
+    {% if not no_location %}
+      <a class="btn btn-outline" href="{% url 'scheduling:appointment_slots' %}">
+        <i data-lucide="search"></i> Find a slot
+      </a>
+      <a class="btn btn-primary" href="{% url 'scheduling:appointment_create' %}">
+        <i data-lucide="plus"></i> Book manually
+      </a>
+    {% endif %}
+  </div>
+</div>
+
+{% if no_location %}
+  {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Each site keeps its own diary. Pick the location you are working in and its calendar appears here." %}
+{% else %}
+
+  <div class="card card-body flex flex-wrap items-center gap-3">
+    <span class="flex gap-2">
+      <a class="btn btn-outline" href="?date={{ prev_date|date:'Y-m-d' }}&amp;by={{ mode }}"
+         aria-label="Previous day"><i data-lucide="chevron-left"></i></a>
+      <a class="btn btn-outline" href="?date={{ today|date:'Y-m-d' }}&amp;by={{ mode }}">Today</a>
+      <a class="btn btn-outline" href="?date={{ next_date|date:'Y-m-d' }}&amp;by={{ mode }}"
+         aria-label="Next day"><i data-lucide="chevron-right"></i></a>
+    </span>
+
+    <span class="grow">
+      <strong>{{ day|date:"l j F Y" }}</strong>
+      {% if is_today %}<span class="badge badge-info">Today</span>{% endif %}
+      <span class="block text-muted text-xs">
+        {{ total_count }} booking{{ total_count|pluralize }} &mdash;
+        {{ active_location.name }}, times in {{ active_location.timezone }}
+      </span>
+    </span>
+
+    <span class="form-group" style="margin:0;">
+      <label class="form-label" for="f-date">Jump to</label>
+      <form method="get" class="flex gap-2">
+        <input class="form-input" type="date" id="f-date" name="date"
+               value="{{ day|date:'Y-m-d' }}">
+        <input type="hidden" name="by" value="{{ mode }}">
+        <button type="submit" class="btn btn-primary">Go</button>
+      </form>
+    </span>
+
+    {% comment %}
+      The column toggle. It changes only how the SAME appointments are grouped —
+      the underlying query is identical in both modes.
+    {% endcomment %}
+    <span class="flex gap-2">
+      <a class="btn {% if mode == 'resource' %}btn-primary{% else %}btn-outline{% endif %}"
+         href="?date={{ day|date:'Y-m-d' }}&amp;by=resource">By room</a>
+      <a class="btn {% if mode == 'provider' %}btn-primary{% else %}btn-outline{% endif %}"
+         href="?date={{ day|date:'Y-m-d' }}&amp;by=provider">By person</a>
+      <a class="btn btn-outline" href="{% url 'scheduling:calendar_week' %}?date={{ day|date:'Y-m-d' }}&amp;by={{ mode }}">
+        Week
+      </a>
+    </span>
+  </div>
+
+  <div style="margin-block-start: 16px;">
+    {% include "scheduling/calendar/_grid.html" %}
+  </div>
+
+  <p class="text-muted text-xs" style="margin-block-start: 8px;">
+    Click any empty slot to book into it. Only rooms and people who can actually
+    take a booking are shown as columns.
+  </p>
+
+  {% if freed %}
+    <div class="card" style="margin-block-start: 16px;">
+      <div class="card-header">
+        <span>Cancelled and no-shows</span>
+        <span class="text-muted">{{ freed|length }} on this day</span>
+      </div>
+      <div class="card-body">
+        {% comment %}
+          Deliberately listed BELOW the grid rather than drawn in it. A cancelled
+          booking has freed its slot, so painting it on the grid would make
+          bookable time look occupied. A no-show did occupy its slot at the time,
+          but the slot is past — neither belongs in the live grid.
+        {% endcomment %}
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th scope="col">When</th>
+                <th scope="col">Contact</th>
+                <th scope="col">Status</th>
+                <th scope="col" class="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for a in freed %}
+                <tr>
+                  <td><time datetime="{{ a.start_at|date:'c' }}">{{ a.start_at|date:"H:i" }}</time></td>
+                  <td>{{ a.contact.display_name }}</td>
+                  <td>{% include "partials/_appointment_status_badge.html" with obj=a %}</td>
+                  <td class="text-right">
+                    <a class="btn btn-icon" href="{% url 'scheduling:appointment_detail' a.pk %}"
+                       aria-label="View booking for {{ a.contact.display_name }}" title="View">
+                      <i data-lucide="eye"></i>
+                    </a>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+{% endif %}
+{% endblock %}
