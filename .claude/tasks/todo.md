@@ -331,4 +331,74 @@ Carried over from research-accounts-0.1.md, nothing lost:
 - Tenant activation toggle UI (0.1 only *reads* `Tenant.is_active` at login) → **1.1**.
 
 ## Review notes
-(filled in at the end)
+
+**Status: 0.1 code complete and verified. Steps 4-11 of the Module Creation Sequence (the eight review
+agents + test-writer) have NOT yet run.**
+
+### Deviations from this plan, and why
+
+1. **`last_login` kept, `last_login_at` dropped.** The plan called for removing the inherited field and
+   adding `last_login_at`, which requires disconnecting Django's `update_last_login` receiver and
+   subclassing `PasswordResetTokenGenerator`. That is three pieces of permanent framework-fighting for a
+   cosmetic field name, and it would have to be re-justified at every Django upgrade. The inherited field
+   is used; `NavAIReceptionist-ERD.md` was updated in the same change to record it.
+2. **No application-layer guard for `(tenant, username)`.** The plan flagged that MySQL cannot enforce a
+   partial `UniqueConstraint(condition=...)`. Correct — but the conclusion was wrong. A **plain**
+   `UniqueConstraint(fields=['tenant', 'username'])` already means "unique where username is not null",
+   because every SQL engine treats NULLs as distinct inside a unique index. The real requirement was
+   normalising `username` to `None` rather than `''`, which happens in both `clean()` and `save()`.
+3. **`TenantPasswordResetTokenGenerator` not written.** Unnecessary once `last_login` is kept —
+   `default_token_generator` works as-is, and single-use falls out of it for free since the token hashes
+   the current password.
+4. **`AccountsConfig.ready()` signal work not needed.** Same root cause as 1.
+
+### Bugs found during verification (all fixed)
+
+1. **`SessionPolicyMiddleware` 500'd on every idle logout** — it calls `messages.info()` but sat *before*
+   `MessageMiddleware`, so `request._messages` did not exist. `MessageMiddleware` now precedes the three
+   app middlewares in `MIDDLEWARE`.
+2. **Every migration load crashed.** A manager with `use_in_migrations = True` is serialised by import
+   path, and the mandated `<Entity>.py` layout makes `apps.accounts.models.User` resolve to the
+   re-exported **class**, not the module — `type object 'User' has no attribute 'UserManager'`. Managers
+   in this project keep `use_in_migrations = False`. **This trap applies to all eleven models**; recorded
+   in the ERD.
+3. **The entire design system 404'd under Daphne.** `get_asgi_application()` carries no staticfiles
+   handler — serving `/static/` in development is a `runserver` convenience, and this project forbids
+   `runserver` outright. `theme.css` and `layout.js` both returned 404 and every page rendered as unstyled
+   HTML, silently. `config/asgi.py` now wraps the HTTP application in `ASGIStaticFilesHandler` when
+   `DEBUG`. **This was invisible to the Django test client** — only a real browser against Daphne caught
+   it, which is an argument for running the live check on every module.
+4. **The admin add-user page would have failed on Django 4.2** — `usable_password` in `add_fieldsets` is
+   5.1-only, and the stock `UserCreationForm` assumes a `username` login field. An explicit
+   `AdminUserCreationForm` now backs it.
+
+### Environment decision
+
+XAMPP ships **MariaDB 10.4.14**; Django 5.1+ requires 10.5+. On the user's instruction the project is
+pinned to **Django 4.2 LTS**, which supports MariaDB 10.4 and runs Channels 4.x unchanged. `requirements.txt`
+and every doc that named Django 5.1 were updated. Revisit when the database server is upgraded — 4.2 LTS is
+supported until April 2026.
+
+### Verification evidence
+
+- `manage.py check` — no issues (1 silenced: `auth.W004`, silenced by name with the multi-tenant reason).
+- `makemigrations --check` — no changes detected.
+- `migrate` against MySQL — clean, all apps applied.
+- `seed_tenants` + `seed_accounts` — seeded; a second run of each is a no-op ("Data already exists").
+- `temp/smoke_0_1.py` — **60/60 checks pass**, covering: uniform login failure across all six causes with
+  identical rendered error text; throttling (including a nonexistent account throttling identically to a
+  real one); open-redirect refusal; POST-only logout; non-enumerating password reset with single-use and
+  expired-token handling; idle-session logout; template comment leaks; **cross-tenant isolation**; and
+  **cross-location isolation** — a Downtown-only user writing Uptown's id, another tenant's id, and a junk
+  id into their own session are all rejected without a 500.
+- Live Daphne run — login → dashboard renders real seeded MySQL data; zero template-tag leaks in the
+  served HTML; all four sidebar sizes, dark mode, brand sidebar, horizontal/detached layouts, RTL,
+  localStorage persistence and reset all confirmed working; 25 Lucide icons render.
+
+### Remaining for 0.1
+
+Steps 4-11: `code-reviewer` -> `explorer` -> `frontend-reviewer` -> `performance-reviewer` ->
+`realtime-reviewer` (expected to find nothing; 0.1 has no realtime surface) -> `qa-smoke-tester` ->
+`security-reviewer` -> `test-writer` (the pytest suite under `apps/accounts/tests/` — `temp/smoke_0_1.py`
+is a throwaway and is gitignored, so it is NOT the deliverable test suite). Step 12 is a deliberate no-op:
+CLAUDE.md carves Module 0 out of the Per-Module Skill rule.
