@@ -1,0 +1,29 @@
+{% comment %}
+  THE call-status badge. This partial is the single source of truth for the map —
+  never inline the branches at a call site.
+
+    in_progress -> badge-info    completed -> badge-green   abandoned -> badge-muted
+    transferred -> badge-info    failed    -> badge-red
+
+  Five statuses share four classes; badge-info is used twice on purpose. There is
+  no badge-purple in this design system.
+
+  The trailing else-branch fallback is mandatory even though all five values are
+  branched: a value added to the model later must degrade to a readable pill
+  rather than rendering nothing at all.
+
+  Usage: {% include "partials/_call_status_badge.html" with obj=session %}
+{% endcomment %}
+{% if obj.status == 'in_progress' %}
+  <span class="badge badge-info">In Progress</span>
+{% elif obj.status == 'completed' %}
+  <span class="badge badge-green">Completed</span>
+{% elif obj.status == 'abandoned' %}
+  <span class="badge badge-muted">Abandoned</span>
+{% elif obj.status == 'transferred' %}
+  <span class="badge badge-info">Transferred</span>
+{% elif obj.status == 'failed' %}
+  <span class="badge badge-red">Failed</span>
+{% else %}
+  <span class="badge badge-muted">{{ obj.get_status_display }}</span>
+{% endif %}
