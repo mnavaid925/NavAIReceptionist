@@ -96,6 +96,10 @@ class AppointmentForm(TenantLocationModelForm):  # noqa: F405
 
         # Providers are staff assigned to THIS location — not every user in the
         # tenant. `user_locations` is the accessor from User to UserLocation.
+        # `status=STATUS_ACTIVE` mirrors `availability._candidate_providers`: a
+        # suspended provider cannot be offered a slot, so the manual-booking
+        # dropdown must not offer them either, or a front-desk user could book
+        # directly against someone `find_available_slots` would refuse.
         provider_field = self.fields['provider']
         if self.location is not None:
             from apps.accounts.models import User
@@ -103,6 +107,7 @@ class AppointmentForm(TenantLocationModelForm):  # noqa: F405
             provider_field.queryset = User.objects.filter(
                 tenant=self.tenant,
                 is_provider=True,
+                status=User.STATUS_ACTIVE,
                 user_locations__location=self.location,
             ).distinct().order_by('full_name', 'email')
         else:
