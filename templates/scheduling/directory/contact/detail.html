@@ -164,7 +164,7 @@
               <tbody>
                 {% for appt in appointments %}
                   <tr>
-                    <td><time datetime="{{ appt.starts_at|date:'c' }}">{{ appt.starts_at|date:"j M Y, H:i" }}</time></td>
+                    <td><time datetime="{{ appt.start_at|date:'c' }}">{{ appt.start_at|date:"j M Y, H:i" }}</time></td>
                     <td>{{ appt.service }}</td>
                     <td>{{ appt.location.name }}</td>
                     <td>{% include "partials/_appointment_status_badge.html" with obj=appt %}</td>
