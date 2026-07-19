@@ -78,26 +78,67 @@
       <i data-lucide="settings"></i>
     </button>
 
+    {% comment %}
+      The user menu. This is where Module 0 lives now — Accounts & Access is
+      deliberately absent from the sidebar, because changing your own password is
+      not a day-to-day operational area the way the calendar or the call log is.
+
+      `account_tabs` comes from the context processor and is already tier-filtered,
+      so a staff-tier user never sees the Users entry. The views enforce that
+      independently; this only avoids offering a link that would bounce them.
+    {% endcomment %}
     {% if user.is_authenticated %}
-      {% if nav_urls.profile %}
-        <a class="flex items-center gap-2" href="{{ nav_urls.profile }}" title="My profile">
-      {% else %}
-        <span class="flex items-center gap-2">
-      {% endif %}
-        <span class="avatar-initial" aria-hidden="true">{{ user.initials }}</span>
-        <span class="hidden sm:block">
-          <span class="block font-semibold leading-tight">{{ user.display_name }}</span>
-          <span class="block text-muted text-xs leading-tight">{{ user.get_tier_display }}</span>
-        </span>
-      {% if nav_urls.profile %}</a>{% else %}</span>{% endif %}
-      {% if nav_urls.logout %}
-        <form method="post" action="{{ nav_urls.logout }}">
-          {% csrf_token %}
-          <button type="submit" class="btn btn-icon" aria-label="Sign out" title="Sign out">
-            <i data-lucide="log-out"></i>
+      <div class="dropdown">
+        <button type="button" class="dropdown-toggle" data-dropdown="user-menu"
+                aria-expanded="false" aria-haspopup="true" aria-controls="user-menu">
+          <span class="avatar-initial" aria-hidden="true">{{ user.initials }}</span>
+          <span class="hidden sm:block">
+            <span class="block font-semibold leading-tight">{{ user.display_name }}</span>
+            <span class="block text-muted text-xs leading-tight">{{ user.get_tier_display }}</span>
+          </span>
+          <i data-lucide="chevron-down" aria-hidden="true"></i>
+        </button>
+
+        <div class="dropdown-menu" id="user-menu" role="menu">
+
+          <div class="dropdown-header">
+            Welcome {{ user.first_name|default:user.display_name }}
+          </div>
+
+          {% for tab in account_tabs %}
+            <a class="dropdown-item" href="{{ tab.url }}" role="menuitem">
+              <i data-lucide="{{ tab.icon }}"></i> {{ tab.label }}
+            </a>
+          {% endfor %}
+
+          {% if active_tenant %}
+            <div class="dropdown-divider"></div>
+            <div class="dropdown-item" style="cursor: default;">
+              <i data-lucide="building-2"></i>
+              <span>
+                <span class="block">{{ active_tenant.name }}</span>
+                <span class="block text-muted text-xs">ID {{ active_tenant.customer_id }}</span>
+              </span>
+            </div>
+          {% endif %}
+
+          <div class="dropdown-divider"></div>
+
+          <button type="button" class="dropdown-item" data-action="open-settings" role="menuitem">
+            <i data-lucide="settings"></i> Layout settings
           </button>
-        </form>
-      {% endif %}
+
+          {% if nav_urls.logout %}
+            <form method="post" action="{{ nav_urls.logout }}">
+              {% csrf_token %}
+              <button type="submit" class="dropdown-item is-danger" role="menuitem">
+                <i data-lucide="log-out"></i> Logout
+              </button>
+            </form>
+          {% endif %}
+
+        </div>
+      </div>
     {% endif %}
 
   </div>
