@@ -19,6 +19,7 @@ from django.db import transaction
 
 from apps.accounts.models import User, UserLocation
 from apps.tenants.models import Location, Tenant
+from apps.tenants.services import has_configured_hours, set_provider_hours
 
 # One shared password for every demo account. Long enough to satisfy the
 # configured AUTH_PASSWORD_VALIDATORS; obviously not a production secret.
@@ -52,6 +53,20 @@ DEMO_USERS = [
                 # Deliberately ONE site — the cross-location isolation probe.
                 'locations': ['downtown'],
             },
+            {
+                # Added for Module 4: without a provider at Uptown, availability
+                # search returns nothing there forever and the calendar's
+                # by-provider view has a single column. Kept OFF Downtown so
+                # Marco stays the single-site isolation probe.
+                'email': 'uptown.provider@acme.test',
+                'username': 'acme_uptown',
+                'first_name': 'Sofia',
+                'last_name': 'Lindqvist',
+                'tier': User.TIER_STAFF,
+                'is_provider': True,
+                'primary_phone': '+13125550103',
+                'locations': ['uptown'],
+            },
         ],
     },
     {
@@ -77,8 +92,33 @@ DEMO_USERS = [
                 'primary_phone': '+15035550102',
                 'locations': ['riverside'],
             },
+            {
+                # Same reasoning as Sofia — Lakeside needs its own provider.
+                'email': 'lakeside.provider@globex.test',
+                'username': 'globex_lakeside',
+                'first_name': 'Ines',
+                'last_name': 'Duarte',
+                'tier': User.TIER_STAFF,
+                'is_provider': True,
+                'primary_phone': '+13035550103',
+                'locations': ['lakeside'],
+            },
         ],
     },
+]
+
+#: Working hours stamped on every seeded provider, per location.
+#:
+#: WITHOUT THIS the availability engine finds nothing. `get_provider_intervals`
+#: documents that no configured hours means UNAVAILABLE — never "available all
+#: day" — so a provider seeded with `is_provider=True` and an empty
+#: `provider_hours` is a provider nobody can ever book. That combination is not a
+#: neutral default; it is a broken one.
+DEMO_PROVIDER_HOURS = [
+    {'start_time': '09:00', 'end_time': '13:00',
+     'days': ['mon', 'tue', 'wed', 'thu', 'fri']},
+    {'start_time': '14:00', 'end_time': '17:30',
+     'days': ['mon', 'tue', 'wed', 'thu', 'fri']},
 ]
 
 
@@ -109,6 +149,7 @@ class Command(BaseCommand):
 
         created_users = 0
         created_assignments = 0
+        stamped_hours = 0
 
         # The platform superuser. No tenant, by design.
         superuser = User.objects.filter(email=SUPERUSER_EMAIL).first()
@@ -147,9 +188,20 @@ class Command(BaseCommand):
                     )
                     created_assignments += int(made)
 
-        if created_users or created_assignments:
+                    # Stamp working hours for every provider at every site they
+                    # work. Only when unset, so a demo edited through the 1.4
+                    # Working Hours page survives a re-seed.
+                    if user.is_provider and not has_configured_hours(user, location.pk):
+                        set_provider_hours(
+                            user, location.pk, DEMO_PROVIDER_HOURS, commit=True
+                        )
+                        stamped_hours += 1
+
+        if created_users or created_assignments or stamped_hours:
             self.stdout.write(self.style.SUCCESS(
-                f'Seeded {created_users} user(s) and {created_assignments} assignment(s).'
+                f'Seeded {created_users} user(s), {created_assignments} '
+                f'assignment(s) and working hours for {stamped_hours} '
+                'provider-location pair(s).'
             ))
         else:
             self.stdout.write(self.style.WARNING(
