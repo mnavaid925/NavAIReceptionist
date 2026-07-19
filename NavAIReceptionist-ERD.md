@@ -11,7 +11,7 @@
 number and an AI voice agent **per location**. The agent answers inbound calls, books appointments into a
 calendar, transfers to a human when asked, and logs the call in detail.
 
-**Stack.** All-Django: Django 5.1 + Channels/ASGI (the realtime Twilio media-stream websocket), Tailwind + HTMX +
+**Stack.** All-Django: Django 4.2 LTS + Channels/ASGI (the realtime Twilio media-stream websocket), Tailwind + HTMX +
 Lucide, MySQL (`navai_receptionist`). `AUTH_USER_MODEL = 'accounts.User'`. `PROVIDER_MODE=fake` is the dev,
 test and seed default — a non-`live` mode never places a real call.
 
