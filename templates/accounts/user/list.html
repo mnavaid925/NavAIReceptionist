@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Users{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Users</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Accounts</li>
+        <li>Users</li>
+      </ol>
+    </nav>
+    <a class="btn btn-primary" href="{% url 'accounts:user_create' %}">
+      <i data-lucide="plus"></i> Add user
+    </a>
+  </div>
+</div>
+
+{% include "accounts/user/_filters.html" %}
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header">
+    <span>{{ total_count }} user{{ total_count|pluralize }}</span>
+    <span class="text-muted">{{ active_tenant.name }}</span>
+  </div>
+  <div class="card-body">
+
+    {% if users %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Email</th>
+              <th scope="col">Role</th>
+              <th scope="col">Status</th>
+              <th scope="col">Bookable</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for u in users %}
+              <tr>
+                <td>
+                  <span class="flex items-center gap-2">
+                    <span class="avatar-initial" aria-hidden="true">{{ u.initials }}</span>
+                    <span>
+                      {{ u.display_name }}
+                      {% if u.username %}<span class="block text-muted text-xs">{{ u.username }}</span>{% endif %}
+                    </span>
+                  </span>
+                </td>
+                <td>{{ u.email }}</td>
+                <td><span class="badge badge-slate">{{ u.get_tier_display }}</span></td>
+                <td>
+                  {% if u.status == 'active' %}
+                    <span class="badge badge-green">Active</span>
+                  {% elif u.status == 'inactive' %}
+                    <span class="badge badge-muted">Inactive</span>
+                  {% elif u.status == 'suspended' %}
+                    <span class="badge badge-red">Suspended</span>
+                  {% else %}
+                    <span class="badge badge-muted">{{ u.get_status_display }}</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if u.is_provider %}
+                    <span class="badge badge-info">Provider</span>
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <span class="table-actions">
+                    <a class="btn btn-icon" href="{% url 'accounts:user_detail' u.pk %}"
+                       aria-label="View {{ u.display_name }}" title="View">
+                      <i data-lucide="eye"></i>
+                    </a>
+                    <a class="btn btn-icon" href="{% url 'accounts:user_edit' u.pk %}"
+                       aria-label="Edit {{ u.display_name }}" title="Edit">
+                      <i data-lucide="pencil"></i>
+                    </a>
+                    {% comment %}
+                      Deactivation, not deletion — and hidden for yourself and for
+                      an already-inactive user. Hiding is not enforcing: the view
+                      re-checks both, plus the last-owner guard.
+                    {% endcomment %}
+                    {% if u.pk != user.pk and u.status == 'active' %}
+                      <form method="post" action="{% url 'accounts:user_delete' u.pk %}"
+                            onclick="return confirm('Deactivate {{ u.display_name|escapejs }}? They will no longer be able to sign in. Their history is kept.');">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-icon"
+                                aria-label="Deactivate {{ u.display_name }}" title="Deactivate">
+                          <i data-lucide="user-minus"></i>
+                        </button>
+                      </form>
+                    {% endif %}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/_pagination.html" %}
+
+    {% else %}
+      {% url 'accounts:user_create' as create_url %}
+      {% include "partials/_empty_state.html" with icon="users" title="No users match" message="Try clearing the filters, or add a new user to this business." action_url=create_url action_label="Add user" %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
