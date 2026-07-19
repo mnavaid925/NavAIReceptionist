@@ -110,14 +110,21 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    # Both of these depend on request.user, so they sit AFTER AuthenticationMiddleware.
-    # TenantMiddleware sets request.tenant; ActiveLocationMiddleware sets
-    # request.location and re-validates it against the user's UserLocation rows on
-    # EVERY request — that revalidation is the cross-location IDOR boundary.
+    # MessageMiddleware precedes the app middlewares below because
+    # SessionPolicyMiddleware flashes a message when it ends an idle session, and
+    # `messages.info()` raises MessageFailure if `request._messages` has not been
+    # installed yet — a 500 on the exact path that is supposed to log you out
+    # gracefully.
+    'django.contrib.messages.middleware.MessageMiddleware',
+    # All three depend on request.user, so they sit AFTER AuthenticationMiddleware.
+    # SessionPolicyMiddleware runs first so an idle session is ended before any
+    # tenant or location is resolved for it. TenantMiddleware then sets
+    # request.tenant, and ActiveLocationMiddleware sets request.location and
+    # re-validates it against the user's UserLocation rows on EVERY request —
+    # that revalidation is the cross-location IDOR boundary.
+    'apps.accounts.middleware.SessionPolicyMiddleware',
     'apps.accounts.middleware.TenantMiddleware',
     'apps.accounts.middleware.ActiveLocationMiddleware',
-    'apps.accounts.middleware.SessionPolicyMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
@@ -190,6 +197,15 @@ LOGIN_URL = 'accounts:login'
 LOGIN_REDIRECT_URL = 'accounts:dashboard'
 LOGOUT_REDIRECT_URL = 'accounts:login'
 
+# auth.W004 warns that USERNAME_FIELD ('email') is not globally unique. That is the
+# product's central design decision, not an oversight: `(tenant, email)` is the
+# unique pair, so the same person's address can exist in two businesses. The check's
+# own hint — "ensure your authentication backend can handle non-unique usernames" —
+# is satisfied by CustomerScopedBackend, which resolves the tenant from the submitted
+# customer id BEFORE looking up any user. Silenced by name so genuine new warnings
+# stay visible.
+SILENCED_SYSTEM_CHECKS = ['auth.W004']
+
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
@@ -216,6 +232,11 @@ DEFAULT_INACTIVITY_TIMEOUT_MINUTES = env_int('DEFAULT_INACTIVITY_TIMEOUT_MINUTES
 # --------------------------------------------------------------------------- #
 
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+# Absolute ceiling on a session's life, independent of activity. Django's own
+# default is two weeks, which is far too loose for an account that can reconfigure
+# a phone agent and read call transcripts. The per-user `inactivity_timeout`
+# enforced by SessionPolicyMiddleware is the tighter, activity-based limit.
+SESSION_COOKIE_AGE = env_int('SESSION_COOKIE_AGE', 12 * 60 * 60)
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_EXPIRE_AT_BROWSER_CLOSE = False
