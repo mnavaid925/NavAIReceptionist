@@ -1022,9 +1022,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--brand-600); wi
   flex-direction: column;
   background: var(--surface);
   border-inline-start: 1px solid var(--border);
-  box-shadow: var(--shadow-lg);
+  /* Carries the separation on its own, now that nothing dims behind it. */
+  box-shadow: -24px 0 60px -12px rgba(16, 24, 40, .18),
+              -2px 0 8px rgba(16, 24, 40, .06);
   transform: translateX(105%);
   transition: transform .26s cubic-bezier(.32, .72, 0, 1);
+}
+:root[data-theme="dark"] .settings-drawer {
+  box-shadow: -24px 0 60px -12px rgba(0, 0, 0, .6), -2px 0 8px rgba(0, 0, 0, .4);
 }
 :root[dir="rtl"] .settings-drawer { transform: translateX(-105%); }
 .settings-drawer.is-open { transform: none; }
@@ -1051,12 +1056,21 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--brand-600); wi
   border-block-start: 1px solid var(--border);
   background: var(--surface-alt);
 }
+/* The click-outside-to-close catcher.
+   Deliberately INVISIBLE on desktop: dimming the whole application to change a
+   theme preference is a heavy, modal gesture for a lightweight, reversible choice
+   — and it actively fights the panel's purpose, since you cannot judge a colour
+   scheme or a sidebar width while the page behind is greyed out. The drawer earns
+   its separation from elevation instead. On small screens the panel covers most of
+   the viewport, so a light scrim helps orient. */
 .settings-drawer .drawer-backdrop {
   position: fixed;
   inset: 0;
   z-index: -1;
-  background: rgba(15, 23, 42, .38);
-  backdrop-filter: blur(2px);
+  background: transparent;
+}
+@media (max-width: 767px) {
+  .settings-drawer .drawer-backdrop { background: rgba(15, 23, 42, .35); }
 }
 
 /* One settings group. */
