@@ -26,6 +26,7 @@ __all__ = [
     'contact_detail_view',
     'contact_edit_view',
     'contact_delete_view',
+    'contact_forget_view',
 ]
 
 
@@ -69,7 +70,10 @@ def contact_list_view(request):
         'contacts': page_obj.object_list,
         'page_obj': page_obj,
         'elided_page_range': elided_page_range,
-        'total_count': queryset.count(),
+        # The paginator already counted the filtered queryset to work out how
+        # many pages there are. Calling .count() again would run that COUNT twice
+        # on every list render for the same number.
+        'total_count': page_obj.paginator.count,
         # The filter bar's <select> needs the choices; without this the dropdown
         # renders empty and the source filter silently does nothing.
         'source_choices': Contact.SOURCE_CHOICES,
@@ -175,6 +179,18 @@ def contact_create_view(request):
 def contact_edit_view(request, pk):
     """Edit a contact. `source` is untouched — it records how the row began."""
     obj = get_object_or_404(_tenant_contacts(request), pk=pk)  # noqa: F405
+
+    # Re-populating an erased contact would undo the erasure. Refuse rather than
+    # render a form whose whole purpose would be to defeat a right-to-be-forgotten
+    # request that has already been honoured.
+    if obj.is_anonymized:
+        messages.error(  # noqa: F405
+            request,
+            'This contact was erased at their request and cannot be edited. '
+            'Add a new contact if they get back in touch.',
+        )
+        return redirect('scheduling:contact_detail', pk=obj.pk)  # noqa: F405
+
     form = ContactForm(request.POST or None, instance=obj, request=request)
 
     if request.method == 'POST' and form.is_valid():
@@ -233,8 +249,10 @@ def contact_delete_view(request, pk):
         logger.info('Contact delete blocked by related rows contact_id=%s', obj.pk)
         messages.error(  # noqa: F405
             request,
-            f'{label} still has appointments on file and cannot be deleted. '
-            'Cancel or reassign those bookings first.',
+            f'{label} has appointments on file, so the record cannot be removed '
+            'without leaving holes in the calendar. Use "Erase personal details" '
+            'instead — it clears everything identifying and keeps the booking '
+            'history attached to nobody.',
         )
         return redirect('scheduling:contact_detail', pk=obj.pk)  # noqa: F405
 
@@ -242,3 +260,39 @@ def contact_delete_view(request, pk):
                 pk, request.tenant.pk, request.user.pk)
     messages.success(request, f'{label} has been deleted.')  # noqa: F405
     return redirect('scheduling:contact_list')  # noqa: F405
+
+
+@login_required  # noqa: F405
+@tier_required(*MANAGEMENT_TIERS)  # noqa: F405
+@require_POST  # noqa: F405
+def contact_forget_view(request, pk):
+    """Honour a data-subject erasure request without deleting the row.
+
+    The GDPR/CCPA counterpart to `contact_delete_view`, and the one that actually
+    works for a contact with history: `Appointment.contact` is PROTECT, so a
+    caller who has ever booked cannot be hard-deleted — which would make "delete
+    my data" unanswerable for precisely the people who have used the business
+    most. Blanking in place answers it while leaving the calendar intact.
+
+    Irreversible by design. There is no un-erase, because an un-erase would mean
+    the data was never really gone.
+    """
+    obj = get_object_or_404(_tenant_contacts(request), pk=pk)  # noqa: F405
+
+    if obj.is_anonymized:
+        messages.info(request, 'That contact has already been erased.')  # noqa: F405
+        return redirect('scheduling:contact_detail', pk=obj.pk)  # noqa: F405
+
+    obj.anonymize()
+
+    # Deliberately no name, number or email in this line — logging the details of
+    # an erasure would leave the very PII the erasure was meant to remove sitting
+    # in the log file.
+    logger.info('Contact anonymized contact_id=%s tenant_id=%s by user_id=%s',
+                obj.pk, request.tenant.pk, request.user.pk)
+    messages.success(  # noqa: F405
+        request,
+        'Personal details erased. The record remains so past appointments still '
+        'add up, but it no longer identifies anyone.',
+    )
+    return redirect('scheduling:contact_detail', pk=obj.pk)  # noqa: F405
