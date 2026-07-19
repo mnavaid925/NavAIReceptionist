@@ -1,0 +1,103 @@
+{% comment %}
+  Layout settings drawer.
+
+  Every control is a plain button carrying data-option / data-value. static/js/layout.js
+  delegates a single click listener over the whole document, writes the value to
+  <html data-*>, persists it to localStorage and syncs aria-pressed across any
+  other control rendering the same option. Adding an option here needs no new JS —
+  only a matching entry in the OPTIONS map in layout.js.
+{% endcomment %}
+<div class="settings-drawer" id="settings-drawer" role="dialog" aria-label="Layout settings" aria-modal="false">
+  <div class="drawer-backdrop" data-action="close-settings"></div>
+
+  <div class="card-header">
+    <span>Layout settings</span>
+    <button type="button" class="btn btn-icon" data-action="close-settings" aria-label="Close settings">
+      <i data-lucide="x"></i>
+    </button>
+  </div>
+
+  <div class="drawer-body">
+
+    <div class="form-group">
+      <span class="form-label">Colour scheme</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="theme" data-value="light">Light</button>
+        <button type="button" class="option-swatch" data-option="theme" data-value="dark">Dark</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Layout</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="layout" data-value="vertical">Vertical</button>
+        <button type="button" class="option-swatch" data-option="layout" data-value="horizontal">Horizontal</button>
+        <button type="button" class="option-swatch" data-option="layout" data-value="detached">Detached</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Sidebar size</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="sidebar-size" data-value="default">Default</button>
+        <button type="button" class="option-swatch" data-option="sidebar-size" data-value="compact">Compact</button>
+        <button type="button" class="option-swatch" data-option="sidebar-size" data-value="small">Small icon</button>
+        <button type="button" class="option-swatch" data-option="sidebar-size" data-value="hover">Icon hovered</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Sidebar colour</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="sidebar-theme" data-value="light">Light</button>
+        <button type="button" class="option-swatch" data-option="sidebar-theme" data-value="dark">Dark</button>
+        <button type="button" class="option-swatch" data-option="sidebar-theme" data-value="brand">Coloured</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Topbar</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="topbar" data-value="light">Light</button>
+        <button type="button" class="option-swatch" data-option="topbar" data-value="dark">Dark</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Width</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="width" data-value="fluid">Fluid</button>
+        <button type="button" class="option-swatch" data-option="width" data-value="boxed">Boxed</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Position</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="position" data-value="fixed">Fixed</button>
+        <button type="button" class="option-swatch" data-option="position" data-value="scrollable">Scrollable</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Direction</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="direction" data-value="ltr">LTR</button>
+        <button type="button" class="option-swatch" data-option="direction" data-value="rtl">RTL</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <span class="form-label">Preloader</span>
+      <div class="option-grid">
+        <button type="button" class="option-swatch" data-option="preloader" data-value="enable">On</button>
+        <button type="button" class="option-swatch" data-option="preloader" data-value="disable">Off</button>
+      </div>
+    </div>
+
+    <button type="button" class="btn btn-outline w-full" data-action="reset-layout">
+      <i data-lucide="rotate-ccw"></i> Reset to defaults
+    </button>
+
+  </div>
+</div>
