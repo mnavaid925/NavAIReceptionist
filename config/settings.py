@@ -103,6 +103,8 @@ INSTALLED_APPS = [
     'apps.tenants',
     # Module 2 — Agent Setup & Telephony
     'apps.agents',
+    # Module 4 — Calendar & Bookings
+    'apps.scheduling',
 ]
 
 
