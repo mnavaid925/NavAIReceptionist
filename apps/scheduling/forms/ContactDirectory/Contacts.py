@@ -6,6 +6,13 @@ row came into existence, which is an audit fact the server knows and the user
 must not be able to overwrite. A receptionist editing a contact the agent created
 on a call does not turn it into a manually-created one.
 """
+# Imported explicitly rather than relied on from the star-import below: the
+# `_common` chain re-exports `forms` and `ValidationError` but NOT `timezone`.
+# Assuming otherwise made `clean_date_of_birth` raise NameError on every
+# non-empty date of birth — past or future — which is a total break of the
+# field, not the narrow future-date guard it looks like.
+from django.utils import timezone
+
 from apps.scheduling.forms._common import *  # noqa: F401,F403
 from apps.scheduling.models import Contact
 from apps.scheduling.services import normalize_e164
@@ -74,7 +81,7 @@ class ContactForm(TenantModelForm):  # noqa: F405
     def clean_date_of_birth(self):
         """A birth date in the future is a typo, always."""
         value = self.cleaned_data.get('date_of_birth')
-        if value and value > timezone.localdate():  # noqa: F405
+        if value and value > timezone.localdate():
             raise ValidationError('That date is in the future.')  # noqa: F405
         return value
 
