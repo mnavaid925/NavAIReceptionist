@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}{% if is_edit %}Edit {{ obj.name }}{% else %}Add location{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{% if is_edit %}Edit {{ obj.name }}{% else %}Add location{% endif %}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'tenants:location_list' %}">Locations</a></li>
+      <li>{% if is_edit %}Edit{% else %}Add{% endif %}</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  One template serves create and edit. `tenant` is never rendered —
+  TenantModelForm pops it and stamps it from request.tenant in save(), so a site
+  cannot be filed under another business.
+{% endcomment %}
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-body grid gap-4 sm:grid-cols-2">
+
+          {% if form.non_field_errors %}
+            <div class="alert alert-red sm:col-span-2" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group{% if field.name == 'address_line1' or field.name == 'address_line2' %} sm:col-span-2{% endif %}">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+
+        </div>
+
+        <div class="card-header">
+          {% if is_edit %}
+            <a class="btn btn-outline" href="{% url 'tenants:location_detail' obj.pk %}">Cancel</a>
+          {% else %}
+            <a class="btn btn-outline" href="{% url 'tenants:location_list' %}">Cancel</a>
+          {% endif %}
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i>
+            {% if is_edit %}Save changes{% else %}Add location{% endif %}
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside>
+    <div class="card">
+      <div class="card-header"><span>Why the timezone matters</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          Every appointment and transfer window at this site is evaluated in its
+          own timezone &mdash; not the business default and not the browser's. A
+          site in a different zone to your head office needs its real one here, or
+          the agent will offer callers the wrong times.
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
