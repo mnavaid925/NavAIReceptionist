@@ -833,7 +833,23 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--brand-600); wi
   text-align: center;
 }
 
+/* The events layer.
+
+   Absolutely-positioned events MUST be measured from the first slot row, not
+   from the top of the column: `.calendar-column-head` is sticky but still
+   IN FLOW, so a column-relative `top` puts every block one head-height above
+   its own gridline. That offset varies with font size and zoom, so no constant
+   can correct it — the events need their own positioning context under the
+   head. */
+.calendar-column-body { position: relative; }
+
 .calendar-slot {
+  /* `display: block` is load-bearing, not tidiness. An empty bookable slot is an
+     <a>, and `height` does not apply to a non-replaced INLINE element — as an
+     inline anchor every slot collapses to zero height, taking the grid's rows and
+     the entire click-to-book surface with it. The page still returns 200 and the
+     blocks still position correctly, so only looking at it catches this. */
+  display: block;
   height: 26px;
   border-block-end: 1px dashed var(--border);
   background: var(--surface);
