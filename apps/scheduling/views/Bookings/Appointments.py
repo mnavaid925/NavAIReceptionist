@@ -29,15 +29,15 @@ from apps.scheduling.availability import (
     reschedule_appointment,
 )
 from apps.scheduling.forms import AppointmentCancelForm, AppointmentForm
-from apps.scheduling.models import Appointment, Contact, Resource, Service
+from apps.scheduling.models import Appointment, Contact
 from apps.scheduling.views._common import *  # noqa: F401,F403
 from apps.scheduling.views._helpers import (
-    authorised_pk as _authorised_pk,
-    bookable_providers as _location_providers,
-    bookable_resources as _location_resources,
-    bookable_services as _bookable_services,
-    location_appointments as _location_appointments,
-    parse_local_date as _parse_local_date,
+    authorised_pk,
+    bookable_providers,
+    bookable_resources,
+    bookable_services,
+    location_appointments,
+    parse_local_date,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,13 +132,10 @@ def _save_booking_under_lock(form, request):
         return None
 
 
-
-
-
 @login_required  # noqa: F405
 def appointment_list_view(request):
     """Bookings at the active location, with date, status and FK filters."""
-    queryset = _location_appointments(request)
+    queryset = location_appointments(request)
 
     search = request.GET.get('q', '').strip()
     if search:
@@ -154,8 +151,8 @@ def appointment_list_view(request):
         queryset = queryset.filter(status=status)
 
     location = request.location
-    date_from = _parse_local_date(request.GET.get('from'))
-    date_to = _parse_local_date(request.GET.get('to'))
+    date_from = parse_local_date(request.GET.get('from'))
+    date_to = parse_local_date(request.GET.get('to'))
     if location is not None and date_from is not None:
         lo, _ = local_day_bounds_utc(location, date_from)
         queryset = queryset.filter(start_at__gte=lo)
@@ -163,19 +160,19 @@ def appointment_list_view(request):
         _, hi = local_day_bounds_utc(location, date_to)
         queryset = queryset.filter(start_at__lt=hi)
 
-    providers = _location_providers(request)
-    services = _bookable_services(request)
-    resources = _location_resources(request)
+    providers = bookable_providers(request)
+    services = bookable_services(request)
+    resources = bookable_resources(request)
 
-    provider = _authorised_pk(providers, request.GET.get('provider'))
+    provider = authorised_pk(providers, request.GET.get('provider'))
     if provider is not None:
         queryset = queryset.filter(provider=provider)
 
-    service = _authorised_pk(services, request.GET.get('service'))
+    service = authorised_pk(services, request.GET.get('service'))
     if service is not None:
         queryset = queryset.filter(service=service)
 
-    resource = _authorised_pk(resources, request.GET.get('resource'))
+    resource = authorised_pk(resources, request.GET.get('resource'))
     if resource is not None:
         queryset = queryset.filter(resource=resource)
 
@@ -196,13 +193,10 @@ def appointment_list_view(request):
     })
 
 
-
-
-
 @login_required  # noqa: F405
 def appointment_detail_view(request, pk):
     """One booking."""
-    obj = get_object_or_404(_location_appointments(request), pk=pk)  # noqa: F405
+    obj = get_object_or_404(location_appointments(request), pk=pk)  # noqa: F405
 
     return render(request, 'scheduling/bookings/appointment/detail.html', {  # noqa: F405
         'obj': obj,
@@ -229,13 +223,13 @@ def appointment_create_view(request):
         start_at = _parse_local_datetime(request, request.GET.get('start'))
         if start_at is not None:
             initial['start_at'] = start_at
-        resource = _authorised_pk(
-            _location_resources(request), request.GET.get('resource')
+        resource = authorised_pk(
+            bookable_resources(request), request.GET.get('resource')
         )
         if resource is not None:
             initial['resource'] = resource.pk
-        provider = _authorised_pk(
-            _location_providers(request), request.GET.get('provider')
+        provider = authorised_pk(
+            bookable_providers(request), request.GET.get('provider')
         )
         if provider is not None:
             initial['provider'] = provider.pk
@@ -274,7 +268,7 @@ def appointment_create_view(request):
 @require_http_methods(['GET', 'POST'])  # noqa: F405
 def appointment_edit_view(request, pk):
     """Edit a booking. Moving it in time is `reschedule`, not this."""
-    obj = get_object_or_404(_location_appointments(request), pk=pk)  # noqa: F405
+    obj = get_object_or_404(location_appointments(request), pk=pk)  # noqa: F405
 
     # A closed-out booking is a record of what happened. Without this guard a
     # direct POST could reopen a cancelled appointment, or flip a completed one
@@ -314,7 +308,7 @@ def appointment_delete_view(request, pk):
     that should never have existed (a test row, a mis-keyed duplicate), so it is
     management-only and says so.
     """
-    obj = get_object_or_404(_location_appointments(request), pk=pk)  # noqa: F405
+    obj = get_object_or_404(location_appointments(request), pk=pk)  # noqa: F405
     label = obj.contact.display_name
     obj.delete()
 
@@ -346,16 +340,16 @@ def appointment_slots_view(request):
         )
         return redirect('scheduling:appointment_list')  # noqa: F405
 
-    services = _bookable_services(request)
-    providers = _location_providers(request)
-    resources = _location_resources(request)
+    services = bookable_services(request)
+    providers = bookable_providers(request)
+    resources = bookable_resources(request)
 
-    service = _authorised_pk(services, request.GET.get('service'))
-    provider = _authorised_pk(providers, request.GET.get('provider'))
-    resource = _authorised_pk(resources, request.GET.get('resource'))
+    service = authorised_pk(services, request.GET.get('service'))
+    provider = authorised_pk(providers, request.GET.get('provider'))
+    resource = authorised_pk(resources, request.GET.get('resource'))
 
-    date_from = _parse_local_date(request.GET.get('from'))
-    date_to = _parse_local_date(request.GET.get('to'))
+    date_from = parse_local_date(request.GET.get('from'))
+    date_to = parse_local_date(request.GET.get('to'))
 
     # RESCHEDULE MODE. `?reschedule=<pk>` turns this page into "find a new time
     # for THIS booking" — the slot forms then post to `appointment_reschedule`,
@@ -365,8 +359,8 @@ def appointment_slots_view(request):
     #
     # Resolved through the scoped queryset, so a foreign pk cannot be rescheduled
     # and simply falls back to normal booking.
-    rescheduling = _authorised_pk(
-        _location_appointments(request), request.GET.get('reschedule')
+    rescheduling = authorised_pk(
+        location_appointments(request), request.GET.get('reschedule')
     )
     if rescheduling is not None and not rescheduling.is_open:
         messages.error(  # noqa: F405
@@ -413,7 +407,7 @@ def appointment_book_view(request):
         return redirect('scheduling:appointment_list')  # noqa: F405
 
     token = (request.POST.get('token') or '').strip()
-    contact = _authorised_pk(
+    contact = authorised_pk(
         Contact.objects.filter(tenant=request.tenant, anonymized_at__isnull=True),
         request.POST.get('contact'),
     )
@@ -445,7 +439,7 @@ def appointment_book_view(request):
 @require_POST  # noqa: F405
 def appointment_reschedule_view(request, pk):
     """Move an appointment onto another offered slot."""
-    obj = get_object_or_404(_location_appointments(request), pk=pk)  # noqa: F405
+    obj = get_object_or_404(location_appointments(request), pk=pk)  # noqa: F405
     token = (request.POST.get('token') or '').strip()
 
     try:
@@ -474,7 +468,7 @@ def appointment_reschedule_view(request, pk):
 @require_POST  # noqa: F405
 def appointment_cancel_view(request, pk):
     """Cancel with a reason. Frees the slot, keeps the record."""
-    obj = get_object_or_404(_location_appointments(request), pk=pk)  # noqa: F405
+    obj = get_object_or_404(location_appointments(request), pk=pk)  # noqa: F405
     form = AppointmentCancelForm(request.POST)
     reason = form.cleaned_data.get('reason', '') if form.is_valid() else ''
 
