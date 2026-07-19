@@ -1830,3 +1830,64 @@ Carried over verbatim from `research-scheduling-4.3.md`'s own Deferred section, 
 ## Review notes
 
 (filled in at the end)
+
+## Review notes — 4.3 Availability & Booking
+
+### Built
+
+`scheduling.Appointment` + a new flat `availability.py` (slot search, opaque signed tokens, race-safe
+booking, reschedule, cancel). Nine views, five templates, migration `0003`, 14 seeded appointments.
+Verified **87/87** by `temp/verify_4_3.py`; the suite went 225 → **377 passing**.
+
+### What the pre-code adversarial critique caught
+
+Four things that would have shipped as production bugs, found BEFORE any code was written:
+
+1. **A range lock over zero rows does not serialise.** `SELECT … FOR UPDATE` on a query matching no rows
+   takes only *gap locks* in InnoDB, and gap locks are mutually compatible — both writers pass, both
+   insert. Fixed by locking the concrete `Resource` / provider `User` row instead.
+2. **Under REPEATABLE READ a plain re-check cannot see a concurrent commit** — it reads the transaction's
+   pinned snapshot, reports "free", and double-books. The in-lock check must be `for_update=True`.
+3. **`__date` is a production-only landmine.** It converts in the *active* timezone, not the location's,
+   and on MySQL compiles to `CONVERT_TZ()`, which returns NULL without tz tables loaded — passing on
+   SQLite in the test settings and silently returning zero rows in production.
+4. **Timezone care was invisible.** Templates render in `settings.TIME_ZONE` (UTC), so all of it would have
+   been for nothing until `ActiveLocationMiddleware` activated the location's zone.
+
+### What the post-code review caught (all seven verified adversarially, all real)
+
+1. `appointment_edit_view` had no `is_open` guard and `status` was postable — a direct POST could set
+   `cancelled` with no `cancelled_at`, freeing the slot with no record, or reopen a completed booking.
+2. `reschedule_appointment` / `cancel_appointment` never checked the appointment's own tenant/location.
+   Safe through the views, unsafe for 3.3, which passes a MODEL-supplied `appointment_id` (Invariant 3).
+3. `SlotError.code` emitted codes outside the set 3.3 can branch on. Now a closed frozenset, asserted.
+4. **The manual booking path was pure check-then-act.** `save_or_report_conflict` cannot help: MySQL has
+   no overlap constraint, so no `IntegrityError` can fire. Two receptionists both succeeded.
+5. Suspended providers were still offered — in the search, the form dropdown and the list filter.
+6. **"Find a new time" created a SECOND appointment.** The slot page hardcoded the book action, so
+   `appointment_reschedule_view` and its route were dead code and the original booking stayed live.
+7. **A 60-day search issued >9,000 queries / 37s** — one conflict query per resource per 15-minute
+   candidate, each with its own aggregate. Now a single prefetched interval index: **4 queries.**
+
+### Bug I introduced fixing #5, then fixed
+
+Refusing a suspended pinned provider made `providers` empty, which fell through to the `[None]` branch —
+so asking for a specific unavailable person returned slots *with no provider* instead of nothing. Caught
+by the verify sweep.
+
+### Decisions
+
+* **`booked_by_session` deferred.** Django refuses a string FK to the uninstalled `calls` app. **Module 5
+  must add it as an additive migration** and un-stub the detail page's originating-call panel.
+* **`end_at` holds duration only.** The buffer extends what blocks the NEXT booking, never the rendered
+  length.
+* **`seed_accounts` changed** (another module's seeder, deliberately): every provider had
+  `provider_hours = {}`, and unconfigured hours mean *unavailable*, so availability found nothing anywhere.
+  `is_provider=True` with no hours is a broken state, not a neutral default.
+* **`ActiveLocationMiddleware` now activates the location timezone** — a foundation change, justified
+  because it implements a stated project invariant for every template at once.
+
+### Environment note
+
+The dev database holds a stray `acme-lakeview` location left by an earlier session's QA agent. Not seeder
+output; `seed_tenants --flush` clears it.
