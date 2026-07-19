@@ -1,0 +1,110 @@
+{% comment %}
+  The shared calendar grid. Included by both day.html and week.html.
+
+  The view hands over uniform column dicts — head, blocks, click_date,
+  click_param, clickable, show_now, is_unassigned — so this template branches on
+  booleans and never has to work anything out. Every branch a column can take is
+  decided in Python, where a missing key is an error rather than an empty string.
+
+  GEOMETRY. Every pixel value is an INTEGER computed in the view. A float here
+  would render with the active locale's decimal separator — "112,666" under a
+  non-English locale — making the surrounding calc() invalid and snapping every
+  block to the top of its column.
+
+  Events sit in `.calendar-column-body`, NOT directly in `.calendar-column`: the
+  column head is sticky but still IN FLOW, so a column-relative offset would put
+  every block one head-height above its own gridline.
+{% endcomment %}
+
+<div class="table-wrap">
+  <div class="calendar-grid" style="--calendar-columns: {{ column_count }};">
+
+    {# -- the time gutter -------------------------------------------------- #}
+    <div class="calendar-column">
+      <div class="calendar-column-head">Time</div>
+      <div class="calendar-column-body" style="height: {{ grid_height_px }}px;">
+        {% for hour in hour_labels %}
+          <span class="text-muted text-xs"
+                style="position:absolute; top:{{ hour.top_px }}px; inset-inline-end:8px;">
+            {{ hour.label }}
+          </span>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% for col in columns %}
+      <div class="calendar-column">
+        <div class="calendar-column-head">
+          {% if col.is_unassigned %}
+            <span class="text-muted">{{ col.head }}</span>
+          {% elif col.is_today %}
+            <strong>{{ col.head }}</strong>
+          {% else %}
+            {{ col.head }}
+          {% endif %}
+        </div>
+
+        <div class="calendar-column-body" style="height: {{ grid_height_px }}px;">
+
+          {% comment %}
+            Background slots. Rendered as a plain div rather than a link when the
+            column cannot be booked into: `.calendar-event` has `inset-inline: 4px`,
+            so a 4px strip either side of every block stays hit-testable, and an
+            anchor underneath would open a create form over occupied time.
+          {% endcomment %}
+          {% for slot in slot_rows %}
+            {% if col.clickable %}
+              <a class="calendar-slot open"
+                 href="{% url 'scheduling:appointment_create' %}?start={{ col.click_date }}T{{ slot.hh|stringformat:'02d' }}:{{ slot.mm|stringformat:'02d' }}{% if col.click_param %}&amp;{{ col.click_param }}{% endif %}"
+                 aria-label="Book {{ col.head }} at {{ slot.hh|stringformat:'02d' }}:{{ slot.mm|stringformat:'02d' }}"></a>
+            {% else %}
+              <div class="calendar-slot"></div>
+            {% endif %}
+          {% endfor %}
+
+          {# -- the bookings ---------------------------------------------- #}
+          {% for block in col.blocks %}
+            {% comment %}
+              `inset-inline: auto` cancels theme.css's full-width default so the
+              explicit left/width lane geometry applies. Without lanes two
+              overlapping bookings render exactly on top of each other and the
+              lower one is invisible.
+            {% endcomment %}
+            <a class="calendar-event {{ block.appointment.status }}"
+               href="{% url 'scheduling:appointment_detail' block.appointment.pk %}"
+               style="--slot-start: {{ block.top_px }}; --slot-span: {{ block.height_px }};
+                      inset-inline: auto;
+                      left: calc({{ block.lane }} * (100% - 8px) / {{ block.lane_count }} + 4px);
+                      width: calc((100% - 8px) / {{ block.lane_count }});"
+               title="{{ block.appointment.contact.display_name }} — {{ block.appointment.get_status_display }}{% if block.clipped %} (runs past midnight){% endif %}">
+              <span class="calendar-event-time">
+                {{ block.appointment.start_at|date:"H:i" }}{% if block.clipped %} &rarr;{% endif %}
+              </span>
+              <span class="calendar-event-title">
+                {{ block.appointment.contact.display_name }}
+              </span>
+              {% if block.appointment.service %}
+                <span class="calendar-event-title text-xs">
+                  {{ block.appointment.service.name }}
+                </span>
+              {% endif %}
+            </a>
+          {% endfor %}
+
+          {% if col.show_now %}
+            {% comment %}
+              The now-line, drawn only when the current time falls inside the
+              visible window — outside it the offset would be negative and the
+              line would paint over the sticky head.
+            {% endcomment %}
+            <div aria-hidden="true"
+                 style="position:absolute; inset-inline:0; top:{{ now_px }}px;
+                        border-block-start:2px solid var(--red-fg); z-index:1;"></div>
+          {% endif %}
+
+        </div>
+      </div>
+    {% endfor %}
+
+  </div>
+</div>
