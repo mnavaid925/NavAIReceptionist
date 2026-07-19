@@ -1,0 +1,65 @@
+{% comment %}
+  The application sidebar.
+
+  `nav_modules` comes from apps.accounts.context_processors.navigation, which
+  builds it from parse_catalog() over NavAIReceptionist.md decorated with
+  LIVE_LINKS. Every module 0-5 and every sub-module is rendered; a sub-module with
+  no LIVE_LINKS entry shows as a greyed roadmap row rather than disappearing, so
+  the sidebar always reflects the real build state.
+{% endcomment %}
+<aside class="app-sidebar" id="app-sidebar">
+
+  <a class="sidebar-brand" href="{% url 'accounts:dashboard' %}">
+    <span class="brand-mark" aria-hidden="true"><i data-lucide="phone-call"></i></span>
+    <span class="brand-text">NavAIReceptionist</span>
+  </a>
+
+  <nav class="sidebar-nav" aria-label="Main navigation">
+
+    {% url 'accounts:dashboard' as dashboard_url %}
+    <a class="nav-link {% if request.path == dashboard_url %}active{% endif %}"
+       href="{{ dashboard_url }}">
+      <i data-lucide="layout-dashboard"></i>
+      <span class="nav-text">Dashboard</span>
+    </a>
+
+    <div class="nav-section">Modules</div>
+
+    {% for module in nav_modules %}
+      <button type="button"
+              class="nav-link {% if module.is_active %}active{% endif %}"
+              data-nav-toggle="{{ module.dom_id }}"
+              aria-expanded="{% if module.is_active %}true{% else %}false{% endif %}"
+              aria-controls="{{ module.dom_id }}">
+        <i data-lucide="{{ module.icon }}"></i>
+        <span class="nav-text">{{ module.number }}. {{ module.title }}</span>
+        <i data-lucide="chevron-right" class="nav-caret"></i>
+      </button>
+
+      <ul class="nav-sub" id="{{ module.dom_id }}" {% if not module.is_active %}hidden{% endif %}>
+        {% for submodule in module.submodules %}
+          {% if submodule.is_live %}
+            {% for link in submodule.links %}
+              <li>
+                <a class="nav-link {% if link.is_active %}active{% endif %}" href="{{ link.url }}">
+                  <span class="nav-text">{{ link.label }}</span>
+                </a>
+              </li>
+            {% endfor %}
+          {% else %}
+            <li>
+              <span class="nav-link is-roadmap" title="Not built yet">
+                <span class="nav-text">{{ submodule.key }} {{ submodule.title }}</span>
+              </span>
+            </li>
+          {% endif %}
+        {% endfor %}
+      </ul>
+    {% empty %}
+      <span class="nav-link is-roadmap">
+        <span class="nav-text">Catalog unavailable</span>
+      </span>
+    {% endfor %}
+
+  </nav>
+</aside>
