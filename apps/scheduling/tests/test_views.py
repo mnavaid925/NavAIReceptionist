@@ -3,6 +3,8 @@ views (sub-module 4.1).
 
 Cross-tenant/location isolation and tier-gating live in `test_security.py`.
 """
+from datetime import timedelta
+
 import pytest
 from django.contrib.messages import get_messages
 from django.test import Client
@@ -192,42 +194,100 @@ def test_detail_view_surfaces_other_contacts_on_the_same_number(client_a, tenant
 # location-scoping regression guard (mandatory per sub-module 4.1 spec)
 # --------------------------------------------------------------------------- #
 
-def test_appointments_and_call_sessions_are_none_until_4_3_and_module_5_land(
-    client_a, contact_a,
+def test_contact_detail_appointments_are_scoped_to_visible_locations(
+    client_a, contact_a, member_user, location_a1, location_a2, service_all_a,
 ):
-    """`scheduling.Appointment` (4.3) and `calls.CallSession` (Module 5) do not
-    exist yet, so `_appointments_for` / `_call_sessions_for` degrade to `None`
-    (import-guarded) rather than raising `ImportError` at request time.
+    """THE cross-location assertion the 4.1 TODO marker asked for.
 
-    TODO(4.3 / Module 5): once those models exist, REPLACE this test with a
-    real cross-location assertion: a user assigned only to location A1 must
-    see an appointment/call session of this contact's at A1 but NOT one at A2
-    (same tenant, different location) — `_visible_location_ids()` is the
-    mechanism that is supposed to enforce that, and it has no test coverage
-    until there is a real model to assert it against. Do not fake the models
-    to get coverage now; that would test the fake, not the guard.
+    `scheduling.Appointment` now exists, so `_visible_location_ids()` is finally
+    testable: a user assigned ONLY to location A1 must see this contact's A1
+    booking on the contact page and must NOT see their A2 one. The contact row
+    itself is business-wide; the location-scoped records hanging off it are not.
+
+    (`calls.CallSession` is still unbuilt, so `call_sessions` stays `None` —
+    replace that half when Module 5 lands.)
     """
-    response = client_a.get(_url('contact_detail', contact_a.pk))
+    from django.utils import timezone as dj_timezone
 
+    from apps.accounts.models import UserLocation
+    from apps.scheduling.models import Appointment
+
+    start = dj_timezone.now() + timedelta(days=3)
+    here = Appointment.objects.create(
+        tenant=contact_a.tenant, location=location_a1, contact=contact_a,
+        service=service_all_a, start_at=start,
+        end_at=start + timedelta(minutes=30), reason='visible one',
+    )
+    elsewhere = Appointment.objects.create(
+        tenant=contact_a.tenant, location=location_a2, contact=contact_a,
+        service=service_all_a, start_at=start,
+        end_at=start + timedelta(minutes=30), reason='hidden one',
+    )
+
+    # Narrow the member to A1 only, then look at the contact page as them.
+    UserLocation.objects.filter(user=member_user).exclude(
+        location=location_a1
+    ).delete()
+    UserLocation.objects.get_or_create(
+        user=member_user, tenant=member_user.tenant, location=location_a1
+    )
+
+    client = Client()
+    client.force_login(member_user)
+    client.post(reverse('accounts:switch_location'), {'location': location_a1.pk})
+
+    response = client.get(_url('contact_detail', contact_a.pk))
     assert response.status_code == 200
-    assert response.context['appointments'] is None
+
+    visible = list(response.context['appointments'])
+    assert here in visible
+    assert elsewhere not in visible, (
+        'An appointment at a location this user is not assigned to leaked onto '
+        'the contact page.'
+    )
     assert response.context['call_sessions'] is None
 
 
-def test_private_location_guard_functions_return_none_directly(rf, admin_user, contact_a):
-    """Same guard, exercised as a plain function call rather than through the
-    view — pins the behaviour of `_appointments_for` / `_call_sessions_for`
-    themselves, independent of template rendering.
-    """
+def test_private_location_guard_function_filters_by_assignment(
+    rf, member_user, contact_a, location_a1, location_a2, service_all_a,
+):
+    """Same guard as a plain function call, independent of template rendering."""
+    from django.utils import timezone as dj_timezone
+
+    from apps.accounts.models import UserLocation
+    from apps.scheduling.models import Appointment
     from apps.scheduling.views.ContactDirectory.Contacts import (
         _appointments_for,
         _call_sessions_for,
     )
 
-    request = rf.get('/')
-    request.user = admin_user
+    start = dj_timezone.now() + timedelta(days=4)
+    here = Appointment.objects.create(
+        tenant=contact_a.tenant, location=location_a1, contact=contact_a,
+        service=service_all_a, start_at=start,
+        end_at=start + timedelta(minutes=30),
+    )
+    elsewhere = Appointment.objects.create(
+        tenant=contact_a.tenant, location=location_a2, contact=contact_a,
+        service=service_all_a, start_at=start,
+        end_at=start + timedelta(minutes=30),
+    )
 
-    assert _appointments_for(contact_a, request) is None
+    UserLocation.objects.filter(user=member_user).exclude(
+        location=location_a1
+    ).delete()
+    UserLocation.objects.get_or_create(
+        user=member_user, tenant=member_user.tenant, location=location_a1
+    )
+
+    request = rf.get('/')
+    request.user = member_user
+
+    visible = list(_appointments_for(contact_a, request))
+    assert here in visible
+    assert elsewhere not in visible
+
+    # Module 5 is still unbuilt, so this half stays import-guarded.
     assert _call_sessions_for(contact_a, request) is None
 
 
