@@ -1,0 +1,59 @@
+{% comment %}
+  Recording playback.
+
+  `recording_url` MUST be a short-lived signed URL produced in the view —
+  recording_blob is a private storage path and is never rendered as a src, never
+  guessable, never public.
+
+  The consent basis and the retention date are shown because they are the record
+  of the policy that applied AT THE TIME OF THE CALL, not the policy now.
+
+  Context: session, recording_url, consent_basis_label, retention_date, can_download.
+
+  Usage: {% include "partials/_audio_player.html" with session=session recording_url=recording_url ... %}
+{% endcomment %}
+{% if session.recording_blob %}
+  <div class="card">
+    <div class="card-header">
+      <span>Recording</span>
+      {% if consent_basis_label %}
+        <span class="badge badge-slate">{{ consent_basis_label }}</span>
+      {% endif %}
+    </div>
+    <div class="card-body space-y-3">
+
+      {% if recording_url %}
+        <audio controls preload="none" class="w-full"
+               aria-label="Call recording playback"
+               src="{{ recording_url }}">
+          Your browser does not support audio playback.
+        </audio>
+      {% else %}
+        <p class="text-muted">This recording is no longer available.</p>
+      {% endif %}
+
+      {% comment %} Decorative only — never the sole indicator of playback state. {% endcomment %}
+      {% if session.waveform_peaks %}
+        <div class="waveform" aria-hidden="true" data-peaks-id="peaks-{{ session.pk }}">
+          {% for peak in session.waveform_peaks.bins %}
+            <span style="--peak: {{ peak }}%"></span>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <p class="text-muted text-sm">
+        {% if retention_date %}
+          Retained until <time datetime="{{ retention_date|date:'c' }}">{{ retention_date|date:"j M Y" }}</time>.
+        {% endif %}
+        Transcripts and recordings are personal data &mdash; handle accordingly.
+      </p>
+
+      {% if can_download and recording_url %}
+        <a class="btn btn-outline" href="{{ recording_url }}" download>
+          <i data-lucide="download"></i> Download
+        </a>
+      {% endif %}
+
+    </div>
+  </div>
+{% endif %}
