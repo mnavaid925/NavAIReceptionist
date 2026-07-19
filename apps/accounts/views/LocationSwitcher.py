@@ -21,7 +21,23 @@ from apps.accounts.views._helpers import safe_redirect_target, set_active_locati
 
 logger = logging.getLogger(__name__)
 
-__all__ = ['switch_location_view']
+__all__ = ['switch_location_view', 'my_locations_view']
+
+
+@login_required  # noqa: F405
+def my_locations_view(request):
+    """The Assigned-Location List — every site this user may work in.
+
+    The switcher in the topbar changes the active site from wherever you are; this
+    page is the place that answers "which sites am I allowed into, and which one am
+    I in right now?" — which is not otherwise visible anywhere.
+
+    Read-only over `UserLocation`: assigning a user to a site is Module 1.3, not
+    something anyone does to themselves here.
+    """
+    return render(request, 'accounts/location/list.html', {  # noqa: F405
+        'assigned_locations': request.user.assigned_locations(),
+    })
 
 
 @login_required  # noqa: F405
