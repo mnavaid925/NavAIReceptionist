@@ -163,8 +163,13 @@
             time field: a rescheduled booking must clear the same availability
             and conflict checks as a new one.
           {% endcomment %}
+          {% comment %}
+            `?reschedule=` is what makes this MOVE the booking. Without it the
+            slot page posts to appointment_book and a "reschedule" would create a
+            second live appointment beside this one.
+          {% endcomment %}
           <a class="btn btn-outline"
-             href="{% url 'scheduling:appointment_slots' %}{% if obj.service_id %}?service={{ obj.service_id }}{% endif %}">
+             href="{% url 'scheduling:appointment_slots' %}?reschedule={{ obj.pk }}{% if obj.service_id %}&amp;service={{ obj.service_id }}{% endif %}">
             <i data-lucide="calendar-clock"></i> Find a new time
           </a>
         {% else %}
