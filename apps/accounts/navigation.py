@@ -31,6 +31,13 @@ CATALOG_FILENAME = 'NavAIReceptionist.md'
 _MODULE_RE = re.compile(r'^##\s+(\d+)\.\s+(.+?)\s*$')
 _SUBMODULE_RE = re.compile(r'^###\s+(\d+\.\d+)\s+(.+?)\s*$')
 
+# Module 0 is deliberately absent from the SIDEBAR. Its surfaces are personal
+# account settings, not day-to-day operational areas, so they live in the topbar
+# user dropdown and as tabs across the account pages instead. The module keeps its
+# LIVE_LINKS entries regardless — those are the build-state ledger, and dropping
+# them would make finished sub-modules read as unbuilt.
+SIDEBAR_EXCLUDED_MODULES = {'0'}
+
 MODULE_ICONS = {
     '0': 'shield-check',
     '1': 'building-2',
@@ -125,11 +132,56 @@ def _resolve(url_name):
         return None
 
 
+# The account area's tab strip — Module 0's surfaces, which no longer appear in
+# the sidebar. `tiers` restricts a tab to those User.tier values; None means
+# everyone. Order is the order they render in.
+ACCOUNT_TABS = [
+    {'label': 'Profile', 'url_name': 'accounts:profile',
+     'icon': 'user', 'tiers': None},
+    {'label': 'My Locations', 'url_name': 'accounts:my_locations',
+     'icon': 'map-pin', 'tiers': None},
+    {'label': 'Password', 'url_name': 'accounts:change_password',
+     'icon': 'key-round', 'tiers': None},
+    {'label': 'Email', 'url_name': 'accounts:change_email',
+     'icon': 'mail', 'tiers': None},
+    {'label': 'Users', 'url_name': 'accounts:user_list',
+     'icon': 'users', 'tiers': ('owner', 'manager')},
+]
+
+
+def build_account_tabs(user, current_path=''):
+    """The account-area tab strip for `user`.
+
+    A tab whose url does not resolve is dropped rather than rendered dead, and a
+    tab the user's tier cannot open is never shown — the views enforce that
+    independently, so this only avoids offering a link that would bounce them.
+    """
+    if not (user and user.is_authenticated):
+        return []
+
+    tabs = []
+    for spec in ACCOUNT_TABS:
+        if spec['tiers'] and getattr(user, 'tier', None) not in spec['tiers']:
+            continue
+        url = _resolve(spec['url_name'])
+        if not url:
+            continue
+        tabs.append({
+            'label': spec['label'],
+            'icon': spec['icon'],
+            'url': url,
+            'is_active': bool(current_path) and current_path.startswith(url),
+        })
+    return tabs
+
+
 def build_sidebar(current_path=''):
     """Return the catalog decorated with live links and active-state flags."""
     tree = []
 
     for module in parse_catalog():
+        if module['number'] in SIDEBAR_EXCLUDED_MODULES:
+            continue
         submodules = []
         module_is_live = False
 
