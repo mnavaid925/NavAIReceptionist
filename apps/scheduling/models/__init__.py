@@ -9,9 +9,11 @@ Sub-module folders, in build order:
 
 * `ContactDirectory/`   — 4.1  Contact
 * `ServicesResources/`  — 4.2  Service, Resource
+* `Bookings/`           — 4.3  Appointment
 """
+from apps.scheduling.models.Bookings.Appointments import Appointment
 from apps.scheduling.models.ContactDirectory.Contacts import Contact
 from apps.scheduling.models.ServicesResources.Resources import Resource
 from apps.scheduling.models.ServicesResources.Services import Service
 
-__all__ = ['Contact', 'Service', 'Resource']
+__all__ = ['Contact', 'Service', 'Resource', 'Appointment']
