@@ -16,7 +16,10 @@ from apps.accounts.views.Auth import (
     password_reset_request_view,
 )
 from apps.accounts.views.Dashboard import dashboard_view
-from apps.accounts.views.LocationSwitcher import switch_location_view
+from apps.accounts.views.LocationSwitcher import (
+    my_locations_view,
+    switch_location_view,
+)
 from apps.accounts.views.Users import (
     profile_view,
     user_create_view,
@@ -45,5 +48,6 @@ __all__ = [
     'user_delete_view',
     'profile_view',
     # 0.4 — Active Location Switcher.
+    'my_locations_view',
     'switch_location_view',
 ]
