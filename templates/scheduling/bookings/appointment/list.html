@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block title %}Appointments{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Appointments</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Calendar &amp; Bookings</li>
+        <li>Appointments</li>
+      </ol>
+    </nav>
+    {% if active_location %}
+      <a class="btn btn-outline" href="{% url 'scheduling:appointment_slots' %}">
+        <i data-lucide="search"></i> Find a slot
+      </a>
+      <a class="btn btn-primary" href="{% url 'scheduling:appointment_create' %}">
+        <i data-lucide="plus"></i> Book manually
+      </a>
+    {% endif %}
+  </div>
+</div>
+
+{% include "scheduling/bookings/appointment/_filters.html" %}
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header">
+    <span>{{ total_count }} appointment{{ total_count|pluralize }}</span>
+    {% comment %}
+      Names the ACTIVE LOCATION: a diary belongs to one site, so the rows change
+      on a location switch and nothing else on screen would explain why. All
+      times below render in this location's timezone — the middleware activates
+      it per request, so `{{ obj.start_at }}` is already local.
+    {% endcomment %}
+    <span class="text-muted">
+      {% if active_location %}
+        {{ active_location.name }} &mdash; times shown in {{ active_location.timezone }}
+      {% else %}
+        No location chosen
+      {% endif %}
+    </span>
+  </div>
+  <div class="card-body">
+
+    {% if appointments %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">When</th>
+              <th scope="col">Contact</th>
+              <th scope="col">Service</th>
+              <th scope="col">With</th>
+              <th scope="col">Where</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for a in appointments %}
+              <tr>
+                <td>
+                  <time datetime="{{ a.start_at|date:'c' }}">{{ a.start_at|date:"D j M, H:i" }}</time>
+                  <span class="block text-muted text-xs">
+                    to {{ a.end_at|date:"H:i" }}
+                  </span>
+                </td>
+                <td>
+                  <a href="{% url 'scheduling:contact_detail' a.contact.pk %}">{{ a.contact.display_name }}</a>
+                  {% if a.source == 'ai_phone' %}
+                    <span class="block text-muted text-xs">Booked by the agent</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if a.service %}
+                    {{ a.service.name }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if a.provider %}
+                    {{ a.provider.display_name }}
+                  {% else %}
+                    <span class="text-muted">Anyone</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if a.resource %}
+                    {{ a.resource.display_label }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>{% include "partials/_appointment_status_badge.html" with obj=a %}</td>
+                <td>
+                  <span class="table-actions">
+                    <a class="btn btn-icon" href="{% url 'scheduling:appointment_detail' a.pk %}"
+                       aria-label="View appointment for {{ a.contact.display_name }}" title="View">
+                      <i data-lucide="eye"></i>
+                    </a>
+                    {% comment %}
+                      Edit only while the booking is still open. A completed or
+                      cancelled appointment is a record of what happened, and the
+                      view re-checks the same guard.
+                    {% endcomment %}
+                    {% if a.is_open %}
+                      <a class="btn btn-icon" href="{% url 'scheduling:appointment_edit' a.pk %}"
+                         aria-label="Edit appointment for {{ a.contact.display_name }}" title="Edit">
+                        <i data-lucide="pencil"></i>
+                      </a>
+                    {% endif %}
+                    {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+                      <form method="post" action="{% url 'scheduling:appointment_delete' a.pk %}"
+                            onclick="return confirm('Delete this booking for {{ a.contact.display_name|escapejs }}? To keep a record of a booking that was called off, cancel it instead.');">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-icon"
+                                aria-label="Delete appointment for {{ a.contact.display_name }}" title="Delete">
+                          <i data-lucide="trash-2"></i>
+                        </button>
+                      </form>
+                    {% endif %}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/_pagination.html" %}
+
+    {% elif active_location %}
+      {% url 'scheduling:appointment_slots' as slots_url %}
+      {% include "partials/_empty_state.html" with icon="calendar-off" title="No appointments match" message="Try clearing the filters, or search for an open slot to make the first booking." action_url=slots_url action_label="Find a slot" %}
+    {% else %}
+      {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Each site keeps its own diary. Pick the location you are working in and its appointments appear here." %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
