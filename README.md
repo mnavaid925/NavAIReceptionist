@@ -22,7 +22,7 @@ One codebase, one deployment. There is **no separate microservice**.
 
 | Layer | Choice |
 |---|---|
-| Framework | Django 5.1 |
+| Framework | Django 4.2 LTS |
 | Realtime | Django Channels / ASGI (Twilio media-stream websocket) |
 | UI | Tailwind CSS + HTMX + Lucide icons |
 | Database | MySQL (`navai_receptionist`; test database `test_navai_receptionist`) |
