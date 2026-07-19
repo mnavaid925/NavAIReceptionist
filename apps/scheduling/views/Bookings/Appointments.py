@@ -20,21 +20,31 @@ from django.utils import timezone as dj_timezone
 from apps.scheduling.availability import (
     MAX_OFFERED_SLOTS,
     SlotError,
+    _lock_contended_rows,
     book_slot,
     cancel_appointment,
     find_available_slots,
     local_day_bounds_utc,
+    overlapping_appointments,
     reschedule_appointment,
 )
 from apps.scheduling.forms import AppointmentCancelForm, AppointmentForm
 from apps.scheduling.models import Appointment, Contact, Resource, Service
-from apps.scheduling.availability import (
-    _lock_contended_rows,
-    overlapping_appointments,
-)
 from apps.scheduling.views._common import *  # noqa: F401,F403
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    'appointment_list_view',
+    'appointment_create_view',
+    'appointment_detail_view',
+    'appointment_edit_view',
+    'appointment_delete_view',
+    'appointment_slots_view',
+    'appointment_book_view',
+    'appointment_reschedule_view',
+    'appointment_cancel_view',
+]
 
 
 def _save_booking_under_lock(form, request):
@@ -85,18 +95,6 @@ def _save_booking_under_lock(form, request):
         logger.warning('Manual booking lost a lock race: %s', exc)
         form.add_error(None, 'Someone just booked that time. Pick another.')
         return None
-
-__all__ = [
-    'appointment_list_view',
-    'appointment_create_view',
-    'appointment_detail_view',
-    'appointment_edit_view',
-    'appointment_delete_view',
-    'appointment_slots_view',
-    'appointment_book_view',
-    'appointment_reschedule_view',
-    'appointment_cancel_view',
-]
 
 
 def _location_appointments(request):
@@ -200,7 +198,13 @@ def appointment_list_view(request):
 
 
 def _location_providers(request):
-    """Providers assigned to the active location."""
+    """Providers assigned to the active location.
+
+    `status=User.STATUS_ACTIVE` mirrors `availability._candidate_providers` — a
+    suspended provider must not appear in the filter dropdown or the slot-search
+    provider list any more than they can be booked. Leaving this out would offer
+    a person availability.py itself refuses to mint a single slot for.
+    """
     from apps.accounts.models import User
 
     if request.location is None:
@@ -208,6 +212,7 @@ def _location_providers(request):
     return User.objects.filter(
         tenant=request.tenant,
         is_provider=True,
+        status=User.STATUS_ACTIVE,
         user_locations__location=request.location,
     ).distinct().order_by('full_name', 'email')
 
