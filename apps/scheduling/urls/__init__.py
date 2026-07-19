@@ -18,6 +18,9 @@ from apps.scheduling.urls.ServicesResources.Resources import (
 from apps.scheduling.urls.Bookings.Appointments import (
     urlpatterns as appointment_urlpatterns,
 )
+from apps.scheduling.urls.CalendarViews.Calendar import (
+    urlpatterns as calendar_urlpatterns,
+)
 from apps.scheduling.urls.ServicesResources.Services import (
     urlpatterns as service_urlpatterns,
 )
@@ -38,3 +41,8 @@ urlpatterns += resource_urlpatterns
 # module keeps `slots/` and `book/` ahead of `<int:pk>`; nothing above uses a
 # greedy converter that could swallow them.
 urlpatterns += appointment_urlpatterns
+
+# -- 4.4 Calendar Views ----------------------------------------------------- #
+# `calendar/` prefix, distinct from everything above. No pk routes at all — a
+# calendar addresses a date through the query string.
+urlpatterns += calendar_urlpatterns
