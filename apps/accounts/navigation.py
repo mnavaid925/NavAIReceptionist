@@ -71,6 +71,8 @@ LIVE_LINKS = {
     '2.3': {'Transfer Settings': 'agents:transfer_settings'},
     '2.4': {'Test Call': 'agents:test_call'},
     '4.1': {'Contacts': 'scheduling:contact_list'},
+    '4.2': {'Services': 'scheduling:service_list',
+            'Resources': 'scheduling:resource_list'},
 }
 
 
