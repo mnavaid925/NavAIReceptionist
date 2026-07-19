@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Transfer settings{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Transfer settings</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Agent Setup &amp; Telephony</li>
+        <li>Transfer</li>
+      </ol>
+    </nav>
+    <a class="btn btn-primary" href="{% url 'agents:transfer_settings_edit' %}">
+      <i data-lucide="pencil"></i> Edit
+    </a>
+  </div>
+</div>
+
+{% include "agents/_tabs.html" %}
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 space-y-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Handoff</span>
+        {% if not setting.transfer_enabled %}
+          <span class="badge badge-muted">Off</span>
+        {% elif available_now %}
+          <span class="badge badge-green">Available now</span>
+        {% else %}
+          <span class="badge badge-amber">Outside hours</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <dl class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <dt class="form-label">Primary destination</dt>
+            <dd class="m-0">
+              {% if setting.transfer_phone_number %}
+                {{ setting.transfer_phone_number|phone_e164 }}
+              {% else %}
+                <span class="text-muted">Not set</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Secondary destination</dt>
+            <dd class="m-0">
+              {% if setting.transfer_secondary_number %}
+                {{ setting.transfer_secondary_number|phone_e164 }}
+              {% else %}
+                <span class="text-muted">Not set</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Hours timezone</dt>
+            <dd class="m-0">{{ setting.transfer_timezone }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Next open</dt>
+            <dd class="m-0">{{ reopens_at|default:"&mdash;" }}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Weekly windows</span></div>
+      <div class="card-body">
+        {% if setting.transfer_working_hours %}
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr><th scope="col">Day</th><th scope="col">Transfer offered</th></tr>
+              </thead>
+              <tbody>
+                {% for day, window in setting.transfer_working_hours.items %}
+                  <tr>
+                    <td>{{ day|title }}</td>
+                    <td>
+                      {% if window.enabled %}
+                        {{ window.start }}&ndash;{{ window.end }}
+                      {% else %}
+                        <span class="text-muted">Closed</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="text-muted">
+            No windows configured, so a handoff is offered at any hour whenever
+            transfer is enabled.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Escalation phrases</span></div>
+      <div class="card-body">
+        <p class="text-muted text-sm">Built in, always active:</p>
+        <p style="margin-block-start: 6px;">
+          {% for keyword in builtin_keywords %}
+            <span class="badge badge-slate">{{ keyword }}</span>
+          {% endfor %}
+        </p>
+        {% if setting.transfer_keywords %}
+          <p class="text-muted text-sm" style="margin-block-start: 14px;">
+            Added for this location:
+          </p>
+          <p style="margin-block-start: 6px;">
+            {% for keyword in setting.transfer_keywords %}
+              <span class="badge badge-info">{{ keyword }}</span>
+            {% endfor %}
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+
+  <aside>
+    <div class="card">
+      <div class="card-header"><span>Where a caller lands</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          The agent always dials the number configured here. A number a caller
+          reads out, or one the model produces, is never dialable &mdash; which is
+          what stops a manipulated agent bridging a call somewhere else.
+        </p>
+        <p class="text-muted" style="margin-block-start: 10px;">
+          Outside the window the agent says a human is not available and offers to
+          take a message instead, rather than promising a handoff it cannot make.
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
