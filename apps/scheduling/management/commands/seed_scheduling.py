@@ -17,13 +17,16 @@ Sub-modules seeded so far:
 
 * 4.1  Contact — a directory per tenant, spanning all three `source` values and
        including a deliberately shared phone line.
+* 4.2  Service, Resource — a catalogue mixing all-location and site-specific
+       services, and rooms at BOTH locations of each tenant so a cross-location
+       bug has somewhere to show up.
 """
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
-from apps.scheduling.models import Contact
+from apps.scheduling.models import Contact, Resource, Service
 from apps.scheduling.services import normalize_e164
-from apps.tenants.models import Tenant
+from apps.tenants.models import Location, Tenant
 
 # Contacts per tenant slug. The shapes here are chosen to exercise the module's
 # real edge cases rather than to look tidy:
@@ -102,8 +105,93 @@ DEMO_CONTACTS = {
 }
 
 
+# -- 4.2 Services ----------------------------------------------------------- #
+# `location_slug=None` means the service is offered at EVERY site — the common
+# case, and the one a naive `filter(location=...)` would wrongly hide.
+DEMO_SERVICES = {
+    'acme': [
+        {'name': 'Routine check-up', 'location_slug': None,
+         'duration_minutes': 30, 'buffer_minutes': 10, 'requires_resource': True,
+         'display_order': 10,
+         'description': 'A standard examination and clean, about half an hour.'},
+        {'name': 'Emergency appointment', 'location_slug': None,
+         'duration_minutes': 20, 'buffer_minutes': 10, 'requires_resource': True,
+         'display_order': 20,
+         'description': 'Same-day slot for pain or a broken tooth.'},
+        {'name': 'Teeth whitening', 'location_slug': 'downtown',
+         'duration_minutes': 60, 'buffer_minutes': 15, 'requires_resource': True,
+         'display_order': 30,
+         'description': 'Cosmetic whitening, about an hour. Downtown only.'},
+        {'name': 'Phone consultation', 'location_slug': None,
+         'duration_minutes': 15, 'buffer_minutes': 0, 'requires_resource': False,
+         'display_order': 40,
+         'description': 'A quick call with a dentist. No room needed.'},
+        {'name': 'Orthodontic review', 'location_slug': 'uptown',
+         'duration_minutes': 45, 'buffer_minutes': 15, 'requires_resource': True,
+         'display_order': 50, 'is_active': False,
+         'description': 'Brace adjustment and review. Uptown only.'},
+    ],
+    'globex': [
+        {'name': 'New patient assessment', 'location_slug': None,
+         'duration_minutes': 45, 'buffer_minutes': 15, 'requires_resource': True,
+         'display_order': 10,
+         'description': 'First visit, including a full history.'},
+        {'name': 'Follow-up', 'location_slug': None,
+         'duration_minutes': 20, 'buffer_minutes': 5, 'requires_resource': True,
+         'display_order': 20,
+         'description': 'A shorter review after a previous visit.'},
+        {'name': 'Telehealth call', 'location_slug': None,
+         'duration_minutes': 20, 'buffer_minutes': 0, 'requires_resource': False,
+         'display_order': 30,
+         'description': 'A video or phone appointment. No room needed.'},
+        {'name': 'Physiotherapy session', 'location_slug': 'riverside',
+         'duration_minutes': 50, 'buffer_minutes': 10, 'requires_resource': True,
+         'display_order': 40,
+         'description': 'Hands-on session in the Riverside gym.'},
+    ],
+}
+
+# -- 4.2 Resources ---------------------------------------------------------- #
+# Keyed by location slug, NOT by tenant: a resource is physically at one site.
+# Both locations of both tenants get rooms, so a cross-location scoping bug shows
+# up as the wrong site's rooms appearing rather than as an empty page.
+DEMO_RESOURCES = {
+    'downtown': [
+        {'name': 'Surgery 1', 'resource_number': '1', 'display_order': 10,
+         'description': 'Ground floor, wheelchair accessible.'},
+        {'name': 'Surgery 2', 'resource_number': '2', 'display_order': 20,
+         'description': 'First floor.'},
+        {'name': 'Hygienist room', 'resource_number': 'H', 'display_order': 30,
+         'description': ''},
+    ],
+    'uptown': [
+        # Same name as a Downtown room on purpose — the unique constraint is
+        # (location, name), so this must be allowed.
+        {'name': 'Surgery 1', 'resource_number': '1', 'display_order': 10,
+         'description': 'Shares a name with the Downtown room. That is allowed.'},
+        {'name': 'Consult room', 'resource_number': 'C', 'display_order': 20,
+         'description': ''},
+        {'name': 'Spare chair', 'resource_number': 'X', 'display_order': 30,
+         'description': 'Out of service pending repair.', 'is_active': False},
+    ],
+    'riverside': [
+        {'name': 'Consult room A', 'resource_number': 'A', 'display_order': 10,
+         'description': ''},
+        {'name': 'Physio gym', 'resource_number': 'G', 'display_order': 20,
+         'description': 'Large room with equipment.'},
+    ],
+    'lakeside': [
+        {'name': 'Consult room A', 'resource_number': 'A', 'display_order': 10,
+         'description': ''},
+        {'name': 'Consult room B', 'resource_number': 'B', 'display_order': 20,
+         'description': ''},
+    ],
+}
+
+
 class Command(BaseCommand):
-    help = 'Seed demo contacts for the calendar and bookings module. Idempotent.'
+    help = ('Seed demo contacts, services and resources for the calendar and '
+            'bookings module. Idempotent.')
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -132,6 +220,14 @@ class Command(BaseCommand):
             ).delete()
             self.stdout.write(self.style.WARNING(
                 f'Flushed {deleted} demo contact row(s).'
+            ))
+            deleted, _ = Service.objects.filter(tenant__slug__in=slugs).delete()
+            self.stdout.write(self.style.WARNING(
+                f'Flushed {deleted} demo service row(s).'
+            ))
+            deleted, _ = Resource.objects.filter(tenant__slug__in=slugs).delete()
+            self.stdout.write(self.style.WARNING(
+                f'Flushed {deleted} demo resource row(s).'
             ))
 
         created = 0
@@ -166,10 +262,8 @@ class Command(BaseCommand):
             f'Contacts: {created} created, {skipped} already present.'
         ))
 
-        if skipped and not created:
-            self.stdout.write(
-                'Nothing to do. Use --flush to rebuild the demo directory.'
-            )
+        self._seed_services(tenants)
+        self._seed_resources(tenants)
 
         self.stdout.write('')
         self.stdout.write('Sign in as a TENANT ADMIN to see this data:')
@@ -189,3 +283,92 @@ class Command(BaseCommand):
             '  Contacts are business-wide, so they are visible from EITHER '
             'location — that is correct, not a scoping bug.'
         )
+        self.stdout.write(
+            '  Services with no location are offered everywhere; resources '
+            'belong to ONE site, so switch location to see the other set.'
+        )
+
+    # -- 4.2 ---------------------------------------------------------------- #
+
+    def _seed_services(self, tenants):
+        """Seed the service catalogue.
+
+        Keyed on `(tenant, location, name)` — the same tuple `ServiceForm`
+        validates against — so a re-run is a no-op. Keying on name alone would
+        collapse a Downtown-only service and an all-locations one that happen to
+        share a name.
+        """
+        created = 0
+        skipped = 0
+
+        for slug, specs in DEMO_SERVICES.items():
+            tenant = tenants[slug]
+            for spec in specs:
+                spec = dict(spec)
+                location_slug = spec.pop('location_slug')
+                location = None
+                if location_slug:
+                    location = Location.objects.filter(
+                        tenant=tenant, slug=location_slug
+                    ).first()
+                    if location is None:
+                        self.stderr.write(self.style.WARNING(
+                            f'  Skipping service "{spec["name"]}" — no location '
+                            f'"{location_slug}" for {tenant.slug}.'
+                        ))
+                        continue
+
+                if Service.objects.filter(
+                    tenant=tenant, location=location, name=spec['name']
+                ).exists():
+                    skipped += 1
+                    continue
+
+                Service.objects.create(tenant=tenant, location=location, **spec)
+                created += 1
+
+        self.stdout.write(self.style.SUCCESS(
+            f'Services: {created} created, {skipped} already present.'
+        ))
+
+    def _seed_resources(self, tenants):
+        """Seed rooms and equipment, keyed by LOCATION slug.
+
+        A resource belongs to one site, so the lookup is `(location, name)` —
+        matching the model's unique constraint exactly. Downtown and Uptown both
+        get a "Surgery 1" on purpose, to prove that constraint is scoped to the
+        location and not to the tenant.
+        """
+        created = 0
+        skipped = 0
+
+        locations = {
+            location.slug: location
+            for location in Location.objects.filter(
+                tenant__in=tenants.values()
+            ).select_related('tenant')
+        }
+
+        for location_slug, specs in DEMO_RESOURCES.items():
+            location = locations.get(location_slug)
+            if location is None:
+                self.stderr.write(self.style.WARNING(
+                    f'  Skipping resources for "{location_slug}" — no such '
+                    'location. Run `manage.py seed_tenants` first.'
+                ))
+                continue
+
+            for spec in specs:
+                if Resource.objects.filter(
+                    location=location, name=spec['name']
+                ).exists():
+                    skipped += 1
+                    continue
+                Resource.objects.create(
+                    tenant=location.tenant, location=location, **spec
+                )
+                created += 1
+
+        self.stdout.write(self.style.SUCCESS(
+            f'Resources: {created} created, {skipped} already present.'
+        ))
