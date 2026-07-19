@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Edit agent{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Edit agent</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'agents:agent_setup' %}">Agent Setup</a></li>
+      <li>Edit</li>
+    </ol>
+  </nav>
+</div>
+
+{% include "agents/_tabs.html" %}
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-header"><span>{{ active_location.name }}</span></div>
+
+        <div class="card-body grid gap-4">
+          {% if form.non_field_errors %}
+            <div class="alert alert-red" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+
+        <div class="card-header">
+          <a class="btn btn-outline" href="{% url 'agents:agent_setup' %}">Cancel</a>
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i> Save agent
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside class="space-y-4">
+    <div class="card">
+      <div class="card-header"><span>Using variables</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          {% comment %}
+            The placeholder below is wrapped in a verbatim block. Writing it
+            inside a string in a variable tag is a template syntax error rather
+            than an escape. Note also that a verbatim tag must never appear
+            inside a comment: verbatim is handled by the LEXER, so it swallows
+            the endcomment token and the comment never closes.
+          {% endcomment %}
+          Write <code>{% verbatim %}{{name}}{% endverbatim %}</code> in the greeting
+          or prompt and define
+          <code>name = value</code> opposite. Saving fails if a placeholder has no
+          definition &mdash; an undefined one is spoken as a gap in the sentence.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Computed for you</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          These are filled in by the server on every call and cannot be redefined:
+        </p>
+        <p class="text-muted text-sm" style="margin-block-start: 8px;">
+          <code>business_name</code> <code>location_name</code>
+          <code>location_phone</code> <code>current_date</code>
+          <code>current_time</code> <code>from_number</code>
+          <code>is_open_now</code> <code>transfer_available</code>
+          <code>transfer_reopens_at</code>
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
