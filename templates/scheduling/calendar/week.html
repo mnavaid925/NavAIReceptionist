@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+
+{% block title %}Calendar — week{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Calendar</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li><a href="{% url 'scheduling:calendar_day' %}">Calendar</a></li>
+        <li>Week</li>
+      </ol>
+    </nav>
+    {% if not no_location %}
+      <a class="btn btn-primary" href="{% url 'scheduling:appointment_create' %}">
+        <i data-lucide="plus"></i> Book manually
+      </a>
+    {% endif %}
+  </div>
+</div>
+
+{% if no_location %}
+  {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Each site keeps its own diary. Pick the location you are working in and its calendar appears here." %}
+{% else %}
+
+  {% comment %}
+    The week shows ONE room or person across seven days, not a week-by-N matrix.
+    Every product surveyed narrows the week the same way: with several rooms the
+    matrix is unreadable at any realistic screen width.
+  {% endcomment %}
+
+  <div class="card card-body flex flex-wrap items-center gap-3">
+    <span class="flex gap-2">
+      <a class="btn btn-outline" href="?date={{ prev_date|date:'Y-m-d' }}&amp;by={{ mode }}{% if chosen %}&amp;column={{ chosen.pk }}{% endif %}"
+         aria-label="Previous week"><i data-lucide="chevron-left"></i></a>
+      <a class="btn btn-outline" href="?date={{ today|date:'Y-m-d' }}&amp;by={{ mode }}{% if chosen %}&amp;column={{ chosen.pk }}{% endif %}">This week</a>
+      <a class="btn btn-outline" href="?date={{ next_date|date:'Y-m-d' }}&amp;by={{ mode }}{% if chosen %}&amp;column={{ chosen.pk }}{% endif %}"
+         aria-label="Next week"><i data-lucide="chevron-right"></i></a>
+    </span>
+
+    <span class="grow">
+      <strong>{{ week_start|date:"j M" }} &ndash; {{ week_end|date:"j M Y" }}</strong>
+      <span class="block text-muted text-xs">
+        {{ total_count }} booking{{ total_count|pluralize }} &mdash;
+        {{ active_location.name }}, times in {{ active_location.timezone }}
+      </span>
+    </span>
+
+    <form method="get" class="flex flex-wrap items-end gap-2">
+      <input type="hidden" name="date" value="{{ week_start|date:'Y-m-d' }}">
+
+      <span class="form-group" style="margin:0;">
+        <label class="form-label" for="f-by">Show</label>
+        <select class="form-select" id="f-by" name="by">
+          <option value="resource" {% if mode == 'resource' %}selected{% endif %}>A room</option>
+          <option value="provider" {% if mode == 'provider' %}selected{% endif %}>A person</option>
+        </select>
+      </span>
+
+      <span class="form-group" style="margin:0;">
+        <label class="form-label" for="f-column">
+          {% if mode == 'resource' %}Room{% else %}Person{% endif %}
+        </label>
+        <select class="form-select" id="f-column" name="column">
+          {% for option in column_options %}
+            <option value="{{ option.pk }}" {% if chosen and chosen.pk == option.pk %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </span>
+
+      <button type="submit" class="btn btn-primary">Show</button>
+      <a class="btn btn-outline" href="{% url 'scheduling:calendar_day' %}?date={{ today|date:'Y-m-d' }}&amp;by={{ mode }}">
+        Day
+      </a>
+    </form>
+  </div>
+
+  {% if chosen %}
+    <div style="margin-block-start: 16px;">
+      {% include "scheduling/calendar/_grid.html" %}
+    </div>
+    <p class="text-muted text-xs" style="margin-block-start: 8px;">
+      Showing <strong>{{ chosen }}</strong> across the week. Click any empty slot
+      to book into it.
+    </p>
+  {% else %}
+    {% comment %}
+      No columns exist at all. The view returns an empty queryset rather than
+      filtering on None, which Django would compile to `IS NULL` and present
+      every unassigned booking as this room's week.
+    {% endcomment %}
+    {% if mode == 'resource' %}
+      {% url 'scheduling:resource_create' as create_url %}
+      {% include "partials/_empty_state.html" with icon="door-closed" title="No rooms to show" message="The week view shows one room at a time, and this location has no active resources yet." action_url=create_url action_label="Add resource" %}
+    {% else %}
+      {% include "partials/_empty_state.html" with icon="user-round-x" title="Nobody to show" message="The week view shows one person at a time, and no active provider is assigned to this location yet. Assign one under Staff & Locations." %}
+    {% endif %}
+  {% endif %}
+
+{% endif %}
+{% endblock %}
