@@ -3,6 +3,8 @@ views (sub-module 4.2).
 
 Cross-tenant/location isolation and tier-gating live in `test_catalog_security.py`.
 """
+from datetime import timedelta
+
 import pytest
 from django.test import Client
 from django.urls import reverse
@@ -280,12 +282,52 @@ def test_service_detail_view_bookable_here_true_for_an_all_locations_service(
     assert response.context['bookable_here'] is True
 
 
-def test_service_detail_view_appointment_count_is_none_until_4_3_lands(client_a, service_a1):
-    """`scheduling.Appointment` (4.3) does not exist yet, so `_appointment_count`
-    degrades to `None` (import-guarded) rather than raising `ImportError`.
+def test_service_detail_view_counts_appointments(client_a, service_a1, contact_a,
+                                                 location_a1):
+    """4.3 landed, so `_appointment_count` returns a real integer.
+
+    0 and None are different states and the template renders them differently:
+    None is "the appointments sub-module is not built", 0 is "never booked".
     """
+    from django.utils import timezone as dj_timezone
+
+    from apps.scheduling.models import Appointment
+
     response = client_a.get(_url('service_detail', service_a1.pk))
-    assert response.context['appointment_count'] is None
+    assert response.context['appointment_count'] == 0
+
+    start = dj_timezone.now() + timedelta(days=2)
+    Appointment.objects.create(
+        tenant=service_a1.tenant, location=location_a1, contact=contact_a,
+        service=service_a1, start_at=start, end_at=start + timedelta(minutes=30),
+    )
+
+    response = client_a.get(_url('service_detail', service_a1.pk))
+    assert response.context['appointment_count'] == 1
+
+
+def test_service_delete_is_refused_once_the_service_has_been_booked(
+    client_a, service_a1, contact_a, location_a1,
+):
+    """The guard written in 4.2 against a FK that did not exist yet.
+
+    `Appointment.service` is SET_NULL, so the database would happily delete this
+    and silently blank the service on every past booking. The view refuses.
+    """
+    from django.utils import timezone as dj_timezone
+
+    from apps.scheduling.models import Appointment, Service
+
+    start = dj_timezone.now() + timedelta(days=2)
+    Appointment.objects.create(
+        tenant=service_a1.tenant, location=location_a1, contact=contact_a,
+        service=service_a1, start_at=start, end_at=start + timedelta(minutes=30),
+    )
+
+    response = client_a.post(_url('service_delete', service_a1.pk))
+
+    assert response.status_code == 302
+    assert Service.objects.filter(pk=service_a1.pk).exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -485,9 +527,25 @@ def test_resource_detail_view_renders_for_tenant_admin(client_a, resource_a1):
     assert response.context['obj'] == resource_a1
 
 
-def test_resource_detail_view_appointment_count_is_none_until_4_3_lands(client_a, resource_a1):
+def test_resource_detail_view_counts_appointments(client_a, resource_a1,
+                                                  contact_a, service_a1):
+    """4.3 landed, so `_appointment_count` returns a real integer, not None."""
+    from django.utils import timezone as dj_timezone
+
+    from apps.scheduling.models import Appointment
+
     response = client_a.get(_url('resource_detail', resource_a1.pk))
-    assert response.context['appointment_count'] is None
+    assert response.context['appointment_count'] == 0
+
+    start = dj_timezone.now() + timedelta(days=2)
+    Appointment.objects.create(
+        tenant=resource_a1.tenant, location=resource_a1.location,
+        contact=contact_a, service=service_a1, resource=resource_a1,
+        start_at=start, end_at=start + timedelta(minutes=30),
+    )
+
+    response = client_a.get(_url('resource_detail', resource_a1.pk))
+    assert response.context['appointment_count'] == 1
 
 
 # --------------------------------------------------------------------------- #
