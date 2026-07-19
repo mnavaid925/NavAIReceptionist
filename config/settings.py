@@ -101,6 +101,8 @@ INSTALLED_APPS = [
     'apps.accounts',
     # Module 1 — Business & Locations
     'apps.tenants',
+    # Module 2 — Agent Setup & Telephony
+    'apps.agents',
 ]
 
 
