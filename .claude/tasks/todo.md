@@ -1324,3 +1324,52 @@ parked:
 ## Review notes
 
 (filled in at the end)
+
+## Review notes — 4.2 Services & Resources
+
+### Built
+
+Two models (`Service`, `Resource`), ten views, eight templates, migration `0002`, an extended seeder and
+`LIVE_LINKS['4.2']`. Verified 64/64 by `temp/verify_4_2.py`; the pytest suite went 89 → **224 passing**.
+
+### Bugs the reviewers caught, all real
+
+1. **CRITICAL — the silent widening.** `ServiceForm` narrowed the `location` select to the editor's own
+   assigned locations. Opening an Uptown-pinned service as a Downtown-only user rendered *no* option as
+   selected, so the browser fell back to the first one — the blank "All locations" — and saving an
+   unrelated description edit **silently changed the service to be offered at every site**. No error, no
+   warning, wrong data. Fixed by UNIONing the instance's current location into the queryset.
+2. **The write gate was missing.** `_tenant_services` is tenant-only by design (the catalogue is
+   business-wide to READ), but `service_edit_view` and `service_delete_view` reused it unchanged for
+   WRITES — so a Downtown-only user could rename, deactivate or re-time an Uptown-pinned service and
+   change what the agent books at a site they do not work at. Both now refuse.
+3. **`.isdigit()` before `int()` is a 500.** `'²'.isdigit()` is `True`; `int('²')` raises. `?scope=²`
+   was an unhandled `ValueError`, violating the project's own "junk degrades, never raises" filter rule.
+   `.isdecimal()` is the correct guard. **Worth grepping for project-wide.**
+4. **TOCTOU on the hand-rolled uniqueness checks.** `.exists()` then `.save()` with nothing between them:
+   a double-click or two concurrent writers both pass validation and the second insert 500s on exactly the
+   path the manual check exists to keep friendly. Added `views/_helpers.py::save_or_report_conflict`.
+5. **A broad `IntegrityError` catch with no traceback** would show a FK or NOT NULL violation to the user
+   as a name clash and leave nothing to triage from. Now `logger.exception`.
+
+### Decisions
+
+* **`Service.location` is hand-declared, not inherited.** Neither `TenantOwned` nor `TenantLocationOwned`
+  expresses "tenant + optional location", and forcing either would lose a real case.
+* **`Resource` has no `capacity` and no user FK.** A room is exclusive (no group-class model exists), and
+  the provider is a separate concern from the room — merging them would conflate two independent
+  constraints.
+* **Read business-wide, write location-gated** for site-pinned services. See bug 2.
+
+### Deferred
+
+Price, split before/after buffers, multi-duration services, a `resource_type` category, a Service↔Resource
+requirement M2M. All carried in `research-scheduling-4.2.md`.
+
+### Sequence steps NOT run for 4.2
+
+`frontend-reviewer`, `performance-reviewer`, `realtime-reviewer` and `qa-smoke-tester` were skipped for
+context budget. `code-reviewer`, `explorer`, `security-reviewer` and `test-writer` all ran and their
+findings are applied. **Run the four skipped agents against `apps/scheduling` and
+`templates/scheduling/catalog/` in a fresh session before treating 4.2 as fully closed.** Note that
+`realtime-reviewer` will find nothing — this sub-module has no async surface.
