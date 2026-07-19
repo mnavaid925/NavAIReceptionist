@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}Staff &amp; locations{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Staff &amp; locations</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li>Business &amp; Locations</li>
+      <li>Staff</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  One grid, both directions. Rows are users, columns are active sites, and each
+  checkbox is a UserLocation row. Arriving with ?user= or ?location= highlights
+  that row or column rather than opening a different page, so "assign from either
+  side" stays one implementation.
+
+  Each checkbox posts "<user_pk>:<location_pk>". The view intersects BOTH halves
+  with the tenant's own querysets before writing, so a forged pair naming another
+  business matches nothing.
+{% endcomment %}
+{% if rows and locations %}
+  <form method="post">
+    {% csrf_token %}
+    {% if confirm_required %}<input type="hidden" name="confirm" value="1">{% endif %}
+
+    <div class="card">
+      <div class="card-header">
+        <span>{{ rows|length }} user{{ rows|length|pluralize }} &times; {{ locations|length }} location{{ locations|length|pluralize }}</span>
+        <button type="submit" class="btn btn-primary">
+          <i data-lucide="check"></i> Save assignments
+        </button>
+      </div>
+
+      <div class="card-body">
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th scope="col">User</th>
+                <th scope="col">Bookable</th>
+                {% for location in locations %}
+                  <th scope="col" class="text-center">{{ location.name }}</th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in rows %}
+                <tr {% if highlight_user == row.user.pk %}style="background: var(--info-bg);"{% endif %}>
+                  <td>
+                    <span class="flex items-center gap-2">
+                      <span class="avatar-initial" aria-hidden="true">{{ row.user.initials }}</span>
+                      <span>
+                        <a href="{% url 'accounts:user_detail' row.user.pk %}">{{ row.user.display_name }}</a>
+                        <span class="block text-muted text-xs">
+                          {{ row.user.get_tier_display }}
+                          {% if row.user.status != 'active' %}&middot; {{ row.user.get_status_display }}{% endif %}
+                        </span>
+                      </span>
+                    </span>
+                  </td>
+                  <td>
+                    {% comment %}
+                      A nested <form> is invalid HTML, so the provider toggle is a
+                      submit button targeting its own action via formaction — it
+                      posts only this button's value, leaving the matrix untouched.
+                    {% endcomment %}
+                    <button type="submit"
+                            formaction="{% url 'tenants:toggle_provider' row.user.pk %}"
+                            formmethod="post"
+                            class="btn {% if row.user.is_provider %}btn-primary{% else %}btn-outline{% endif %}"
+                            title="{% if row.user.is_provider %}Bookable — click to turn off{% else %}Not bookable — click to turn on{% endif %}">
+                      {% if row.user.is_provider %}Provider{% else %}Not bookable{% endif %}
+                    </button>
+                  </td>
+                  {% for cell in row.cells %}
+                    <td class="text-center"
+                        {% if highlight_location == cell.location.pk %}style="background: var(--info-bg);"{% endif %}>
+                      <label class="sr-only" for="a-{{ row.user.pk }}-{{ cell.location.pk }}">
+                        {{ row.user.display_name }} at {{ cell.location.name }}
+                      </label>
+                      <input type="checkbox"
+                             id="a-{{ row.user.pk }}-{{ cell.location.pk }}"
+                             name="assign"
+                             value="{{ row.user.pk }}:{{ cell.location.pk }}"
+                             {% if cell.checked %}checked{% endif %}>
+                    </td>
+                  {% endfor %}
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card-header">
+        <span class="text-muted">
+          Unticking every box for someone leaves them unable to work anywhere.
+        </span>
+        <button type="submit" class="btn btn-primary">
+          <i data-lucide="check"></i> Save assignments
+        </button>
+      </div>
+    </div>
+  </form>
+{% elif not locations %}
+  {% url 'tenants:location_create' as create_url %}
+  {% include "partials/_empty_state.html" with icon="map-pin-off" title="No active locations" message="Add a location before assigning staff to it." action_url=create_url action_label="Add location" %}
+{% else %}
+  {% include "partials/_empty_state.html" with icon="users" title="No users yet" message="Add users to this business before assigning them to locations." %}
+{% endif %}
+{% endblock %}
