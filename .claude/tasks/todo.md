@@ -395,6 +395,74 @@ supported until April 2026.
   served HTML; all four sidebar sizes, dark mode, brand sidebar, horizontal/detached layouts, RTL,
   localStorage persistence and reset all confirmed working; 25 Lucide icons render.
 
+---
+
+## Sub-modules 0.2, 0.3 and 0.4 — built and verified
+
+Plans live in `todo-0.2.md`, `todo-0.3.md`, `todo-0.4.md` (written to separate files so the three `todo`
+agents could run in parallel without racing on this one). Research in `research-accounts-0.{2,3,4}.md`.
+
+**All three ship ZERO new models and ZERO migrations** — `makemigrations --check` reports "No changes
+detected", which is the empirical proof rather than an assertion. They are surfaces over the `User` and
+`UserLocation` tables 0.1 created.
+
+### What was built
+
+* **0.2** — `ChangePasswordForm` / `ChangeEmailRequestForm`; `change_password_view`,
+  `change_email_request_view`, `email_change_confirm_view`. The pending email change lives entirely in a
+  `django.core.signing` token that embeds the CURRENT address, which is what makes it single-use with no
+  server-side state to expire. `update_session_auth_hash` keeps the acting session alive while
+  invalidating every other one. `_send_password_changed_email` was generalised into
+  `send_credential_change_notice` in `views/_helpers.py` — one wording, two call sites, no drift.
+* **0.3** — the user directory (`crud('users', 'user')` finally exercising the factory built in 0.1),
+  plus the own-profile page. `tier_required('owner', 'manager')` is new. Delete is deactivation:
+  `scheduling.Appointment.provider` will point at these rows, so removing one would either cascade away
+  appointment history or orphan it.
+* **0.4** — `switch_location_view`, the topbar guard change, and a global choose-a-location banner.
+
+### Decisions worth knowing
+
+1. **Two forms over one table is the privilege boundary.** `OwnProfileForm` omits `tier`, `status`,
+   `is_provider` and `email`. A `ModelForm` only binds what `Meta.fields` names, so a POST body carrying
+   `tier=owner` against the profile endpoint is inert — verified, not assumed.
+2. **The switcher treats the posted id as a FILTER, never an identifier.**
+   `request.user.assigned_locations().filter(pk=...)` — so another tenant's location, a same-tenant
+   location the user has no `UserLocation` row for, and a junk string all fail identically. `.isdigit()`
+   is checked first, because feeding a non-numeric string to a pk filter raises `ValueError` and would
+   turn a junk POST into a 500.
+3. **The email-change tripwire goes to the OLD address.** Sending only to the new one tells the attacker
+   and nobody else, which is the entire failure the notice exists to prevent.
+4. **New users are invited, never given a password.** `set_unusable_password()` plus the existing
+   `accounts:password_reset_confirm` route — no second token scheme, no new url, and no password ever
+   relayed out of band.
+5. **The topbar guard was the actual 0.4 bug.** It was gated on `active_location`, so a user with two
+   assignments and none active — precisely who needs the switcher — could not see it.
+
+### Verification evidence
+
+`temp/smoke_0_234.py` — **117/117 checks pass**, covering: wrong/mismatched/reused/weak passwords;
+session survival across a password change; the same address being legal in a *different* business
+(`(tenant, email)` is the unique pair, not `email`); the confirm link being unusable anonymously, by
+another user's session, and on replay; the tier gate across all five management views; 13 junk filter
+and pagination values; cross-tenant IDOR to 404 on detail/edit/delete; privilege escalation via a
+spoofed profile POST; deactivation leaving the row intact with self and last-owner guards; the switcher
+refusing unassigned, cross-tenant and junk ids; an off-site `next=`; template-tag leaks on eight pages;
+and every `badge-*` modifier checked against the real `theme.css` inventory.
+
+`temp/smoke_0_1.py` re-run: **60/60**, so refactoring `_safe_next` and the notice helper out of
+`Auth.py` broke nothing. Live Daphne run confirms all five new pages render and the switcher moves the
+active location and refuses a bogus id.
+
+### Still outstanding for ALL of Module 0
+
+Steps 4-11 of the Module Creation Sequence have **not** run for any sub-module: `code-reviewer`,
+`explorer`, `frontend-reviewer`, `performance-reviewer`, `realtime-reviewer`, `qa-smoke-tester`,
+`security-reviewer`, `test-writer`. In particular there is still **no pytest suite** — `apps/accounts/`
+has no `tests/`, and the two `temp/smoke_*.py` files are gitignored throwaways, not the deliverable.
+Step 12 stays a deliberate no-op: CLAUDE.md carves Module 0 out of the Per-Module Skill rule.
+
+---
+
 ### Remaining for 0.1
 
 Steps 4-11: `code-reviewer` -> `explorer` -> `frontend-reviewer` -> `performance-reviewer` ->
