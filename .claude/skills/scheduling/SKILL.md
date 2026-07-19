@@ -19,7 +19,7 @@ though this module itself has **no realtime surface**.
 | 4.1 Contact Directory | **BUILT** | `Contact` |
 | 4.2 Services & Resources | **BUILT** | `Service`, `Resource` |
 | 4.3 Availability & Booking | **BUILT** | `Appointment` (+ `availability.py`) |
-| 4.4 Calendar Views | not built | none — a **view** sub-module |
+| 4.4 Calendar Views | **BUILT** | none — a **view** sub-module |
 | 4.5 Bookings List & Callback Requests | not built | `CallbackRequest` |
 
 > **Update this file, never re-author it.** Each sub-module run appends its models / routes / templates /
@@ -126,6 +126,11 @@ across the **whole concatenated list** — check any new greedy route against al
 `service_list` · `service_create` · `service_detail` · `service_edit` · `service_delete` (POST) ·
 `resource_list` · `resource_create` · `resource_detail` · `resource_edit` · `resource_delete` (POST)
 
+**4.4** — `urls/CalendarViews/Calendar.py`:
+`calendar_day` (`/schedule/calendar/`) · `calendar_week` (`/schedule/calendar/week/`).
+No pk routes at all — a calendar addresses a date through the query string
+(`?date=`, `?by=resource|provider`, `?column=`), which keeps them composable.
+
 **4.3** — `urls/Bookings/Appointments.py`:
 `appointment_list` · `appointment_create` · `appointment_slots` · `appointment_book` (POST) ·
 `appointment_detail` · `appointment_edit` · `appointment_delete` (POST) ·
@@ -148,6 +153,33 @@ Shared partials used: `partials/_pagination.html`, `_empty_state.html`, and (onc
 contacts → the business name and "all locations" (not location-scoped); services → the business name plus
 which site you are working at (nullable location); resources → the **active location name** (fully
 location-scoped, so the rows change on a switch and nothing else on screen would explain why).
+
+### 4.4 Calendar Views — a VIEW sub-module
+
+**Zero models, zero migrations.** `makemigrations scheduling --check` reporting "No changes detected" is
+part of its acceptance criteria. It reads `Appointment`, `Resource` and `accounts.User`.
+
+`views/CalendarViews/Calendar.py` computes ALL pixel geometry server-side and feeds the existing
+`--slot-start` / `--slot-span` CSS custom properties. Four rules there are load-bearing:
+
+* **Offsets come from naive LOCAL wall-clock minutes-from-midnight**, never aware-datetime subtraction —
+  the gutter is labelled in wall clock, so elapsed-time arithmetic puts every block an hour from its own
+  label on a DST day.
+* **Every custom-property value is an `int`.** A float renders as `112,666` under a non-English locale,
+  which invalidates the surrounding `calc()` and snaps every block to `top: 0`.
+* **Columns are keyed on column MEMBERSHIP, not FK null-ness** — a booking on a deactivated resource has a
+  non-null FK and no column, and would otherwise vanish. It goes to the always-present, never-clickable
+  "Unassigned" column.
+* **One vertical window per page** — the week grid has seven columns against one shared gutter.
+
+Cancelled AND no-show are excluded from the grid (both freed their slot per `BLOCKING_STATUSES`) and
+listed in a table below it. The week shows ONE room or person across seven Monday-anchored days, never a
+week x N matrix.
+
+Shared helpers live in `views/_helpers.py`: `location_appointments`, `parse_local_date` (clamped to
+1900–2200), `authorised_pk`, `bookable_resources`, `bookable_providers`, `bookable_services`. They are
+named `bookable_*` because 4.2's resource CRUD has its own `_location_resources` that deliberately does
+NOT filter `is_active`.
 
 ## Tools & prompt surface
 
@@ -191,6 +223,9 @@ re-run and would duplicate the whole diary every time. `seed_accounts` was exten
 Uptown and Lakeside and to stamp `provider_hours`: `is_provider=True` with empty hours is a broken state,
 not a neutral default, and it made availability return nothing everywhere.
 
+**4.4 added day-0 appointments at all four locations** — the calendar opens on today, and the earlier
+offsets (-14, -7, +1…+4) skipped it, so the first thing anyone saw was an empty grid that looks broken.
+
 **Flush order matters**: appointments before contacts, because `Appointment.contact` is PROTECT.
 
 > **The dedupe lookup must normalise before comparing.** `Contact.save()` normalises on write, so keying on
@@ -223,6 +258,13 @@ not a neutral default, and it made availability return nothing everywhere.
 * **A NAMED provider who is unbookable returns no slots** — it must not fall back to "anyone", which would
   answer yes to a request for a specific person who cannot take it. Suspended users are excluded in
   `availability`, the form dropdown AND the list filter; all three need `status=User.STATUS_ACTIVE`.
+* **`.calendar-slot` needs `display: block` (4.4).** A bookable slot is an `<a>`, and `height` does not
+  apply to a non-replaced INLINE element — as an inline anchor every slot collapses to zero height, taking
+  the grid rows and the whole click-to-book surface with it. The page still returns 200 and the blocks
+  still position correctly, so **only looking at it in a browser catches this.**
+* **`.calendar-column-body` exists because the sticky column head is still IN FLOW** — events positioned
+  relative to `.calendar-column` land one head-height above their own gridline, and the offset varies with
+  font size and zoom so no constant corrects it.
 * **THE nullable-location trap (4.2).** `Service.location` may be `NULL`. Anywhere you filter services by
   location, the filter must be **ADDITIVE** —
   `Q(location=here) | Q(location__isnull=True)` — never a plain `filter(location=here)`, which silently
@@ -295,6 +337,8 @@ rows.
         'Resources': 'scheduling:resource_list'},
 '4.3': {'Appointments': 'scheduling:appointment_list',
         'Find a slot': 'scheduling:appointment_slots'},
+'4.4': {'Calendar': 'scheduling:calendar_day',
+        'Week view': 'scheduling:calendar_week'},
 ```
 
 ## Tests
@@ -302,7 +346,8 @@ rows.
 `apps/scheduling/tests/` — 4.1: `test_models.py`, `test_services.py`, `test_forms.py`, `test_views.py`,
 `test_security.py`; 4.2: `test_catalog_models.py`, `test_catalog_forms.py`, `test_catalog_views.py`,
 `test_catalog_security.py`; 4.3: `test_booking_models.py`, `test_booking_forms.py`,
-`test_booking_availability.py`, `test_booking_views.py`, `test_booking_security.py`. **377 passing.**
+`test_booking_availability.py`, `test_booking_views.py`, `test_booking_security.py`; 4.4:
+`test_calendar_views.py`. **424 passing.**
 Run with
 `venv\Scripts\python.exe -m pytest -q apps/scheduling`. Fixtures live in the repo-root `conftest.py` (two
 tenants, three locations, owner/manager/staff users, and client fixtures that activate a location through the
