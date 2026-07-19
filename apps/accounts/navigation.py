@@ -42,6 +42,14 @@ LIVE_LINKS = {
     # click from the sidebar. The dashboard is the reachable proof that
     # customer-scoped login works, so it is this sub-module's representative link.
     '0.1': {'Dashboard': 'accounts:dashboard'},
+    '0.2': {'Change Password': 'accounts:change_password',
+            'Change Email': 'accounts:change_email'},
+    '0.3': {'My Profile': 'accounts:profile',
+            'Users': 'accounts:user_list'},
+    # The assigned-location list is the dashboard's "Your locations" table; the
+    # switcher itself lives in the topbar, since it applies to every page rather
+    # than being somewhere you navigate to.
+    '0.4': {'My Locations': 'accounts:dashboard'},
 }
 
 
