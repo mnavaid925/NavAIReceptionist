@@ -65,13 +65,17 @@ class ServiceForm(TenantModelForm):  # noqa: F405
         # The service's CURRENT location must stay in the choices even when the
         # editor is not assigned to it.
         #
-        # `service_edit_view` deliberately lets any signed-in tenant user open any
-        # service — the catalogue is business-wide. So a Downtown-only receptionist
-        # can legitimately open an Uptown-pinned service to fix a typo. If Uptown
-        # were missing from the options, nothing would render as selected, the
-        # browser would fall back to the first option — the blank "All locations"
-        # — and saving an unrelated description edit would SILENTLY widen the
-        # service to every site. No error, no warning, wrong data.
+        # NOTE: `service_edit_view` ALSO refuses outright (redirects before this
+        # form is even built) when the editor is not assigned to a PINNED
+        # service's location, so through that view the instance's own location
+        # is always already inside `allowed` by the time we get here. This union
+        # is still load-bearing, though: it is what protects any OTHER caller of
+        # this form (a future API, a management command, a test constructing the
+        # form directly) that does not re-implement the view's own guard. Without
+        # it, an unassigned editor's `<select>` would render without the pinned
+        # option at all, the browser would fall back to the first option — the
+        # blank "All locations" — and saving an unrelated edit would SILENTLY
+        # widen the service to every site. No error, no warning, wrong data.
         #
         # This union keeps the current value selectable and selected. Narrowing
         # still holds for everything else: the user cannot MOVE the service to a
