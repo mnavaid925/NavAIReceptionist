@@ -1,0 +1,33 @@
+{% comment %}
+  Filter bar for the location directory.
+
+  `status` is a plain string compared with `==` against the raw GET value. The
+  view validates it against the two known values, so a junk parameter degrades to
+  no filter rather than raising.
+{% endcomment %}
+<form class="card card-body flex flex-wrap items-end gap-3" method="get">
+
+  <div class="form-group grow">
+    <label class="form-label" for="f-q">Search</label>
+    <input class="form-input" type="search" id="f-q" name="q"
+           placeholder="Name, city, postcode or phone"
+           value="{{ request.GET.q|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-status">Status</label>
+    <select class="form-select" id="f-status" name="status">
+      <option value="">All locations</option>
+      <option value="active" {% if request.GET.status == 'active' %}selected{% endif %}>Active only</option>
+      <option value="inactive" {% if request.GET.status == 'inactive' %}selected{% endif %}>Inactive only</option>
+    </select>
+  </div>
+
+  <div class="form-group">
+    <span class="flex gap-2">
+      <button type="submit" class="btn btn-primary"><i data-lucide="filter"></i> Filter</button>
+      <a class="btn btn-outline" href="{{ request.path }}">Reset</a>
+    </span>
+  </div>
+
+</form>
