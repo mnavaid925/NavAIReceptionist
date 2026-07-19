@@ -11,6 +11,9 @@ from django.urls import include, path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    # Module 1 is mounted under a prefix; accounts owns the site root, so it must
+    # be included LAST or its catch-all dashboard route would shadow everything.
+    path('manage/', include('apps.tenants.urls')),
     path('', include('apps.accounts.urls')),
 ]
 
