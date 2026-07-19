@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Contacts{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Contacts</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Calendar &amp; Bookings</li>
+        <li>Contacts</li>
+      </ol>
+    </nav>
+    <a class="btn btn-primary" href="{% url 'scheduling:contact_create' %}">
+      <i data-lucide="user-plus"></i> Add contact
+    </a>
+  </div>
+</div>
+
+{% include "scheduling/directory/contact/_filters.html" %}
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header">
+    <span>{{ total_count }} contact{{ total_count|pluralize }}</span>
+    {% comment %}
+      The business name, NOT the active location. Contacts are tenant-scoped and
+      shared across every site, so showing the active location here would imply a
+      filter that does not exist.
+    {% endcomment %}
+    <span class="text-muted">{{ active_tenant.name }} &mdash; all locations</span>
+  </div>
+  <div class="card-body">
+
+    {% if contacts %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">Phone</th>
+              <th scope="col">Email</th>
+              <th scope="col">Source</th>
+              <th scope="col">Added</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in contacts %}
+              <tr>
+                <td>
+                  <a href="{% url 'scheduling:contact_detail' c.pk %}">{{ c.display_name }}</a>
+                  {% if not c.has_name %}
+                    <span class="badge badge-muted">No name yet</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if c.phone_e164 %}
+                    {{ c.phone_e164|phone_e164 }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if c.email %}
+                    {{ c.email }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if c.source == 'ai_phone' %}
+                    <span class="badge badge-info">AI phone call</span>
+                  {% elif c.source == 'manual' %}
+                    <span class="badge badge-slate">Added manually</span>
+                  {% elif c.source == 'web' %}
+                    <span class="badge badge-green">Web</span>
+                  {% else %}
+                    <span class="badge badge-muted">{{ c.get_source_display }}</span>
+                  {% endif %}
+                </td>
+                <td><time datetime="{{ c.created_at|date:'c' }}">{{ c.created_at|date:"j M Y" }}</time></td>
+                <td>
+                  <span class="table-actions">
+                    <a class="btn btn-icon" href="{% url 'scheduling:contact_detail' c.pk %}"
+                       aria-label="View {{ c.display_name }}" title="View">
+                      <i data-lucide="eye"></i>
+                    </a>
+                    <a class="btn btn-icon" href="{% url 'scheduling:contact_edit' c.pk %}"
+                       aria-label="Edit {{ c.display_name }}" title="Edit">
+                      <i data-lucide="pencil"></i>
+                    </a>
+                    {% comment %}
+                      A real delete, unlike Location's deactivate — a person who
+                      asks to be forgotten must actually go. Appointment.contact
+                      is PROTECT, so a contact with bookings is refused by the
+                      view rather than silently taking history with it.
+                      Management tiers only; the view re-checks.
+                    {% endcomment %}
+                    {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+                      <form method="post" action="{% url 'scheduling:contact_delete' c.pk %}"
+                            onclick="return confirm('Delete {{ c.display_name|escapejs }}? This cannot be undone.');">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-icon"
+                                aria-label="Delete {{ c.display_name }}" title="Delete">
+                          <i data-lucide="trash-2"></i>
+                        </button>
+                      </form>
+                    {% endif %}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/_pagination.html" %}
+
+    {% else %}
+      {% url 'scheduling:contact_create' as create_url %}
+      {% include "partials/_empty_state.html" with icon="user-round-search" title="No contacts match" message="Try clearing the filters. The agent also adds a contact automatically the first time a new number rings." action_url=create_url action_label="Add contact" %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
