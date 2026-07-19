@@ -14,6 +14,7 @@ urlpatterns = [
     # Module 1 is mounted under a prefix; accounts owns the site root, so it must
     # be included LAST or its catch-all dashboard route would shadow everything.
     path('manage/', include('apps.tenants.urls')),
+    path('agent/', include('apps.agents.urls')),
     path('', include('apps.accounts.urls')),
 ]
 
