@@ -1,0 +1,23 @@
+{% comment %}
+  The account area's tab strip — Module 0 (Accounts & Access) rendered as tabs
+  rather than as a sidebar section.
+
+  `account_tabs` comes from apps.accounts.context_processors.navigation via
+  build_account_tabs(), which already drops tabs the user's tier cannot open and
+  any whose url does not resolve. Every page in the account area includes this, so
+  the strip is defined once and cannot drift between them.
+
+  aria-current marks the active tab for screen readers; the colour alone is not
+  sufficient state.
+{% endcomment %}
+{% if account_tabs %}
+  <nav class="tabs" aria-label="Account sections">
+    {% for tab in account_tabs %}
+      <a class="tab {% if tab.is_active %}active{% endif %}"
+         href="{{ tab.url }}"
+         {% if tab.is_active %}aria-current="page"{% endif %}>
+        <i data-lucide="{{ tab.icon }}"></i> {{ tab.label }}
+      </a>
+    {% endfor %}
+  </nav>
+{% endif %}
