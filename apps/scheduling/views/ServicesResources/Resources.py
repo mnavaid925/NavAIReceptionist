@@ -12,8 +12,17 @@ from django.db.models import Q
 from apps.scheduling.forms import ResourceForm
 from apps.scheduling.models import Resource
 from apps.scheduling.views._common import *  # noqa: F401,F403
+from apps.scheduling.views._helpers import save_or_report_conflict
 
 logger = logging.getLogger(__name__)
+
+#: Shown when two writers race for the same name at one site.
+#: `ResourceForm.clean_name` catches the ordinary case; this covers the window
+#: between that check and the insert, where the DB constraint fires instead.
+_NAME_CONFLICT = (
+    'Someone just added a resource with that name at this location. '
+    'Give this one a different name.'
+)
 
 __all__ = [
     'resource_list_view',
@@ -104,16 +113,17 @@ def resource_create_view(request):
     form = ResourceForm(request.POST or None, request=request)
 
     if request.method == 'POST' and form.is_valid():
-        obj = form.save()
-        logger.info(
-            'Resource created resource_id=%s location_id=%s by user_id=%s',
-            obj.pk, obj.location_id, request.user.pk,
-        )
-        messages.success(  # noqa: F405
-            request,
-            f'{obj.display_label} has been added to {request.location.name}.',
-        )
-        return redirect('scheduling:resource_detail', pk=obj.pk)  # noqa: F405
+        obj = save_or_report_conflict(form, _NAME_CONFLICT)
+        if obj is not None:
+            logger.info(
+                'Resource created resource_id=%s location_id=%s by user_id=%s',
+                obj.pk, obj.location_id, request.user.pk,
+            )
+            messages.success(  # noqa: F405
+                request,
+                f'{obj.display_label} has been added to {request.location.name}.',
+            )
+            return redirect('scheduling:resource_detail', pk=obj.pk)  # noqa: F405
 
     return render(request, 'scheduling/catalog/resource/form.html', {  # noqa: F405
         'form': form,
@@ -129,13 +139,13 @@ def resource_edit_view(request, pk):
     form = ResourceForm(request.POST or None, instance=obj, request=request)
 
     if request.method == 'POST' and form.is_valid():
-        form.save()
-        logger.info('Resource updated resource_id=%s by user_id=%s',
-                    obj.pk, request.user.pk)
-        messages.success(  # noqa: F405
-            request, f'{obj.display_label} has been updated.'
-        )
-        return redirect('scheduling:resource_detail', pk=obj.pk)  # noqa: F405
+        if save_or_report_conflict(form, _NAME_CONFLICT) is not None:
+            logger.info('Resource updated resource_id=%s by user_id=%s',
+                        obj.pk, request.user.pk)
+            messages.success(  # noqa: F405
+                request, f'{obj.display_label} has been updated.'
+            )
+            return redirect('scheduling:resource_detail', pk=obj.pk)  # noqa: F405
 
     return render(request, 'scheduling/catalog/resource/form.html', {  # noqa: F405
         'form': form,
