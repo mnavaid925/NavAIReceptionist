@@ -72,6 +72,7 @@ urlpatterns = [
     path('profile/', views.profile_view, name='profile'),
 
     # -- 0.4 Active Location Switcher ------------------------------------- #
+    path('locations/', views.my_locations_view, name='my_locations'),
     path('locations/switch/', views.switch_location_view, name='switch_location'),
 ]
 
