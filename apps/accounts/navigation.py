@@ -37,7 +37,11 @@ MODULE_ICONS = {
 # BUILD STATE. One entry per built sub-module. Add exactly one per module run.
 # ---------------------------------------------------------------------------
 LIVE_LINKS = {
-    # "0.1": {"Users": "accounts:user_list"},
+    # 0.1's four features are all pre-authentication surfaces (login, logout,
+    # forgot/reset password, throttling) — none is a page a signed-in user would
+    # click from the sidebar. The dashboard is the reachable proof that
+    # customer-scoped login works, so it is this sub-module's representative link.
+    '0.1': {'Dashboard': 'accounts:dashboard'},
 }
 
 
