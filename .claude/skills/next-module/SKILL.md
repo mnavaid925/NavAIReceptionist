@@ -34,7 +34,7 @@ module. Read them whenever you are unsure how something should look.
 
 ## Project conventions
 
-- **Stack:** Django 5.1, **Django Channels/ASGI** for the realtime Twilio media-stream websocket (**all-Django, one
+- **Stack:** Django 4.2 LTS, **Django Channels/ASGI** for the realtime Twilio media-stream websocket (**all-Django, one
   codebase, no separate microservice**), **function-based views** with `@login_required`, **Tailwind CSS (Play CDN)
   + HTMX + Lucide**, MySQL/MariaDB (XAMPP) via PyMySQL. DB is **`navai_receptionist`**. `AUTH_USER_MODEL =
   'accounts.User'`. Run Python through the venv: `venv\Scripts\python.exe manage.py ...` (PowerShell) — Django is
