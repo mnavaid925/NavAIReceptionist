@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}Working hours{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Working hours</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li>Business &amp; Locations</li>
+      <li>Working hours</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  Who is bookable, where, and when — the question availability search asks on
+  every call. One row per (provider, assigned location) pair, because the same
+  person legitimately works different days at different sites.
+{% endcomment %}
+<div class="card">
+  <div class="card-header">
+    <span>{{ provider_count }} provider{{ provider_count|pluralize }}</span>
+    <span class="text-muted">{{ active_tenant.name }}</span>
+  </div>
+  <div class="card-body">
+
+    {% if rows %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Provider</th>
+              <th scope="col">Location</th>
+              {% for key, label in weekdays %}
+                <th scope="col">{{ label|slice:":3" }}</th>
+              {% endfor %}
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr>
+                <td>
+                  <span class="flex items-center gap-2">
+                    <span class="avatar-initial" aria-hidden="true">{{ row.provider.initials }}</span>
+                    <span>{{ row.provider.display_name }}</span>
+                  </span>
+                </td>
+                <td>
+                  {{ row.location.name }}
+                  <span class="block text-muted text-xs">{{ row.location.timezone }}</span>
+                </td>
+                {% for key, label, intervals in row.summary %}
+                  <td>
+                    {% if intervals %}
+                      {% for interval in intervals %}
+                        <span class="block text-xs">{{ interval.start_time|time:"H:i" }}&ndash;{{ interval.end_time|time:"H:i" }}</span>
+                      {% endfor %}
+                    {% else %}
+                      <span class="text-muted">&mdash;</span>
+                    {% endif %}
+                  </td>
+                {% endfor %}
+                <td>
+                  <span class="table-actions">
+                    {% if not row.is_configured %}
+                      <span class="badge badge-amber">Not set</span>
+                    {% elif not row.intervals %}
+                      <span class="badge badge-muted">Not working</span>
+                    {% endif %}
+                    <a class="btn btn-icon"
+                       href="{% url 'tenants:provider_hours' row.provider.pk row.location.pk %}"
+                       aria-label="Edit hours for {{ row.provider.display_name }} at {{ row.location.name }}"
+                       title="Edit hours">
+                      <i data-lucide="pencil"></i>
+                    </a>
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      {% url 'tenants:staff_locations' as staff_url %}
+      {% include "partials/_empty_state.html" with icon="clock" title="No bookable providers" message="Mark a user as a provider and assign them to a location, then their working hours can be set here." action_url=staff_url action_label="Manage staff" %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
