@@ -1373,3 +1373,460 @@ context budget. `code-reviewer`, `explorer`, `security-reviewer` and `test-write
 findings are applied. **Run the four skipped agents against `apps/scheduling` and
 `templates/scheduling/catalog/` in a fresh session before treating 4.2 as fully closed.** Note that
 `realtime-reviewer` will find nothing — this sub-module has no async surface.
+
+---
+# Sub-module 4.3 — Availability & Booking (Module 4: Calendar & Bookings, `scheduling`) — plan from research-scheduling-4.3.md (2026-07-19)
+
+## Shape: CRUD (EXTEND run — `apps/scheduling` already exists from 4.1/4.2, no scaffolding)
+
+One genuinely new tenant-**and**-location-scoped table, `scheduling.Appointment` (confirmed absent by
+`research-scheduling-4.3.md`'s own repo sweep), so this is CRUD-shaped. It ships full list/create/detail/
+edit/delete per the CRUD Completeness Rule, **plus** a non-model availability-search/booking service the
+future voice tools (Module 3.3) will call. **EXTEND run**: `apps/scheduling/apps.py`, `INSTALLED_APPS`,
+`config/urls.py`'s `scheduling/` include and `config/asgi.py` are already wired from 4.1 and are untouched.
+New artifacts: one `Bookings/` sub-folder in each of `models/ forms/ views/ urls/` (per the invoking
+instruction — this sub-module's short PascalCase form is `Bookings`, not `AvailabilityBooking`), one new
+flat file `apps/scheduling/services.py` (availability + booking logic — a single-purpose flat module per
+CLAUDE.md Backend rule 8, which lists `services.py` by name), migration `0003_…`, and an idempotent
+extension of `seed_scheduling.py` **plus** a small, additive extension of `seed_accounts.py` (see Backend —
+`provider_hours` has no data to search without it). `booked_by_session` is explicitly **omitted** this pass
+— `apps/calls` has zero files, and Django refuses `makemigrations` against a string FK to an uninstalled
+app; it lands as an additive migration when Module 5 creates `calls.CallSession`, per the invoking
+instruction. No placeholder field stands in for it.
+
+## Models (from research — 1, within the 1–3 ceiling)
+
+- [ ] **`scheduling.Appointment`** — `TenantLocationOwned` (verified base class, `apps/scheduling/models/
+  _base.py`; SKILL.md already documents `Appointment` as one of the three `TenantLocationOwned` models in
+  this app). Tenant **and** location scoped — both required, `on_delete=CASCADE` on both, inherited.
+  - `contact` — FK `scheduling.Contact` (verified: `models/ContactDirectory/Contacts.py`),
+    `on_delete=models.PROTECT`, `related_name='appointments'` — **per the ERD, not `CASCADE`/`SET_NULL`**.
+    This is what forces the erasure path the skill's "Delete vs erase" section already anticipates: once
+    this lands, a `Contact` with bookings raises `ProtectedError` on hard delete and must be anonymized
+    instead. Availability Search / Booking Provenance driver.
+  - `provider` — FK `settings.AUTH_USER_MODEL`, `null=True, blank=True, on_delete=models.SET_NULL,
+    related_name='provider_appointments'` — Availability Search (provider working-hours) driver. Never
+    `CASCADE`: a deleted staff account should not delete the appointment history, just detach from it.
+  - `resource` — FK `scheduling.Resource` (verified), `null=True, blank=True, on_delete=models.SET_NULL,
+    related_name='appointments'` — Resource Exclusivity driver. Matches the **on_delete intent 4.2's own
+    todo already stated in advance** ("`Appointment.service`/`Appointment.resource` will be
+    `on_delete=SET_NULL, null=True`" — 4.2 plan, "FK intent for 4.3's Appointment").
+  - `service` — FK `scheduling.Service` (verified), `null=True, blank=True, on_delete=models.SET_NULL,
+    related_name='appointments'` — Duration + Buffer Subtraction driver (`service.total_minutes`).
+  - `start_at`, `end_at` — `DateTimeField()`, both required — Timezone-Correct Evaluation driver; always
+    written/read as tz-aware values evaluated against `location.tzinfo`, never `timezone.localtime()`'s
+    server default.
+  - `status` — `CharField(max_length=24, db_index=True, default='scheduled', choices=STATUS_CHOICES)`,
+    `STATUS_CHOICES = [('scheduled','Scheduled'),('confirmed','Confirmed'),('completed','Completed'),
+    ('cancelled','Cancelled'),('no_show','No-show')]` — Reschedule & Cancel + No-Show-as-distinct-status
+    driver. `SCHEDULED_LIKE = ('scheduled', 'confirmed')` class constant — the "still live" set every guard
+    below checks against.
+  - `reason` — `CharField(max_length=255, blank=True)` — why the appointment was booked (caller-dictated on
+    the AI path — untrusted text, same PII discipline as `Contact.notes`).
+  - `notes` — `TextField(blank=True)` — staff/agent notes, same discipline; renders `|linebreaksbr`, never
+    `|safe`.
+  - `source` — `CharField(max_length=16, choices=SOURCE_CHOICES, default='manual')`,
+    `SOURCE_CHOICES = [('ai_phone','AI Phone'),('manual','Manual'),('web','Web')]` — mirrors
+    `Contact.SOURCE_*`. Booking Provenance driver — **server-stamped, never a form field**: the manual
+    create view hard-codes `source='manual'`; the future tool path (3.3) hard-codes `source='ai_phone'`.
+  - `cancelled_at` — `DateTimeField(null=True, blank=True)` — Reschedule & Cancel driver.
+  - `cancellation_reason` — `CharField(max_length=255, blank=True)` — Reschedule & Cancel driver.
+  - **`booked_by_session` — NOT included this pass.** Model docstring states explicitly: *"Module 5 adds
+    `booked_by_session` (FK `calls.CallSession`, null, `SET_NULL`) as an additive migration once
+    `apps/calls` exists. Until then an `ai_phone` row has no back-link to the call that created it."*
+  - **No `number` field.** CLAUDE.md's own Seed Command Rules use `APPT-00001` as an illustrative example
+    of the (already-built, currently-unused) `TenantNumbered` abstract base, but the ERD given for this
+    sub-module does not list a `number` field and no researched feature asks for one — adding it would be
+    an uncommitted schema guess. `TenantNumbered` stays unused this pass (see Deferred). Seeder dedup keys
+    on `(tenant, location, contact, start_at)` instead of a number.
+  - `Meta.indexes`: `models.Index(fields=['tenant','location','start_at'], name='idx_appt_tenant_loc_start')`
+    (the live-call availability hot path), `models.Index(fields=['tenant','status'],
+    name='idx_appt_tenant_status')`, `models.Index(fields=['tenant','contact'], name='idx_appt_tenant_contact')`
+    — all three straight from the ERD. `Meta.ordering = ['start_at']`.
+  - Methods: `is_editable` (property, `status in SCHEDULED_LIKE`), `cancel(reason)` (stamps
+    `status='cancelled'`, `cancelled_at=timezone.now()`, `cancellation_reason=reason`, `save(update_fields=…)`
+    — reused by both the staff cancel view and the future `cancel_appointment` tool via `services.py`),
+    `__str__` (`f"{self.contact} — {self.start_at:%Y-%m-%d %H:%M}"`).
+
+## Availability service module, slot token & concurrency (the non-model half of this pass)
+
+- [ ] **Location decision: `apps/scheduling/services.py`, flat at the app root** — not inside the
+  `Appointments.py` entity file, not under `views/_helpers.py`. Justification: CLAUDE.md Backend rule 8
+  explicitly names `services.py` as one of the canonical flat single-purpose modules every app keeps at its
+  root (`admin.py, apps.py, services.py, consumers.py, routing.py, …`); this is pure business logic with no
+  Django request/response shape, called by BOTH the human-facing views in this pass and the not-yet-built
+  LLM tools in 3.3 — putting it in `views/` would force 3.3 to import a `views` module for non-view logic.
+  Note the name collision risk with the `scheduling.Service` **model** is real but accepted — it is the
+  file CLAUDE.md itself names; the module docstring calls this out explicitly so nobody "fixes" it into
+  `Services.py`/`availability.py` later.
+- [ ] Module-level constants (no `settings.py`/model field — research's own recommendation: "a simple
+  settings constant for this pass, not a new field"): `MIN_BOOKING_NOTICE_MINUTES = 60`,
+  `MAX_OFFERED_SLOTS = 5` (the Server-Capped Slot Set), `SLOT_GRID_MINUTES = 15` (candidate start-time
+  granularity within a provider's working window), `SLOT_TOKEN_SALT = 'scheduling.slot'`,
+  `SLOT_TOKEN_TTL_SECONDS = 300` (5 minutes — long enough for a multi-turn phone confirmation or a staff
+  form submit, short enough that a stale offer cannot be redeemed hours later).
+- [ ] `overlapping_appointments(tenant, location, start_at, end_at, resource=None, provider=None,
+  exclude_pk=None)` — the ONE overlap query every other function below reuses: non-cancelled
+  (`status__in=Appointment.SCHEDULED_LIKE`) rows at `(tenant, location)` whose window intersects
+  `[start_at, end_at)`, `OR`ed across `resource=`/`provider=` when supplied (Provider AND Resource Must
+  Both Clear — a busy room with a free provider is still unbookable, and vice versa).
+- [ ] `slot_is_free(...)` — `not overlapping_appointments(...).exists()`. Used directly by
+  `AppointmentForm.clean()` for the plain staff-typed-time path (no token involved).
+- [ ] `find_available_slots(tenant, location, service, date_from, date_to, resource=None, provider=None,
+  max_slots=MAX_OFFERED_SLOTS)` — **pure read, no write.** For each day in range × each eligible provider
+  (working-hours source: `provider.provider_hours[str(location.id)]`, filtered to that weekday's `days`
+  entry, parsed against `location.tzinfo` — Timezone-Correct Evaluation) × each 15-minute grid start: builds
+  a candidate span of `service.total_minutes` (Duration + Buffer Subtraction), drops it if it starts before
+  `location.local_now() + MIN_BOOKING_NOTICE_MINUTES` (Minimum Notice), drops it if `service.requires_resource`
+  and no eligible `Resource` at that location clears `slot_is_free` for that window (Resource Exclusivity —
+  `Resource` carries no capacity, one appointment fully occupies it), drops it if the chosen provider does
+  not independently clear `slot_is_free` too. Sorts soonest-first, returns at most `max_slots` — **capped
+  server-side, never model- or client-controlled** (Server-Capped Slot Set). Reused verbatim by the
+  human-facing create/reschedule slot-picker AND (once built) 3.3's `get_availability` tool — one function,
+  two callers, per research's explicit "slot count independent of the booking-form UI" finding.
+- [ ] `_mint_slot(tenant, location, service, provider, resource, start_at, end_at)` — the **opaque signed
+  slot token**. Payload: `{"tenant_id", "location_id", "service_id", "provider_id", "resource_id",
+  "start_at" (isoformat), "end_at" (isoformat)}` — semantic fields the SERVER put there, never fields the
+  model is asked to construct. `signing.dumps(payload, salt=SLOT_TOKEN_SALT)` — same
+  `django.core.signing` pattern as `EMAIL_CHANGE_SALT` in `apps/accounts/views/Auth.py`. Returns
+  `{"slot_token", "starts_at", "ends_at", "provider_label", "resource_label"}` — **display fields only**;
+  the model/human never needs to know or send back a raw resource/provider id.
+- [ ] `redeem_slot_token(token, tenant, location)` — `signing.loads(token, salt=SLOT_TOKEN_SALT,
+  max_age=SLOT_TOKEN_TTL_SECONDS)`, catching `signing.BadSignature` → `(None, {"code": "slot_expired", ...})`
+  (covers tampering, wrong salt AND expiry in one branch, matching the established `email_change_confirm`
+  pattern). **Defense in depth**: the decoded payload's own `tenant_id`/`location_id` are cross-checked
+  against the SERVER-HELD `tenant`/`location` arguments (never trusted alone) → `(None, {"code":
+  "not_permitted", ...})` on mismatch. This is what stops a token minted for one location being replayed
+  against another location's active context.
+- [ ] **Concurrency mechanism, named explicitly: `transaction.atomic()` + `select_for_update()` on the
+  overlap queryset, re-checked AFTER the lock is taken, inside `book_appointment_from_slot()` /
+  `reschedule_appointment()`.** No distributed/Redis-style lock (research explicitly rejects one — no
+  cache/lock service in this project's scope). Sequence: (1) open `transaction.atomic()`; (2)
+  `Appointment.objects.select_for_update().filter(<the overlap predicate>)` and force materialization
+  (`list(...)`) so the row lock is actually taken before the next step, not deferred; (3) re-run
+  `slot_is_free()` inside the lock — if a concurrent writer committed a conflicting row between the
+  availability search and this write, it is visible now and the call returns `{"ok": false, "error":
+  {"code": "slot_unavailable", ...}}`; (4) only then create/update the row. **Honest limit, stated so a
+  reviewer doesn't assume otherwise: there is no portable DB-level range-exclusion constraint on
+  MySQL/MariaDB** (unlike Postgres's `EXCLUDE USING gist`), so this transactional check-under-lock IS the
+  enforcement, not a belt-and-suspenders addition to one. On the production MySQL/MariaDB backend, a second
+  writer's `select_for_update()` genuinely blocks until the first transaction commits, then re-sees the
+  just-committed conflict on its own re-check — this is what actually prevents the double-book. On SQLite
+  (pytest, `config.settings_test`) the whole-database write lock is coarser but still correctness-preserving
+  for a same-process race test. Plan a test that opens two overlapping `book_appointment_from_slot()` calls
+  against the same resource/provider/window and asserts the second gets `slot_unavailable`, not a duplicate
+  row and not a raw `IntegrityError`.
+- [ ] **Idempotent booking write — the exact mechanism.** No new DB table, no cached token registry. Inside
+  the same locked transaction, before insert: look for an existing non-cancelled `Appointment` at
+  `(tenant, location, contact, start_at, end_at, resource_id, provider_id)` matching the token's own
+  decoded payload exactly. If found, **return that row**, not a new one — a retried tool call (model
+  timeout-retry, or a double-submitted form) redeeming the SAME token twice is a no-op on the second call,
+  not a duplicate booking and not an error.
+- [ ] `book_appointment_from_slot(token, tenant, location, contact, source, reason='', notes='',
+  actor_contact_id=None)` → `(appointment_or_None, error_dict_or_None)`. `actor_contact_id` is an optional
+  forward parameter — `None` for every call in THIS pass (the staff-facing create view never sets it); when
+  3.3 lands, the tool passes the server-identified `contact_id` and this function is where Invariant 3's
+  "authorized server-side against tenant, location AND the identified contact" gets enforced for booking.
+- [ ] `reschedule_appointment(appointment, token, tenant, location, actor_contact_id=None)` → same
+  `(obj_or_None, error_dict_or_None)` shape. Guards `appointment.status in Appointment.SCHEDULED_LIKE` first
+  (`{"code": "invalid_argument", ...}` otherwise), then the same redeem → lock → re-check → write sequence,
+  updating `start_at`/`end_at`/`resource`/`provider` on the **same row** — never a bare field edit outside
+  this function, matching the research finding verbatim. When `actor_contact_id` is supplied and does not
+  match `appointment.contact_id` → `{"code": "not_permitted", ...}` (Invariant 3, wired now even though no
+  caller sets it yet).
+- [ ] `cancel_appointment(appointment, reason, actor_contact_id=None)` → same shape, guards
+  `SCHEDULED_LIKE`, stamps via the model's own `cancel(reason)` method, same `actor_contact_id` check.
+- [ ] Error codes used above are exactly the closed set from CLAUDE.md's tool-result envelope:
+  `slot_unavailable`, `slot_expired`, `not_permitted`, `invalid_argument` — no ad-hoc string invented.
+
+## Backend (apps/scheduling/{models,forms,views,urls}/Bookings/ — EXTEND, append re-exports)
+
+Models:
+- [ ] `apps/scheduling/models/Bookings/__init__.py`
+- [ ] `apps/scheduling/models/Bookings/Appointments.py` — the `Appointment` model above
+- [ ] **APPEND** to `apps/scheduling/models/__init__.py`: `from apps.scheduling.models.Bookings.Appointments
+  import Appointment`, extend `__all__` to `['Contact', 'Service', 'Resource', 'Appointment']`, extend the
+  module docstring's sub-module-folder list with `* Bookings/  — 4.3  Appointment`
+
+Services (flat, not a package):
+- [ ] `apps/scheduling/services.py` — all functions/constants above
+
+Forms:
+- [ ] `apps/scheduling/forms/Bookings/__init__.py`
+- [ ] `apps/scheduling/forms/Bookings/Appointments.py` — `AppointmentForm(TenantLocationModelForm)`,
+  `tenant_scoped_fields = ('contact',)`, `Meta.fields = ('contact', 'service', 'provider', 'resource',
+  'start_at', 'end_at', 'reason', 'notes', 'status')`. `__init__`: narrows `service` via the reused
+  `_bookable_here()` helper from `views/ServicesResources/Services.py` (`Service.objects.filter(tenant=self
+  .tenant, is_active=True)` passed through it — additive nullable-location filter, per the skill's own
+  gotcha), narrows `resource` to `Resource.objects.filter(tenant=self.tenant, location=self.location,
+  is_active=True)`, narrows `provider` to `User.objects.filter(tenant=self.tenant, is_provider=True,
+  user_locations__location=self.location).distinct()` (bespoke — `User` is not itself location-scoped via a
+  plain FK, so this is hand-written, not the generic `location_scoped_fields` helper). On **create**
+  (`not self.instance.pk`): pops `status` (server-stamped `'scheduled'` in the view). On **edit**
+  (`self.instance.pk` set): sets `start_at`, `end_at`, `provider`, `resource` to `disabled=True` — Django's
+  real disabled-field mechanism (ignores POST, keeps the instance value) — because time/resource/provider
+  changes go through the dedicated Reschedule action's slot-locking machinery, never a bare field edit
+  (research finding, enforced structurally here); restricts `status`'s choices to exclude `'cancelled'`
+  (cancel has its own dedicated reason-requiring action). `clean()`: rejects `end_at <= start_at`; on
+  create only, calls `slot_is_free(...)` with the cleaned `resource`/`provider` and raises a friendly
+  `ValidationError` on conflict (edit's time fields are disabled, so no re-check needed there).
+- [ ] **APPEND** to `apps/scheduling/forms/__init__.py`: import `AppointmentForm`, extend `__all__`
+
+Views:
+- [ ] `apps/scheduling/views/Bookings/__init__.py`
+- [ ] `apps/scheduling/views/Bookings/Appointments.py`:
+  - [ ] `_location_appointments(request)` — `Appointment.objects.filter(tenant=request.tenant,
+    location=request.location).select_related('contact', 'provider', 'resource', 'service')` — **both**
+    filters always (fully location-scoped, like `Resource`, not business-wide like `Contact`)
+  - [ ] `appointment_list_view` — `@login_required` only. Filters applied before pagination: `q` search
+    across `contact__first_name`/`contact__last_name`/`contact__phone_e164` via `Q()`; `status` GET param
+    against `Appointment.STATUS_CHOICES`, junk degrades to no filter; `date_from`/`date_to` GET params
+    (`YYYY-MM-DD`, parsed defensively — an unparseable value degrades to no filter, never a 500) against
+    `start_at__date__gte`/`__lte`. Passes `status_choices=Appointment.STATUS_CHOICES` (Filter Rule 1).
+    **Provider/resource/service dropdown filters and contact-name search enrichment are 4.5's job** (parked
+    below) — this pass ships the baseline CLAUDE.md mandates: search + one categorical filter + a date
+    range, all applied before pagination, all degrading gracefully.
+  - [ ] `appointment_create_view` — `@login_required`. **Dual path**: if `request.POST.get('slot_token')` is
+    present, calls `services.book_appointment_from_slot(token, request.tenant, request.location,
+    contact=<posted contact>, source='manual')` — ignores any raw posted `start_at`/`end_at` (the token is
+    authoritative); on `(None, error)` re-renders the form with `error['message']` attached via
+    `form.add_error(None, ...)`. Otherwise falls back to the plain `AppointmentForm` path (`request=request`),
+    server-stamps `obj.status = 'scheduled'` and `obj.source = 'manual'` before save, wraps the whole write
+    in `transaction.atomic()` with the same lock-then-recheck sequence as `services.py` (extracted so both
+    paths share the exact same overlap semantics — do not duplicate the check inline).
+  - [ ] `appointment_slots_view` (GET, `@login_required`) — reads `service` (required — degrade to an
+    empty-slots response with a message if missing/invalid), `date_from`/`date_to` (default: today .. today
+    +14, clamped to that window even if the client asks for more), optional `resource`/`provider` GET
+    preferences (pk values authorised against `request.tenant`/`request.location` querysets, junk → ignored,
+    never trusted blind). Calls `services.find_available_slots(...)`. Renders the
+    `_slot_picker.html` partial (HTMX endpoint — no full page).
+  - [ ] `appointment_detail_view` — `@login_required`; shows contact/provider/resource/service, status
+    badge, reason/notes (`|linebreaksbr`), cancellation details when cancelled. Actions sidebar per CRUD
+    rule 3: Edit + Reschedule + Cancel all conditional on `obj.status in Appointment.SCHEDULED_LIKE`; Delete
+    conditional on tier; Back to List always.
+  - [ ] `appointment_edit_view` — `@login_required`; **guards `obj.status in Appointment.SCHEDULED_LIKE`**
+    before rendering/accepting POST (redirect to detail with a message otherwise — a completed/cancelled/
+    no-show appointment is a record of what happened, not editable, mirroring the project's own
+    `CallSession`-has-no-edit-view precedent applied here to terminal statuses). `AppointmentForm(request
+    .POST or None, instance=obj, request=request)` — time/provider/resource render disabled per the form's
+    own `__init__` logic; only `contact`/`service`/`reason`/`notes`/`status` (non-`cancelled` choices)
+    actually change.
+  - [ ] `appointment_reschedule_view` (GET + POST, `@login_required`) — same `SCHEDULED_LIKE` guard. GET:
+    renders `reschedule.html` with the slot picker pre-scoped to the appointment's own `service`/`location`
+    (via the same `appointment_slots_view` HTMX endpoint, `hx-vals` carrying the appointment pk for context
+    only — never trusted as an identity source, the pk is re-fetched with the tenant+location guard on
+    POST). POST: requires `slot_token` (no raw-entry escape hatch — unlike create, research's own finding
+    is enforced with no exception here); calls `services.reschedule_appointment(obj, token, request.tenant,
+    request.location)`; on success redirects to detail with a success message, on error re-renders with
+    `error['message']`.
+  - [ ] `appointment_cancel_view` (GET + POST, `@login_required`) — same `SCHEDULED_LIKE` guard. GET: shows
+    `cancel.html`, a small reason form (`cancellation_reason`, required — a bare confirm() dialog cannot
+    collect free text, unlike `contact_forget`'s simpler POST+JS-confirm shape). POST: calls
+    `services.cancel_appointment(obj, reason)`, redirects to detail with a success message on success.
+  - [ ] `appointment_delete_view` — `@login_required` + `tier_required(*MANAGEMENT_TIERS)` (the ONE
+    tier-gated view in this sub-module, per the confirmed access tier), `@require_POST`. Hard delete, **no**
+    status guard (management cleanup action, matches the unconditional tier-gated delete already
+    established for `Contact`/`Service`/`Resource`). Redirects to list with a success message.
+- [ ] **APPEND** to `apps/scheduling/views/__init__.py`: import all eight new views (`appointment_list`,
+  `appointment_create`, `appointment_slots`, `appointment_detail`, `appointment_edit`,
+  `appointment_reschedule`, `appointment_cancel`, `appointment_delete`), extend `__all__`
+
+URLs:
+- [ ] `apps/scheduling/urls/Bookings/__init__.py`
+- [ ] `apps/scheduling/urls/Bookings/Appointments.py` — literal-before-`<int:pk>`, checked against the
+  WHOLE concatenated `urls/__init__.py` list, not just this file (no collision: `appointments/` is a new,
+  disjoint prefix from `contacts/`/`services/`/`resources/`): `appointments/` → `appointment_list`,
+  `appointments/create/` → `appointment_create`, `appointments/slots/` → `appointment_slots`,
+  `appointments/<int:pk>/` → `appointment_detail`, `appointments/<int:pk>/edit/` → `appointment_edit`,
+  `appointments/<int:pk>/reschedule/` → `appointment_reschedule`, `appointments/<int:pk>/cancel/` →
+  `appointment_cancel`, `appointments/<int:pk>/delete/` → `appointment_delete`
+- [ ] **APPEND** to `apps/scheduling/urls/__init__.py` (do not rewrite): import the new `urlpatterns` list,
+  concatenate it onto the existing `urlpatterns = list(contact_directory_urlpatterns) + service_urlpatterns
+  + resource_urlpatterns`
+
+- [ ] `apps/scheduling/admin.py` — **APPEND** `AppointmentAdmin` (`list_display=('__str__', 'tenant',
+  'location', 'status', 'source', 'start_at')`, `list_filter=('tenant', 'location', 'status', 'source')`,
+  `search_fields=('contact__first_name', 'contact__last_name', 'contact__phone_e164')`,
+  `list_select_related=('tenant', 'location', 'contact', 'provider', 'resource', 'service')`,
+  `readonly_fields=('cancelled_at',)`) — do not touch `ContactAdmin`/`ServiceAdmin`/`ResourceAdmin`
+- [ ] `makemigrations scheduling` → expect `0003_appointment` (one new model, no FK to `calls` — nothing to
+  break `makemigrations` this time, unlike the deferred field)
+- [ ] **EXTEND** `apps/accounts/management/commands/seed_accounts.py`'s `DEMO_USERS` user-creation loop —
+  after each `is_provider=True` user's `UserLocation` rows are created, also stamp `provider_hours` on that
+  user, keyed by each assigned location's **resolved id** (Mon–Fri 09:00–17:00 default), because
+  `find_available_slots()` has no candidate window to search without it. Only two users need this today:
+  `acme_downtown` (Marco Reyes, Downtown only) and `globex_riverside` (Tom Bergstrom, Riverside only). A
+  plain field assignment + `save(update_fields=['provider_hours'])`, idempotent by construction (same
+  deterministic value every run, not an append). This is an additive edit to an EXISTING seeder file, not a
+  new one — its own commit, per the one-file-per-commit rule.
+- [ ] **EXTEND** `apps/scheduling/management/commands/seed_scheduling.py` idempotently — do not create a
+  new seeder file. Add `_seed_appointments(tenants)` after `_seed_services`/`_seed_resources`, reusing the
+  already-seeded `Contact`/`Service`/`Resource`/provider `User` rows by lookup (never re-invent them).
+  Cover **at least one appointment at every demo location** (Downtown, Uptown, Riverside, Lakeside — the
+  "seed multiple locations" rule, doubly important here since Uptown/Lakeside have no assigned provider and
+  must prove `provider=None` appointments still work), spanning all five `status` values across the two
+  tenants combined, at least one `requires_resource=True` service with a `resource` attached and one
+  `requires_resource=False` service with none, and at least one `ai_phone`-sourced row (Booking Provenance —
+  what 3.3 will eventually attach `booked_by_session` to). Dedup key: `(tenant, location, contact, start_at)`
+  existence check before create (no `number` field to key on this pass — see Models). Update the seeder's
+  module docstring's "Sub-modules seeded so far" list to add `* 4.3  Appointment — bookings across every
+  demo location, spanning every status and both resource-required and resource-free services.`
+
+## Realtime & agent surface
+
+No consumer, no `routing.py` entry this pass — `scheduling` still has no websocket route. **No LLM tool is
+implemented in this sub-module** (confirmed by research: "4.3 itself ships no LLM tools"). What it ships
+instead is the forward contract Module 3.3 will build its tools on top of, documented here so that plan has
+a verified contract rather than re-deriving one:
+- [ ] `get_availability` (future) → calls `services.find_available_slots(tenant, location, service,
+  date_from, date_to, resource=None, provider=None)` with `tenant`/`location` from **server-side session
+  state**, never tool parameters (Invariant 3); returns `data.slots` = the list `find_available_slots`
+  already produces, each entry carrying only `slot_token` + display fields.
+- [ ] `book_appointment` (future) → calls `services.book_appointment_from_slot(token, tenant, location,
+  contact, source='ai_phone', reason=<model arg>, notes=<model arg>)` — `contact`/`tenant`/`location` from
+  server state (the identified caller), `source` hard-coded `'ai_phone'` never a model arg, `slot_token`
+  is the only identity-shaped argument the model supplies and it is opaque.
+- [ ] `reschedule_appointment` (future) → calls `services.reschedule_appointment(appointment, token, tenant,
+  location, actor_contact_id=<server-identified contact>)` — `appointment_id` the model supplies is
+  resolved server-side (`get_object_or_404(Appointment, pk=appointment_id, tenant=tenant, location=location)`)
+  BEFORE being handed to this function, and `actor_contact_id` is what makes the "authorised against the
+  identified contact" half of Invariant 3 real, not just documented.
+- [ ] `cancel_appointment` (future) → calls `services.cancel_appointment(appointment, reason,
+  actor_contact_id=<server-identified contact>)`, same authorization shape.
+- [ ] All four return the `{"ok": bool, "data": {...}, "error": {"code", "message"} | null}` envelope at
+  the tool layer (3.3's job to wrap); `services.py`'s own functions return `(value, error_dict_or_None)`
+  tuples this pass, which is what 3.3 wraps into that envelope — not the envelope itself, since this
+  sub-module has no dispatcher to envelope for.
+
+## Prompt / variables
+
+None. No new entry on `agents.AgentSetting.variables` — availability/booking is tool-driven (a live DB
+read at the moment of the call), never baked into the static prompt, matching 4.2's own established finding
+("tool over static prompt").
+
+## Provider adapter
+
+None. `apps/runtime/providers/` untouched — this sub-module is pure ORM/DB logic, no Twilio/STT/TTS/LLM
+call.
+
+## CallSession.usage cost lines
+
+None. `calls.CallSession` does not exist yet (Module 5).
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` — add **exactly one** new entry: `'4.3': {'Appointments':
+  'scheduling:appointment_list'}` (singular label matching the 4.1/4.2 plural-entity-name convention;
+  `MODULE_ICONS['4']` unchanged)
+- [ ] `config/settings.py` — **untouched**, `'apps.scheduling'` already in `INSTALLED_APPS`
+- [ ] `config/urls.py` — **untouched**, `path('scheduling/', include('apps.scheduling.urls'))` already present
+- [ ] `config/asgi.py` — **untouched**, no websocket surface this pass
+- [ ] `AUTH_USER_MODEL` — **N/A**, already declared before Module 0's first `makemigrations`
+
+## Templates (templates/scheduling/bookings/appointment/)
+
+New sub-module slug `bookings`, per CLAUDE.md's own worked example for `apps/scheduling`
+(`calendar/ bookings/ directory/ catalog/ callbacks/`); one entity folder underneath it (`appointment/`)
+since 4.3 owns one model.
+
+- [ ] `templates/scheduling/bookings/appointment/list.html` — filter bar reflecting `request.GET` (`q`,
+  `status` `<select>` from `status_choices`, `date_from`/`date_to`), a status badge per row using the
+  canonical badge map applied to Appointment's own choices — `scheduled`→`badge-info`,
+  `confirmed`→`badge-info`, `completed`→`badge-green`, `cancelled`→`badge-muted`, `no_show`→`badge-red`,
+  `{% else %}` fallback to `{{ obj.get_status_display }}` (no `badge-purple`), Actions column
+  (view/edit/reschedule/cancel all wrapped in `{% if obj.status == 'scheduled' or obj.status == 'confirmed'
+  %}`, delete POST+confirm+csrf wrapped in the tier check), pagination with `has_previous`/`has_next`
+  guards, empty-state ("No appointments yet — book the first one.")
+- [ ] `templates/scheduling/bookings/appointment/detail.html` — full field display (contact, provider,
+  resource, service, start/end in the location's local time, reason, notes via `|linebreaksbr`,
+  cancellation block when cancelled), status badge, Actions sidebar per CRUD rule 3 (Edit/Reschedule/Cancel
+  conditional on status, Delete conditional on tier, Back to List)
+- [ ] `templates/scheduling/bookings/appointment/form.html` — shared create/edit; renders contact, service,
+  provider, resource, start_at, end_at, reason, notes (+ status on edit only, per the form's own logic);
+  includes `_slot_picker.html` via HTMX on create only, with a "or enter a time directly" fallback section
+  for the plain-entry path
+- [ ] `templates/scheduling/bookings/appointment/_slot_picker.html` — HTMX partial, `MAX_OFFERED_SLOTS`
+  buttons/radios labelled with the display fields (`starts_at`, `provider_label`, `resource_label`), each
+  posting its own `slot_token`; empty-state ("No open slots in this window — try a different date range.")
+- [ ] `templates/scheduling/bookings/appointment/reschedule.html` — the slot-picker-only flow (no raw-entry
+  fallback), shows the appointment's current time for reference, submits `slot_token`
+- [ ] `templates/scheduling/bookings/appointment/cancel.html` — reason `<textarea>` (required), confirm/
+  cancel buttons, csrf
+
+## Verify
+
+- [ ] `makemigrations scheduling` + `migrate` — expect `0003_appointment`, an incremental migration
+- [ ] `seed_accounts` ×2 — second run leaves `provider_hours` unchanged (idempotent field stamp, not a
+  duplicate row); `seed_scheduling` ×2 — second run reports the new `Appointment` rows as already present
+- [ ] `manage.py check` — no new issues
+- [ ] `PROVIDER_MODE=fake` — asserted even though this sub-module makes no provider call
+- [ ] `pytest` — model tests (`Appointment.contact` really is `PROTECT`, `resource`/`service` really are
+  `SET_NULL`, `Meta.ordering`, the three indexes exist), `services.py` tests (`find_available_slots`
+  respects working hours/buffer/min-notice/resource-exclusivity/timezone, `slot_is_free` catches an overlap
+  on `resource` alone and on `provider` alone, `redeem_slot_token` rejects tampering/wrong-salt/expiry/
+  wrong-location, **the concurrency race test**: two overlapping `book_appointment_from_slot()` calls
+  against the same window → the second gets `slot_unavailable`, not a duplicate row, **the idempotency
+  test**: redeeming the SAME token twice returns the same `Appointment.pk` both times), form tests
+  (`AppointmentForm` narrows service/resource/provider correctly, disables time/provider/resource on edit,
+  rejects `end_at <= start_at`), view tests (list search/filter/pagination, create via both the slot-token
+  path and the plain-entry path, detail/edit/reschedule/cancel/delete, the `SCHEDULED_LIKE` guard blocking
+  edit/reschedule/cancel on a completed/cancelled/no_show row), all under `apps/scheduling/tests/`
+- [ ] **Replace** `test_views.py`'s `TODO(4.3 / Module 5)` regression guard (currently asserting
+  `_appointments_for`/`_call_sessions_for` return `None`) with the real cross-location assertion its own
+  docstring specifies: a user assigned only to location A1 sees an appointment of this contact's at A1 but
+  NOT one at A2 (same tenant, different location) — `_appointments_for` needs no code change (it is already
+  written and import-guarded), only its test does
+- [ ] Twilio webhook signature + idempotency — **N/A**, this sub-module ships no webhook
+- [ ] websocket connect/reject — **N/A**, this sub-module ships no consumer
+- [ ] `temp/` smoke sweep as `admin_acme` (password `navai-demo-2026`, from `seed_accounts.py`) covering
+  every new `scheduling:appointment_*` url: 200/302, no `{#`/`{% comment` leaks, page titles, a seeded
+  record visible; **cross-tenant IDOR** — `admin_acme` requesting a `globex` appointment detail/edit/
+  reschedule/cancel/delete by pk gets 404; **cross-location IDOR** — `admin_acme` switched to Downtown
+  requesting an Uptown appointment by pk gets 404; a `slot_token` minted for Downtown redeemed while the
+  active location is Uptown returns `not_permitted`, not a cross-location booking; the status guard actually
+  blocks edit/reschedule/cancel GET on a `completed` row (redirect, not a 200 with a live form)
+- [ ] Sidebar shows `4.3` Live under Module 4, "Appointments" link resolves
+
+## Close-out
+
+- [ ] Review agents: `code-reviewer` → `explorer` → `frontend-reviewer` → `performance-reviewer` →
+  `realtime-reviewer` (expected to find nothing — no realtime surface this pass, same as 4.2) →
+  `qa-smoke-tester` → `security-reviewer` (confirm `reason`/`notes` PII discipline, confirm the slot-token
+  payload never leaks a raw resource/provider id anywhere logged) → `test-writer`
+- [ ] **UPDATE** `.claude/skills/scheduling/SKILL.md` — **do not re-author**. Flip the Build State table row
+  for 4.3 to **BUILT**, add `Appointment` to Models (with the `PROTECT`/`SET_NULL`/`SET_NULL` on_delete
+  contrast spelled out and the `booked_by_session` deferral noted), add the new routes, the new
+  `templates/scheduling/bookings/` entries, document `apps/scheduling/services.py` and its four public
+  functions as a new subsection, replace the "no realtime surface" line's forward-looking tool contract
+  with the concrete `get_availability`/`book_appointment`/`reschedule_appointment`/`cancel_appointment`
+  signatures under Tools & prompt surface, extend the seeder rows (both `seed_scheduling` AND the
+  `provider_hours` addition to `seed_accounts`), and remove the now-resolved `test_views.py` TODO note
+- [ ] README — note the new Appointments page only if the project README already enumerates 4.1/4.2's pages
+
+## Later passes / deferred
+
+Carried over verbatim from `research-scheduling-4.3.md`'s own Deferred section, plus this pass's own:
+
+- `booked_by_session` FK — blocked on Module 5 (`calls.CallSession`) existing; additive migration then.
+- A distributed/pessimistic slot-lock cache (Redis TTL lock) — `select_for_update()` inside
+  `transaction.atomic()` is the right-sized equivalent for this single-DB deployment.
+- A waitlist/re-offer-on-cancellation entity (NexHealth) — no entity in the ERD, not asked for.
+- Per-service or per-location minimum-notice override field (Acuity) — `MIN_BOOKING_NOTICE_MINUTES` stays a
+  flat module constant this pass; a real field is a well-scoped future addition, not an uncommitted guess.
+- Cancellation-cutoff-window enforcement — the researched market leader (Calendly) does not enforce this
+  server-side either; not invented here.
+- `TenantNumbered`/`APPT-00001` numbering on `Appointment` — considered and rejected, not merely deferred:
+  the ERD given for this sub-module carries no `number` field and no researched feature asks for one.
+- Appointment list filters by provider/resource/service, and search-by-contact enrichment → **4.5 Bookings
+  List & Callback Requests** (this pass ships only the CLAUDE.md-mandated baseline: `q`, `status`, date
+  range).
+- Day/week calendar grid, resource/provider column toggle, slot click-through, status colouring → **4.4
+  Calendar Views** (a view sub-module — reads `Appointment`, ships no model).
+- The actual LLM tool registration/dispatch wiring (the `apply_tool_call` branches, the tool-result
+  envelope construction around `services.py`'s `(value, error)` tuples) → **Module 3.3**. 4.3 supplies the
+  model + `services.py`; it registers no tool itself.
+- `CallbackRequest` CRUD → **4.5**.
+
+## Review notes
+
+(filled in at the end)
