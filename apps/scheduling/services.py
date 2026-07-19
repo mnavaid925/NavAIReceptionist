@@ -25,6 +25,11 @@ _MIN_E164_DIGITS = 7
 
 _NON_DIGITS = re.compile(r'\D')
 
+# Anything from an extension marker onwards is a DIFFERENT number — a desk
+# extension behind a switchboard. Stripping non-digits blindly would splice those
+# digits onto the end of the main number and produce a line nobody can ring.
+_EXTENSION = re.compile(r'(?:\bx|\bext\.?|#|,|;)\s*\d+\s*$', re.IGNORECASE)
+
 
 def normalize_e164(value, default_country_code=DEFAULT_COUNTRY_CODE):
     """Return `value` as an E.164 string (`+13125550142`), or `''`.
@@ -47,17 +52,21 @@ def normalize_e164(value, default_country_code=DEFAULT_COUNTRY_CODE):
     if not value:
         return ''
 
-    raw = str(value).strip()
+    raw = _EXTENSION.sub('', str(value).strip())
     has_plus = raw.startswith('+')
     digits = _NON_DIGITS.sub('', raw)
 
     if not digits:
         return ''
 
-    if not has_plus:
-        if digits.startswith('00'):
-            digits = digits[2:]
-        elif len(digits) <= 10:
+    # `00` is the international access prefix and stands in for the `+`. Handled
+    # before the has_plus branch because `+00442079460958` carries BOTH — a
+    # redundancy people really do type — and leaving the `00` in place would
+    # store a number that looks E.164 but rings nothing.
+    if digits.startswith('00'):
+        digits = digits[2:]
+    elif not has_plus:
+        if len(digits) <= 10:
             # A national number typed without its country code. 10 digits is the
             # NANP length; anything shorter is likely an extension or a typo, but
             # prefixing is still the best guess available.
