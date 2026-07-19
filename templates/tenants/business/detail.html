@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}Business settings{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Business settings</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Business &amp; Locations</li>
+        <li>Settings</li>
+      </ol>
+    </nav>
+    {% if can_edit %}
+      <a class="btn btn-primary" href="{% url 'tenants:business_settings_edit' %}">
+        <i data-lucide="pencil"></i> Edit
+      </a>
+    {% endif %}
+  </div>
+</div>
+
+{% if tenant %}
+  <div class="grid gap-4 lg:grid-cols-3">
+
+    <div class="lg:col-span-2 card">
+      <div class="card-header">
+        <span>{{ tenant.name }}</span>
+        {% if tenant.is_active %}
+          <span class="badge badge-green">Active</span>
+        {% else %}
+          <span class="badge badge-red">Suspended</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <dl class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <dt class="form-label">Business name</dt>
+            <dd class="m-0">{{ tenant.name }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Default timezone</dt>
+            <dd class="m-0">{{ tenant.timezone }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Customer ID</dt>
+            <dd class="m-0"><code>{{ tenant.customer_id }}</code></dd>
+          </div>
+          <div>
+            <dt class="form-label">Identifier</dt>
+            <dd class="m-0"><code>{{ tenant.slug }}</code></dd>
+          </div>
+          <div>
+            <dt class="form-label">Locations</dt>
+            <dd class="m-0">{{ active_location_count }} active of {{ location_count }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Created</dt>
+            <dd class="m-0"><time datetime="{{ tenant.created_at|date:'c' }}">{{ tenant.created_at|date:"j M Y" }}</time></dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+
+    <aside class="space-y-4">
+      <div class="card">
+        <div class="card-header"><span>Signing in</span></div>
+        <div class="card-body">
+          <p class="text-muted">
+            Everyone at this business signs in with the Customer ID
+            <strong>{{ tenant.customer_id }}</strong>, then their own email or
+            username and password.
+          </p>
+        </div>
+      </div>
+
+      {% comment %}
+        These three are shown but never editable in-product. The reasons are
+        specific, not caution: the Customer ID is what resolves the business at
+        login, so a typo would lock out every member of staff with no way back in;
+        the identifier has no user-visible effect; and suspending the business
+        blocks the next login for everyone, which is a platform action rather than
+        something a business can do to itself from a page its own staff reach.
+      {% endcomment %}
+      <div class="card">
+        <div class="card-header"><span>Locked settings</span></div>
+        <div class="card-body">
+          <p class="text-muted">
+            The Customer ID, identifier and active status cannot be changed here.
+            Changing them affects whether anyone can sign in at all, so they are
+            handled by support rather than self-service.
+          </p>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+{% else %}
+  {% include "partials/_empty_state.html" with icon="building-2" title="No business on this account" message="The platform superuser is not attached to a business. Sign in as a tenant admin to manage business settings." %}
+{% endif %}
+{% endblock %}
