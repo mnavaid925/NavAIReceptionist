@@ -880,4 +880,64 @@ Sub-module slug `directory` per CLAUDE.md's own worked example for `apps/schedul
 
 ## Review notes
 
-(filled in at the end)
+### Built
+
+`scheduling` scaffolded as a brand-new app (four packages + `services.py` + `admin.py` + the management tree),
+mounted at `/schedule/`, registered in `INSTALLED_APPS`, and lit up in the sidebar via `LIVE_LINKS['4.1']`.
+One model — `scheduling.Contact`, tenant-scoped and deliberately not location-scoped. Six views: list (search +
+source filter + pagination), create, detail, edit, delete, forget. 25 files, one commit each.
+
+Verified by `temp/verify_4_1.py`: **70/70 checks green** — every page 200/302 as an Acme admin, no template
+comment leaks, filters and search working (including national-format phone search matching a stored E.164 row),
+junk `?source=`/`?page=` degrading rather than raising, cross-tenant IDOR to 404 on detail/edit/delete/forget,
+delete POST-only (405 on GET), seeder idempotent across three consecutive runs, and
+`makemigrations --check` clean.
+
+### Deviations from this plan, and why
+
+1. **CSV import/export not built** (planned at lines 727–734 and 814–825). The four documented feature bullets
+   for 4.1 in `NavAIReceptionist.md` are phone-keyed contacts, list & search, create/edit/detail, and
+   business-wide identity — import/export is none of them, and the research doc rates it `common`, not
+   required. Deferred deliberately under "Simplicity First" to keep the fourteen-sub-module run tractable.
+   It is a clean later addition: one view, one form, one `directory/contact/import.html`, and two buttons on
+   the list page. **`code-reviewer` flagged this as an undocumented deviation — this note is the fix.**
+
+2. **`contact_forget_view` was initially skipped and then built after review.** This was a genuine miss, not a
+   judgement call: the research doc marks the GDPR/CCPA erasure path REQUIRED, and `code-reviewer` correctly
+   caught that once 4.3 adds `Appointment.contact` with `on_delete=PROTECT`, a contact with any booking
+   history becomes permanently unerasable — "delete my data" would be unanswerable for exactly the people who
+   have used the business most. Now shipped as anonymize-in-place.
+
+### Decisions worth carrying forward
+
+* **`Contact.anonymized_at` is not in the ERD.** Added anyway — the ERD is intent and the code is truth, and
+  erasure had no other durable marker; without one an erased contact is indistinguishable from a caller who
+  simply never gave a name. Erasure blanks name/phone/email/DOB/notes and keeps the row and its pk.
+* **`phone_e164` is indexed only through the composite `(tenant, phone_e164)`.** The single-column
+  `db_index=True` was dropped on `performance-reviewer` routing from `code-reviewer`: every query in this app
+  is tenant-scoped by Invariant, so the composite's leading column already covers it, and the bare index was
+  a second index write serving no query.
+* **`phone_e164` is deliberately NOT unique.** A household, a switchboard or a shared mobile legitimately maps
+  to several people; a unique constraint would make the second one unsaveable. The duplicate path warns
+  instead of blocking, and the detail page shows an "Also on this number" panel.
+* **The initial migration was rebuilt rather than stacked with an `0002`**, since the app was one commit old
+  and unpushed.
+
+### Bugs found and fixed during the build
+
+* **The seeder was not idempotent.** Its dedupe lookup compared the raw spec value while `Contact.save()`
+  normalises on write, so the one deliberately-unnormalised seed row (`3125550188`) re-created itself on every
+  run. Fixed by normalising inside the lookup. This is precisely the failure the idempotency rule exists to
+  catch, and it only surfaced because the seed data includes an unnormalised number on purpose.
+* **`normalize_e164` mishandled two inputs** (found by `code-reviewer`): `+00442079460958` kept its redundant
+  `00` and stored a number that looks E.164 but rings nothing, and blind non-digit stripping spliced a
+  trailing extension (`x205`) onto the end of the main number. Both fixed and covered in the verify script.
+* **Two template partial includes passed the wrong context name** — `_appointment_status_badge.html` and
+  `_call_status_badge.html` both take `obj=`, not `appointment=`/`session=`. Caught by reading the partials
+  rather than assuming; would have rendered silently blank once 4.3 and Module 5 land.
+
+### Note on verification method
+
+An early idempotency check reported a false failure because the command was piped to `head`, which closed the
+pipe, killed the process on `BrokenPipeError` and rolled back the `@transaction.atomic` seeder. **Pipe seed and
+migrate commands to `tail`, never `head`.**
