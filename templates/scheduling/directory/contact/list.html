@@ -52,7 +52,7 @@
               <tr>
                 <td>
                   <a href="{% url 'scheduling:contact_detail' c.pk %}">{{ c.display_name }}</a>
-                  {% if not c.has_name %}
+                  {% if not c.has_name and not c.is_anonymized %}
                     <span class="badge badge-muted">No name yet</span>
                   {% endif %}
                 </td>
@@ -71,7 +71,9 @@
                   {% endif %}
                 </td>
                 <td>
-                  {% if c.source == 'ai_phone' %}
+                  {% if c.is_anonymized %}
+                    <span class="badge badge-slate">Erased</span>
+                  {% elif c.source == 'ai_phone' %}
                     <span class="badge badge-info">AI phone call</span>
                   {% elif c.source == 'manual' %}
                     <span class="badge badge-slate">Added manually</span>
@@ -88,10 +90,12 @@
                        aria-label="View {{ c.display_name }}" title="View">
                       <i data-lucide="eye"></i>
                     </a>
-                    <a class="btn btn-icon" href="{% url 'scheduling:contact_edit' c.pk %}"
-                       aria-label="Edit {{ c.display_name }}" title="Edit">
-                      <i data-lucide="pencil"></i>
-                    </a>
+                    {% if not c.is_anonymized %}
+                      <a class="btn btn-icon" href="{% url 'scheduling:contact_edit' c.pk %}"
+                         aria-label="Edit {{ c.display_name }}" title="Edit">
+                        <i data-lucide="pencil"></i>
+                      </a>
+                    {% endif %}
                     {% comment %}
                       A real delete, unlike Location's deactivate — a person who
                       asks to be forgotten must actually go. Appointment.contact
