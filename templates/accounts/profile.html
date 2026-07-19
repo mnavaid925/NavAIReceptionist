@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}My profile{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">My profile</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li>Accounts</li>
+      <li>My profile</li>
+    </ol>
+  </nav>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    {% comment %}
+      This form carries name and phone only. Email is changed through the
+      confirmed flow, and role, status and provider-flag are privileged fields
+      edited by an owner or manager — putting any of them here would let any user
+      promote themselves.
+    {% endcomment %}
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-header"><span>Your details</span></div>
+
+        <div class="card-body grid gap-4 sm:grid-cols-2">
+          {% if form.non_field_errors %}
+            <div class="alert alert-red sm:col-span-2" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+
+        <div class="card-header">
+          <span class="text-muted">Signed in as {{ user.email }}</span>
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i> Save profile
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside class="space-y-4">
+
+    <div class="card">
+      <div class="card-header"><span>Account</span></div>
+      <div class="card-body">
+        <dl class="grid gap-3">
+          <div>
+            <dt class="form-label">Business</dt>
+            <dd class="m-0">{{ active_tenant.name|default:"None" }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Customer ID</dt>
+            <dd class="m-0">{{ active_tenant.customer_id|default:"&mdash;" }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Role</dt>
+            <dd class="m-0"><span class="badge badge-slate">{{ user.get_tier_display }}</span></dd>
+          </div>
+          <div>
+            <dt class="form-label">Sign-in email</dt>
+            <dd class="m-0">{{ user.email }}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Security</span></div>
+      <div class="card-body grid gap-2">
+        <a class="btn btn-outline w-full" href="{% url 'accounts:change_password' %}">
+          <i data-lucide="key-round"></i> Change password
+        </a>
+        <a class="btn btn-outline w-full" href="{% url 'accounts:change_email' %}">
+          <i data-lucide="mail"></i> Change email address
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Your locations</span>
+        <span class="text-muted">{{ assigned_locations|length }}</span>
+      </div>
+      <div class="card-body">
+        {% if assigned_locations %}
+          <ul class="grid gap-2" style="list-style: none; margin: 0; padding: 0;">
+            {% for location in assigned_locations %}
+              <li class="flex items-center justify-between gap-2">
+                <span>{{ location.name }}</span>
+                {% if active_location and location.pk == active_location.pk %}
+                  <span class="badge badge-info">Active</span>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="text-muted">You are not assigned to any location yet.</p>
+        {% endif %}
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
