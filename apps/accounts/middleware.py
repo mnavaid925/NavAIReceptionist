@@ -18,6 +18,7 @@ import time
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import logout
+from django.utils import timezone as django_timezone
 from django.contrib.auth.views import redirect_to_login
 
 ACTIVE_LOCATION_SESSION_KEY = 'active_location_id'
@@ -62,7 +63,33 @@ class ActiveLocationMiddleware:
 
     def __call__(self, request):
         request.location = self._resolve(request)
-        return self.get_response(request)
+
+        # Render every datetime in the ACTIVE LOCATION's timezone.
+        #
+        # Django stores datetimes in UTC (USE_TZ) and renders them in
+        # `settings.TIME_ZONE`, which is UTC here. Without this, a 15:00 booking
+        # at an America/Chicago site displays as 15:00 to the receptionist
+        # standing in that site at 09:00 — silently wrong, on every page, with
+        # nothing to indicate it.
+        #
+        # This is the project rule ("appointment and transfer-hours calculations
+        # are evaluated in the location's own timezone, never the server's and
+        # never the browser's") applied at the one place that makes it true for
+        # every template at once, rather than per-view and forgotten somewhere.
+        #
+        # Deactivate when there is no active location so a request never inherits
+        # the previous one's zone — threads are reused between requests.
+        if request.location is not None:
+            django_timezone.activate(request.location.tzinfo)
+        else:
+            django_timezone.deactivate()
+
+        try:
+            return self.get_response(request)
+        finally:
+            # Leave the thread as we found it. A leaked activation would follow
+            # this worker into the next request, for a different location.
+            django_timezone.deactivate()
 
     def _resolve(self, request):
         user = getattr(request, 'user', None)
