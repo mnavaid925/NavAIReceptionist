@@ -74,9 +74,10 @@
                href="{% url 'scheduling:appointment_detail' block.appointment.pk %}"
                style="--slot-start: {{ block.top_px }}; --slot-span: {{ block.height_px }};
                       inset-inline: auto;
-                      left: calc({{ block.lane }} * (100% - 8px) / {{ block.lane_count }} + 4px);
-                      width: calc((100% - 8px) / {{ block.lane_count }});"
-               title="{{ block.appointment.contact.display_name }} — {{ block.appointment.get_status_display }}{% if block.clipped %} (runs past midnight){% endif %}">
+                      inset-inline-start: calc({{ block.lane }} * (100% - 8px) / {{ block.lane_count }} + 4px);
+                      inline-size: calc((100% - 8px) / {{ block.lane_count }});"
+               title="{{ block.appointment.contact.display_name }} — {{ block.appointment.get_status_display }}{% if block.clipped %} (runs past midnight){% endif %}"
+               aria-label="{{ block.appointment.start_at|date:'H:i' }} {{ block.appointment.contact.display_name }}, {{ block.appointment.get_status_display }}{% if block.appointment.service %}, {{ block.appointment.service.name }}{% endif %}">
               <span class="calendar-event-time">
                 {{ block.appointment.start_at|date:"H:i" }}{% if block.clipped %} &rarr;{% endif %}
               </span>
