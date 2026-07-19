@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block title %}{% if is_edit %}Edit {{ obj.display_label }}{% else %}Add resource{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{% if is_edit %}Edit {{ obj.display_label }}{% else %}Add resource{% endif %}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'scheduling:resource_list' %}">Resources</a></li>
+      <li>{% if is_edit %}Edit{% else %}Add{% endif %}</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  One template serves create and edit.
+
+  Neither `tenant` nor `location` is rendered — TenantLocationModelForm stamps
+  both from the request. Unlike a Service, a resource has no all-locations case:
+  it is a physical thing at the site you are working in, so there is no choice to
+  offer and rendering a location select would only be a way to file a room under
+  the wrong branch.
+{% endcomment %}
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-body grid gap-4 sm:grid-cols-2">
+
+          {% if form.non_field_errors %}
+            <div class="alert alert-red sm:col-span-2" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group{% if field.name == 'description' %} sm:col-span-2{% endif %}">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+
+        </div>
+
+        <div class="card-header">
+          {% if is_edit %}
+            <a class="btn btn-outline" href="{% url 'scheduling:resource_detail' obj.pk %}">Cancel</a>
+          {% else %}
+            <a class="btn btn-outline" href="{% url 'scheduling:resource_list' %}">Cancel</a>
+          {% endif %}
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i>
+            {% if is_edit %}Save changes{% else %}Add resource{% endif %}
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Adding to</span></div>
+      <div class="card-body">
+        {% if active_location %}
+          <p><strong>{{ active_location.name }}</strong></p>
+          <p class="text-muted">
+            Resources belong to one site. To add a room at another branch, switch
+            location first &mdash; the same name is fine at both.
+          </p>
+        {% else %}
+          <p class="text-muted">
+            No location chosen. Pick the site you are working in before adding
+            resources to it.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Rooms, not people</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          A resource is a physical thing an appointment occupies &mdash; a room, a
+          chair, a scanner. The staff member performing the appointment is set on
+          the booking itself, so do not add people here.
+        </p>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
