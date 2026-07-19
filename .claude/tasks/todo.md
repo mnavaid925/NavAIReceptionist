@@ -1891,3 +1891,320 @@ by the verify sweep.
 
 The dev database holds a stray `acme-lakeview` location left by an earlier session's QA agent. Not seeder
 output; `seed_tenants --flush` clears it.
+
+---
+# Sub-module 4.4 — Calendar Views (Module 4: Calendar & Bookings, `scheduling`) — plan from research-scheduling-4.4.md (2026-07-20)
+
+## Shape: VIEW — zero new models, zero migrations
+
+All four bullets (Day & Week Grid, By Resource and By Provider, Slot Click-Through, Status Colouring) read
+`scheduling.Appointment`, built in 4.3, plus `scheduling.Resource`/`accounts.User` for column headers and
+`scheduling.Contact` for block labels — all grep-verified to already exist. Inventing a `CalendarEvent` or
+similar table here would be the exact bug the view branch exists to prevent. **Acceptance criterion:**
+`venv\Scripts\python.exe manage.py makemigrations scheduling --check` must print "No changes detected."
+
+## Models (NONE — view sub-module, zero models, zero migrations)
+
+Tables READ: `scheduling.Appointment` (`start_at`/`end_at`/`status`/`contact`/`provider`/`resource`/
+`service`, all tenant+location scoped), `scheduling.Resource` (by-resource column headers),
+`accounts.User` (by-provider column headers, `is_provider`/`status=STATUS_ACTIVE`/`user_locations`),
+`tenants.Location` (`.tzinfo`, `.local_now()`), `scheduling.Contact` (block label, already
+`select_related` by the reused queryset). No FK is added to any of them.
+
+## Backend (apps/scheduling/{views,urls}/CalendarViews/ — no models/ or forms/ folder, this pass adds neither)
+
+- [ ] **Refactor first (CLAUDE.md Backend Package Structure rule 5):** `_location_appointments`,
+  `_parse_local_date`, `_authorised_pk`, `_location_providers`, `_location_resources` currently live as
+  "private" helpers inside `views/Bookings/Appointments.py`. 4.4 is a SECOND sub-module that needs all five,
+  which is exactly the rule's trigger ("used by more than one sub-module go in `views/_helpers.py`").
+  Move all five into `apps/scheduling/views/_helpers.py` (new file); `Bookings/Appointments.py` imports them
+  from there instead of defining them (`from apps.scheduling.views._helpers import (...)`); no behaviour
+  change, pure relocation. `_save_booking_under_lock` and `_bookable_services` stay in `Bookings/Appointments.py`
+  — only 4.3's own create/edit path uses them.
+- [ ] `apps/scheduling/views/CalendarViews/__init__.py` — empty, makes the package importable (matches
+  `Bookings/__init__.py`'s pattern)
+- [ ] `apps/scheduling/views/CalendarViews/Calendar.py` — `calendar_day_view(request)`,
+  `calendar_week_view(request)`, both `@login_required` only (no tier gate — reading the calendar is
+  front-desk work, same posture as list/detail across 4.1–4.3), plus module-private geometry helpers:
+  `_visible_window(location, day, items)`, `_bucket_by_column(items, by, columns)`, `_lane_pack(items)`,
+  `_hour_marks(window_start, window_end)`. Constants: `CALENDAR_WINDOW_START_HOUR = 7`,
+  `CALENDAR_WINDOW_END_HOUR = 19`, `PX_PER_SLOT = 26` (matches the shipped `.calendar-slot { height: 26px }`),
+  `PX_PER_MINUTE = PX_PER_SLOT / SLOT_GRANULARITY_MINUTES` (imported from `apps.scheduling.availability`,
+  never a second hardcoded `15`).
+- [ ] `apps/scheduling/urls/CalendarViews/__init__.py` — empty
+- [ ] `apps/scheduling/urls/CalendarViews/Calendar.py` — `path('calendar/', calendar_day_view,
+  name='calendar_day')`, `path('calendar/week/', calendar_week_view, name='calendar_week')`. Distinct
+  `calendar/` prefix — checked against the whole concatenated `urls/__init__.py` list (contacts/, services/,
+  resources/, appointments/ prefixes) and does not collide with any `<int:pk>` route.
+- [ ] `urls/__init__.py` — import and concatenate `calendar_urlpatterns` (own section comment, "4.4 Calendar
+  Views")
+- [ ] `views/__init__.py` — import and re-export `calendar_day_view`, `calendar_week_view`
+- [ ] `models/__init__.py`, `forms/__init__.py` — **untouched**, this pass adds neither layer
+- [ ] `admin.py` — **N/A**, no new model to register
+- [ ] **Additive change to the EXISTING `appointment_create_view`** (`views/Bookings/Appointments.py`) for
+  slot click-through — see "Slot Click-Through wiring" below; this is a same-file edit, not a new view
+- [ ] `apps/scheduling/tests/test_calendar_views.py`, `apps/scheduling/tests/test_calendar_security.py` —
+  new test files (see Verify)
+- [ ] Extend `seed_scheduling` idempotently (see Wire-up → Seeder below) — no migration implied
+
+## Realtime & agent surface
+
+**N/A — this sub-module has no realtime surface**, exactly like every prior `scheduling` sub-module (per
+`.claude/skills/scheduling/SKILL.md`: "no `consumers/`, no `routing.py`, no `async def`"). It registers no
+LLM tool, adds no prompt variable, calls no provider adapter, and appends nothing to
+`calls.CallSession.usage` (`calls.CallSession` does not exist yet, and 4.4 makes no provider call regardless).
+
+## Design decisions (from research, made concrete)
+
+- [ ] **Two views, two URL names, not one `?view=day|week` view.** Day = many columns/one date; Week = one
+  chosen column's whole week — different column semantics (resource/provider vs. day-of-week), different
+  geometry, different templates. A single view branching its entire grid shape on a query param is more
+  complex than two small views sharing helpers. `scheduling:calendar_day` (`/schedule/calendar/`) is the
+  `LIVE_LINKS['4.4']` target; `scheduling:calendar_week` is reached only via an in-page link.
+- [ ] **Date parsing/defaulting.** `?date=YYYY-MM-DD`, reuses `_parse_local_date` (now in `_helpers.py`),
+  defaults to `request.location.local_now().date()` on missing/junk input — never the server's date. Day
+  nav: `date ± 1 day`. Week nav: `week_start = date - timedelta(days=date.weekday())` (Monday-start);
+  `date ± 7 days` moves the anchor. "Today" always recomputes from `location.local_now()`, so it is correct
+  per-location even though Lakeside (Denver) and Riverside (LA) sit in different zones under the same tenant.
+  All three nav links (prev/next/today) are built server-side as `?date=...&by=...&resource=...&provider=...`
+  query strings that preserve every other active filter — a real Django `<a href>`, no JS required.
+- [ ] **Column-mode toggle: `?by=resource|provider`, default `provider`** (staff already navigate by
+  provider name elsewhere in this app; either default is defensible, this pass picks provider). Junk value
+  degrades to the default. **The SAME base queryset serves both modes** — bucketed in Python by
+  `.resource_id` or `.provider_id` after one identical DB fetch; the SQL `WHERE` clause never changes with
+  `by`. This is the literal meaning of the bullet's "without changing the underlying query."
+- [ ] **The exact query — Day view:** `_location_appointments(request)` (already
+  `select_related('contact','service','resource','provider','location')`) filtered by
+  `lo, hi = local_day_bounds_utc(location, date)` → `.filter(start_at__gte=lo, start_at__lt=hi)`. **ONE**
+  query, hits `idx_appt_tenant_loc_start`. Plus `_location_providers(request)` and `_location_resources(request)`
+  for the column headers (both fetched regardless of `by`, so the toolbar can offer a "switch mode" control
+  without a second round trip) = **3 queries total** for the grid body, independent of appointment count.
+- [ ] **The exact query — Week view:** `lo, _ = local_day_bounds_utc(location, week_start)`;
+  `_, hi = local_day_bounds_utc(location, week_start + timedelta(days=6))`; **ONE** ranged query —
+  `_location_appointments(request).filter(start_at__gte=lo, start_at__lt=hi, resource=chosen)` (or
+  `provider=chosen`) — chained onto the SAME queryset, so the resource/provider narrowing costs nothing
+  extra. Bucket into 7 day-columns in Python via `appointment.local_start().date()`. **This is 1 query, not
+  a naive 7** — the research catalog's "chained 7× `local_day_bounds_utc` calls" phrasing describes computing
+  7 day boundaries, not issuing 7 queries; only the week's overall `lo`/`hi` are needed for the single ranged
+  filter. Plus the providers-or-resources lookup for authorising `?resource=`/`?provider=` = **≤3 queries
+  total**, asserted with `assertNumQueries` in tests.
+- [ ] **Block positioning arithmetic — computed in the view, never in the template** (theme.css's own comment:
+  "Django templates cannot do arithmetic, and a filter chain that fakes it is how columns end up one row
+  off"). Per rendered day: `window_start`/`window_end` default to `CALENDAR_WINDOW_START_HOUR`(7)/
+  `CALENDAR_WINDOW_END_HOUR`(19) local, but **auto-expand** (floor/ceil to the hour) to cover the earliest
+  `local_start()` / latest `local_end()` actually present that day across ALL columns — so the axis is
+  shared by every column of the same day (rows line up) and **no appointment is ever clipped or silently
+  hidden** for starting before 7am or ending after 7pm. Per item: `top_px = minutes since window_start ×
+  PX_PER_MINUTE`, `height_px = max(duration_minutes, SLOT_GRANULARITY_MINUTES) × PX_PER_MINUTE` (a 15-min
+  floor so no block ever renders as an invisible sliver). Template consumes these as
+  `style="--slot-start:{{ item.top_px }}; --slot-span:{{ item.height_px }};"` — the **existing**
+  `.calendar-event` CSS already reads exactly these two custom properties. Zero new CSS.
+- [ ] **Hour labels + "now" line — reuse existing structure, no new CSS class.** The 68px gutter column in
+  `.calendar-grid`'s own `grid-template-columns: 68px repeat(...)` is already sized for this. Hour labels are
+  plain text `<div>`s inside a `.calendar-column`-classed gutter (existing `position: relative` is all that's
+  needed), each with its own `top_px`. The "now" line renders only when `date == location.local_now().date()`,
+  as one inline-styled 2px `<div>` per column (`position:absolute; inset-inline:0; top:{{ now_top_px }}px;
+  border-top:2px solid var(--red-fg);`) — no `theme.css` change, since the styling is fully inline. Both are
+  "common", not one of the four REQUIRED bullets — cut first if the pass overruns.
+- [ ] **Overlap-safe lane layout — one shared function, used by every column in both views.** Sort a
+  column's non-cancelled items by `start_at`; greedy interval-graph colouring assigns each item the first
+  lane whose current end `≤` this item's `local_start()` (comparing against `local_end()`, the VISUAL end —
+  not `blocks_until`, which is a booking-time concept, not a rendering one), else opens a new lane. Each item
+  carries `(lane, lane_count)`; template turns that into inline `left`/`width` percentages layered inside the
+  existing absolutely-positioned `.calendar-event` box — no new CSS class. `lane_count == 1` (the overwhelming
+  majority of cells) computes to the same numbers as today's implicit full-width box, so the common case is
+  visually unchanged. This is a defensive rendering rule (research: "common, not REQUIRED" — `Resource` has
+  no capacity and the booking lock already prevents most same-column overlaps) for the genuine edge cases
+  that remain: two provider-less+resource-less bookings sharing "Unassigned" at overlapping times, or a
+  stale row after a manual DB edit.
+- [ ] **Which appointments are excluded from the grid: NONE by status.** No default status filter — the
+  researched leaders (Fresha, Acuity) keep cancelled/no-show visible for follow-up, and the sub-module's own
+  4th bullet asks for status **colouring**, not status **filtering**. The only exclusion is the date/week
+  range itself.
+- [ ] **Cancelled must not look like it still occupies the grid (HARD FACT).** Cancelled appointments ARE
+  rendered (never hidden) but are (a) **excluded from the lane-packing pass** — they no longer represent real
+  occupancy once 4.3 frees the slot, so they must not force a live appointment into a needless side lane —
+  and (b) rendered as a fixed one-slot-row (26px) low-emphasis marker anchored at `top_px` only, not spanning
+  the original duration, with inline `pointer-events: none`, so a click anywhere in that freed time range
+  still reaches the empty-slot click target underneath and opens a NEW booking there. `no_show` gets NO such
+  treatment — it genuinely occupied that time and renders as a normal full block (amber), in the lane-packing
+  pass, same as `completed`. This distinction is deliberate: only `cancelled` frees its slot (4.3's own
+  contract); `no_show` does not.
+- [ ] **The "Unassigned" catch-all column — Day view only, always rendered (even empty, even when
+  `columns` itself is empty).** `Appointment.resource`/`.provider` are both nullable; a strict grouping would
+  silently drop a phone-only or not-yet-assigned booking off the grid — a data-integrity bug, not cosmetic.
+  Appended as the LAST column after every real resource/provider column. **Week view has no Unassigned
+  column** — it is scoped to exactly one chosen resource/provider by design (Mindbody/Setmore finding), and
+  an appointment with neither FK does not belong to any single person's/room's week diary; it stays visible
+  on the Day view instead.
+
+## Slot Click-Through wiring (edit to an existing view, not a new one)
+
+- [ ] Each empty `.calendar-slot` cell (one per column per `SLOT_GRANULARITY_MINUTES`, matching the booking
+  engine's own 15-min grain so the calendar and `find_available_slots` never disagree) is an `<a>` to:
+  `{% url 'scheduling:appointment_create' %}?date={{ day|date:'Y-m-d' }}&time={{ slot_time|time:'H:i' }}
+  &resource={{ column.resource_id|default:'' }}&provider={{ column.provider_id|default:'' }}` — `resource=`
+  set only when `by == 'resource'` and the column is a real resource (never on the Unassigned column);
+  `provider=` set only when `by == 'provider'` and the column is a real provider.
+- [ ] `AppointmentForm` needs **NO code change** — verified by reading `TenantModelForm.__init__` /
+  `TenantLocationModelForm.__init__`: both accept `**kwargs` and pass them straight through to
+  `forms.ModelForm.__init__`, which already accepts stock `initial=`. The change is entirely in
+  `appointment_create_view` (`views/Bookings/Appointments.py`): on GET (unbound form), build
+  `initial = {}` from `request.GET` using `_parse_local_date` + a new small `_parse_local_time(raw)` helper
+  (mirrors `_parse_local_date`: `datetime.strptime(raw, '%H:%M').time()`, degrades to `None` — stays local to
+  `Bookings/Appointments.py`, used by one entity only) + `_authorised_pk` against `_location_resources`/
+  `_location_providers`: `initial['start_at'] = f'{d:%Y-%m-%dT}{t:%H:%M}'` when both parse,
+  `initial['resource'] = resource.pk` / `initial['provider'] = provider.pk` when authorised. Then
+  `form = AppointmentForm(request.POST or None, request=request, initial=initial)`.
+- [ ] Clicking an **existing** block navigates to `scheduling:appointment_detail` (unchanged) — never create.
+  Prevents an accidental double-booking through the grid; moving a booking is the detail page's existing
+  "Reschedule" button (4.3, already routes into slot-search-in-reschedule-mode).
+- [ ] Race protection is inherited for free: the click-through still lands in `appointment_create_view`,
+  which already calls `_save_booking_under_lock`. Zero new locking code.
+
+## Status Colouring wiring
+
+- [ ] `{% include "partials/_appointment_status_badge.html" with obj=item.appointment %}` inside each event
+  block, unchanged, reused verbatim (single source of truth).
+- [ ] Event block class: `class="calendar-event {{ item.appointment.status }}"` — reuses the **existing**
+  `.calendar-event.scheduled/.confirmed/.completed/.cancelled/.no_show` CSS 1:1 with the badge partial. Zero
+  new CSS.
+- [ ] `templates/scheduling/calendar/_status_legend.html` — five static badge chips (`badge-info`/
+  `badge-green`(×2)/`badge-red`/`badge-amber`) against their plain-English label, included once above the
+  grid on both `day.html` and `week.html`. Static partial, no query.
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` → `LIVE_LINKS['4.4'] = {'Calendar': 'scheduling:calendar_day'}` — the
+  week view is reached from within the day view (a "View full week" link per column header), not a second
+  sidebar row, per the research's recommended build scope.
+- [ ] `config/settings.py` / `config/urls.py` / `config/asgi.py` — **untouched**, `scheduling` is not a
+  brand-new app this pass.
+- [ ] **Seeder — extend `seed_scheduling.DEMO_APPOINTMENTS` idempotently, 3 new rows, no seeder-logic
+  change:**
+  1. **Uptown gets a `day_offset: 0` row** (it currently has none — offsets 1, 2 only, verified by direct
+     read of the file): `('Dana', 'Whitfield')`, `'Orthodontic review'`, `'Surgery 1'`, `day_offset=0`,
+     `09:30`. Without this, switching the active location to Uptown and opening `/schedule/calendar/`
+     (which defaults to today) renders an EMPTY grid — the exact "looks broken to a new developer" failure
+     the existing Downtown `day_offset: 0` comment already warns about, just uncovered for this location.
+  2. **Lakeside gets a `day_offset: 0` row** (currently offsets 1, 4 only): `('Theo', 'Nakamura')`,
+     `'Follow-up'`, `'Consult room A'`, `day_offset=0`, `10:30`. Same failure mode, same fix.
+  3. **Downtown gets one genuinely overlapping row** to exercise the lane-packing code by default: a second
+     `resource=None` booking at the SAME `day_offset=0, hour=11, minute=15` as the existing Priya Raman
+     "Phone consultation" row — `('Marcus', 'Whitfield')`, `'Phone consultation'`, `resource=None`,
+     `day_offset=0, hour=11, minute=15`, `status='scheduled'`. Identical start time guarantees a real overlap
+     in the "Unassigned" column (`by=resource`, today), and the model's own contract — "a provider-less +
+     resource-less booking never conflicts" — means the seeder's direct `.create()` needs no lock bypass.
+  Idempotent via the existing `(location, contact, start_at)` dedupe check already in the loop — no new
+  dedupe logic. Re-run `seed_scheduling` twice; the second run reports these 3 as already present.
+  `seed_accounts` is untouched (no new provider needed — Uptown/Lakeside already have one from 4.3).
+
+## Templates (templates/scheduling/calendar/ — standalone page, per Template Folder Structure rule 6)
+
+- [ ] `templates/scheduling/calendar/day.html` — extends `base.html`; includes `_toolbar.html` and
+  `_status_legend.html`; renders `.calendar-grid` with `style="--calendar-columns: {{ columns|length|add:1
+  }};"` (real columns + 1 for Unassigned); one `.calendar-column` per resource/provider plus the trailing
+  Unassigned column; hour-label gutter; "now" line when applicable; empty-slot `<a>` cells; `.calendar-event`
+  blocks with inline lane/position styles, wrapped in an `<a>` to `appointment_detail`; empty-state
+  (`partials/_empty_state.html`) when the location has zero appointments AND zero resources/providers for
+  the active `by` mode.
+- [ ] `templates/scheduling/calendar/week.html` — sibling standalone page; same toolbar + legend; 7 day
+  columns (Mon–Sun) for the ONE chosen resource/provider (shown in the toolbar header, not per-column); a
+  `<select>` to change which resource/provider the week is scoped to, submitting the same `?by=`/`?resource=`/
+  `?provider=` query contract as the day view; empty-state when the location has zero resources/providers
+  for the active `by` mode ("No providers/resources at this location yet").
+- [ ] `templates/scheduling/calendar/_toolbar.html` — shared partial: today/prev/next `<a>` nav, an explicit
+  `<input type="date">` `<form method="get">` (hidden inputs preserve `by`/`resource`/`provider` across
+  submission, no JS required), the `by=resource|provider` toggle, and (week only) the resource/provider
+  `<select>`.
+- [ ] `templates/scheduling/calendar/_status_legend.html` — the five-chip legend (see Status Colouring above).
+- [ ] No `form.html` this pass — click-through reuses 4.3's existing `bookings/appointment/form.html`
+  unchanged.
+
+## Verify
+
+- [ ] `makemigrations scheduling --check` → **"No changes detected"** (the sub-module's own acceptance
+  criterion — zero models, zero migrations)
+- [ ] `seed_scheduling` ×2 — second run reports the 3 new appointment rows as already present, 0 duplicates
+- [ ] `manage.py check` — no new issues
+- [ ] `PROVIDER_MODE=fake` — asserted even though this sub-module makes no provider call (blanket policy,
+  same as every prior `scheduling` sub-module)
+- [ ] `pytest apps/scheduling` — `test_calendar_views.py`: `_visible_window` auto-expands for an out-of-range
+  appointment and never clips it; `_bucket_by_column` puts a `resource=None`/`provider=None` appointment in
+  Unassigned on Day and nowhere on Week; `_lane_pack` assigns two truly-overlapping items different lanes
+  and two non-overlapping items the same lane (lane_count stays 1 for the common case); day/week route
+  200s with a seeded record visible; `?date=` degrades a junk value to today; `?by=` degrades a junk value
+  to the default; week `?resource=`/`?provider=` degrades an unauthorised pk to the first authorised column,
+  not a 500; the click-through link on an empty Downtown 09:00 Monday slot produces
+  `?date=...&time=09:00&resource=<Surgery 1 pk>` and `appointment_create_view` renders that value pre-filled
+  in the `start_at`/`resource` fields (assert the rendered `<option selected>`/input value, not just a 200);
+  a cancelled appointment's block carries no lane (excluded from `_lane_pack`) and its wrapper element has
+  no click target over the freed time; `assertNumQueries` — day view ≤4 total scheduling queries, week view
+  ≤4, never scaling with appointment count or with 7. `test_calendar_security.py`: cross-tenant — `admin_acme`
+  requesting `?resource=<globex Resource pk>` gets "no filter applied" (not a 500, not a leak) and sees only
+  `acme` rows; cross-location — a user assigned only to Downtown requesting `?resource=<Uptown Resource pk>`
+  on the calendar gets the same silent-degrade, never an Uptown booking; a user with no active location gets
+  the location-required redirect (mirrors `appointment_slots_view`'s own guard), not an unscoped
+  `Appointment.objects.all()` grid.
+- [ ] Twilio webhook signature + idempotency — **N/A**, this sub-module ships no webhook
+- [ ] websocket connect/reject — **N/A**, this sub-module ships no consumer
+- [ ] `temp/verify_4_4.py` smoke sweep as `admin_acme` (password `navai-demo-2026`, from `seed_accounts.py`):
+  `calendar_day` 200 with today's 4 Downtown appointments visible incl. the new overlap pair both rendered
+  (not one hidden behind the other); `?date=` for each seeded offset (-14, -7, +1..+4) 200 with the right
+  contact name visible; `?by=resource` and `?by=provider` both 200, same total appointment count either way;
+  `calendar_week?by=provider&provider=<pk>` 200, spans the right Mon–Sun dates; switch active location to
+  Uptown → `calendar_day` (today) now shows the new seeded row, not an empty grid; same for Lakeside; the
+  slot click-through link on an open cell round-trips into `appointment_create` with the prefilled value
+  visible in the rendered form HTML; cross-tenant `?resource=<globex pk>` while on `acme` → silently ignored,
+  never a `globex` row rendered; no `{#`/`{% comment` leaks; sidebar shows `4.4` Live under Module 4 with a
+  working "Calendar" link.
+
+## Close-out
+
+- [ ] Review agents: `code-reviewer` → `explorer` → `frontend-reviewer` (badge/CSS class fidelity, the
+  `--calendar-columns`/`--slot-start`/`--slot-span` custom-property contract) → `performance-reviewer`
+  (confirm the ≤4-query budget holds and doesn't regress into a per-appointment query) → `realtime-reviewer`
+  (expected to find nothing — no realtime surface, same as 4.1/4.2/4.3) → `qa-smoke-tester` →
+  `security-reviewer` (confirm `notes`/`reason` PII discipline carries into the grid's rendered block text,
+  confirm the `?resource=`/`?provider=` params can never leak a foreign tenant/location row) → `test-writer`
+- [ ] **UPDATE** `.claude/skills/scheduling/SKILL.md` — do not re-author. Flip the Build State row for 4.4 to
+  **BUILT**; add the "Calendar" section under Templates/Routes (`calendar_day`/`calendar_week`, no new
+  model); document the `_helpers.py` relocation of the five shared query helpers (so a later 4.5 knows where
+  to find them, not to redefine them a third time); note the `appointment_create_view` querystring-prefill
+  addition; extend the Seeder section with the 3 new `DEMO_APPOINTMENTS` rows and why (Uptown/Lakeside
+  today-emptiness, the Downtown overlap demo); add a Conventions & gotchas entry for the "cancelled
+  appointments are excluded from lane-packing and rendered non-blocking" rule, since it is easy to "fix" by
+  a future editor who doesn't know why.
+- [ ] README — note the new Calendar page only if the project README already enumerates 4.1–4.3's pages
+
+## Later passes / deferred
+
+Carried over verbatim from `research-scheduling-4.4.md`'s own Deferred section:
+
+- Full N-lane overlap-packing algorithm (Google Calendar's general case) — the simple two-events-side-by-side
+  rule (implemented this pass as a general greedy packer, which happens to also cover N>2) is enough; a
+  dedicated N-lane packer library is more machinery than this app's realistic overlap rate justifies.
+- Configurable colour source (team member / category / status), à la Fresha — one status-based colour map is
+  the sub-module's own bullet; configurability would fork the single source of truth for no requested benefit.
+- "Combined" all-staff overlay view (Square) — sits awkwardly against the bullet's explicit "switch the
+  grid's COLUMNS between resources and providers," which wants columns, not an overlay.
+- Month view — not named by either "Day & Week" bullet; a 30-day grid's information density is a materially
+  different UI problem, scope on its own if ever requested.
+- Printable/exportable day sheet (Jane App) — real precedent exists in this project
+  (`calls/transcript/transcript_print.html`, once Module 5 lands), but not named by any of 4.4's bullets.
+- Per-status "hide cancelled/no-show" toggle — the bullets want status **coloured**, not filtered out; the
+  full-day picture stays intact by default, matching Fresha/Acuity's own research finding.
+- Drag-and-drop rescheduling directly on the grid — only "Slot Click-Through" is named by the bullets; the
+  existing detail-page "Reschedule" button already covers moving a booking. Real differentiator in Square/
+  Fresha/Google Calendar, but adds JS/HTMX complexity beyond this pass's scope.
+- External calendar sync (Google/Outlook two-way) — this product's calendar **is** `scheduling.Appointment`;
+  there is no second calendar to reconcile against. Google Calendar was used only as a layout-mechanics
+  reference in the research, never as an integration target.
+- `booked_by_session` / "originating call" link on a grid block — blocked on Module 5 (`calls.CallSession`)
+  existing, same deferral already recorded against 4.3.
+- Appointment list with full filter set, contact search, `CallbackRequest` queue → **4.5 Bookings List &
+  Callback Requests** (unchanged from 4.3's own deferred list — 4.4 is the grid, not a second list page).
+
+## Review notes
+
+(filled in at the end)
