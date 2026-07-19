@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}My locations{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">My locations</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li>Accounts</li>
+      <li>My locations</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  The Assigned-Location List. Read-only over UserLocation — being assigned to a
+  site is granted by an owner or manager (Module 1.3), never self-served here.
+  What this page DOES let you do is make one of them active, which is the same
+  guarded POST the topbar switcher uses.
+{% endcomment %}
+<div class="card">
+  <div class="card-header">
+    <span>{{ assigned_locations|length }} location{{ assigned_locations|length|pluralize }}</span>
+    <span class="text-muted">{{ active_tenant.name }}</span>
+  </div>
+  <div class="card-body">
+
+    {% if assigned_locations %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Location</th>
+              <th scope="col">Address</th>
+              <th scope="col">Timezone</th>
+              <th scope="col">Local time</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for location in assigned_locations %}
+              <tr>
+                <td>
+                  {{ location.name }}
+                  {% if active_location and location.pk == active_location.pk %}
+                    <span class="badge badge-info">Active</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if location.full_address %}
+                    {{ location.full_address }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                  {% if location.phone %}
+                    <span class="block text-muted text-xs">{{ location.phone|phone_e164 }}</span>
+                  {% endif %}
+                </td>
+                <td>{{ location.timezone }}</td>
+                <td><time>{{ location.local_now|date:"H:i" }}</time></td>
+                <td>
+                  {% if location.is_active %}
+                    <span class="badge badge-green">Active</span>
+                  {% else %}
+                    <span class="badge badge-muted">Inactive</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <span class="table-actions">
+                    {% if active_location and location.pk == active_location.pk %}
+                      <span class="text-muted">Working here</span>
+                    {% else %}
+                      <form method="post" action="{% url 'accounts:switch_location' %}">
+                        {% csrf_token %}
+                        <input type="hidden" name="location" value="{{ location.pk }}">
+                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                        <button type="submit" class="btn btn-outline">
+                          <i data-lucide="log-in"></i> Work here
+                        </button>
+                      </form>
+                    {% endif %}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      {% include "partials/_empty_state.html" with icon="map-pin-off" title="No locations assigned" message="You have not been assigned to any location yet. An owner or manager can assign you from the staff directory." %}
+    {% endif %}
+
+  </div>
+</div>
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header"><span>How the active location works</span></div>
+  <div class="card-body">
+    <p class="text-muted">
+      Calendars, bookings, agent settings and call logs are all per location, so
+      the product only ever shows you one site at a time. Switch here or from the
+      selector in the top bar &mdash; your choice lasts for this browser session.
+    </p>
+  </div>
+</div>
+{% endblock %}
