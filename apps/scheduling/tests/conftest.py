@@ -132,3 +132,101 @@ def resource_a2(tenant_a, location_a2, make_resource):
 def resource_b(tenant_b, location_b1, make_resource):
     """A tenant B resource — the cross-tenant isolation fixture."""
     return make_resource(tenant_b, location_b1, name='Room 1')
+
+
+# --------------------------------------------------------------------------- #
+# Providers / Appointments (sub-module 4.3)
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def make_provider(db):
+    """Factory: `make_provider(tenant, location, **overrides)` -> a saved provider
+    `User`, assigned to `location` via `UserLocation`.
+
+    Defaults to every weekday 09:00-17:00 at `location` so
+    `availability.find_available_slots` has something to offer without every
+    test hand-rolling `provider_hours`. Pass `hours=[]` for an assigned provider
+    with NO configured hours (unavailable everywhere), or `hours=None` to skip
+    writing `provider_hours` entirely.
+    """
+    def _make(tenant, location, **overrides):
+        import uuid
+
+        from apps.accounts.models import User, UserLocation
+        from apps.tenants.services import WEEKDAY_KEYS
+
+        hours = overrides.pop(
+            'hours',
+            [{'start_time': '09:00', 'end_time': '17:00', 'days': list(WEEKDAY_KEYS)}],
+        )
+        email = overrides.pop('email', None) or f'provider-{uuid.uuid4().hex[:10]}@{tenant.slug}.example'
+        defaults = {
+            'first_name': 'Pat',
+            'last_name': 'Provider',
+            'is_provider': True,
+            'status': User.STATUS_ACTIVE,
+            'tier': User.TIER_STAFF,
+        }
+        defaults.update(overrides)
+        user = User.objects.create_user(
+            tenant=tenant, email=email, password='pass-1234', **defaults
+        )
+        UserLocation.objects.create(tenant=tenant, user=user, location=location)
+        if hours is not None:
+            user.provider_hours = {str(location.pk): hours}
+            user.save(update_fields=['provider_hours'])
+        return user
+    return _make
+
+
+@pytest.fixture
+def provider_a1(tenant_a, location_a1, make_provider):
+    """A tenant A provider assigned to A1 only, bookable 09:00-17:00 every day."""
+    return make_provider(tenant_a, location_a1, email='provider.a1@acme-test.example')
+
+
+@pytest.fixture
+def make_appointment(db):
+    """Factory: `make_appointment(tenant, location, contact, **overrides)` -> a
+    saved `Appointment`. Defaults to a 30-minute booking two days from now.
+    """
+    def _make(tenant, location, contact, **overrides):
+        from datetime import timedelta
+
+        from django.utils import timezone as dj_timezone
+
+        from apps.scheduling.models import Appointment
+
+        start_at = overrides.pop('start_at', None) or (
+            dj_timezone.now() + timedelta(days=2)
+        )
+        duration_minutes = overrides.pop('duration_minutes', 30)
+        end_at = overrides.pop('end_at', None) or (
+            start_at + timedelta(minutes=duration_minutes)
+        )
+        defaults = {
+            'status': Appointment.STATUS_SCHEDULED,
+            'source': Appointment.SOURCE_MANUAL,
+        }
+        defaults.update(overrides)
+        return Appointment.objects.create(
+            tenant=tenant, location=location, contact=contact,
+            start_at=start_at, end_at=end_at, **defaults
+        )
+    return _make
+
+
+@pytest.fixture
+def location_chicago(tenant_a):
+    """A tenant A location in `America/Chicago` — the DST isolation fixture.
+
+    `location_a1`/`location_a2`/`location_b1` all default to `timezone='UTC'`,
+    which has no DST transitions at all, so the spring-forward/fall-back tests
+    need a zone that actually has them.
+    """
+    from apps.tenants.models import Location
+
+    return Location.objects.create(
+        tenant=tenant_a, name='Chicago Branch', slug='chicago',
+        timezone='America/Chicago',
+    )
