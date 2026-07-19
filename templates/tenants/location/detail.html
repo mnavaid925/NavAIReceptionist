@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}{{ obj.name }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{{ obj.name }}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'tenants:location_list' %}">Locations</a></li>
+      <li>{{ obj.name }}</li>
+    </ol>
+  </nav>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 space-y-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Site details</span>
+        <span class="flex items-center gap-2">
+          {% if is_active_location %}<span class="badge badge-info">Working here</span>{% endif %}
+          {% if obj.is_active %}
+            <span class="badge badge-green">Active</span>
+          {% else %}
+            <span class="badge badge-muted">Inactive</span>
+          {% endif %}
+        </span>
+      </div>
+      <div class="card-body">
+        <dl class="grid gap-3 sm:grid-cols-2">
+          <div class="sm:col-span-2">
+            <dt class="form-label">Address</dt>
+            <dd class="m-0">
+              {% if obj.full_address %}{{ obj.full_address }}{% else %}<span class="text-muted">Not set</span>{% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Timezone</dt>
+            <dd class="m-0">{{ obj.timezone }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Local time now</dt>
+            <dd class="m-0"><time>{{ obj.local_now|date:"H:i, j M Y" }}</time></dd>
+          </div>
+          <div>
+            <dt class="form-label">Public phone</dt>
+            <dd class="m-0">
+              {% if obj.phone %}{{ obj.phone|phone_e164 }}{% else %}<span class="text-muted">Not set</span>{% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Identifier</dt>
+            <dd class="m-0"><code>{{ obj.slug }}</code></dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Assigned staff</span>
+        <a class="btn btn-outline" href="{% url 'tenants:staff_locations' %}?location={{ obj.pk }}">
+          <i data-lucide="users"></i> Manage
+        </a>
+      </div>
+      <div class="card-body">
+        {% if assignments %}
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Role</th>
+                  <th scope="col">Bookable</th>
+                  <th scope="col" class="text-right">Working hours</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for assignment in assignments %}
+                  <tr>
+                    <td>
+                      <span class="flex items-center gap-2">
+                        <span class="avatar-initial" aria-hidden="true">{{ assignment.user.initials }}</span>
+                        <span>{{ assignment.user.display_name }}</span>
+                      </span>
+                    </td>
+                    <td><span class="badge badge-slate">{{ assignment.user.get_tier_display }}</span></td>
+                    <td>
+                      {% if assignment.user.is_provider %}
+                        <span class="badge badge-info">Provider</span>
+                      {% else %}
+                        <span class="text-muted">&mdash;</span>
+                      {% endif %}
+                    </td>
+                    <td>
+                      <span class="table-actions">
+                        {% if assignment.user.is_provider %}
+                          <a class="btn btn-outline" href="{% url 'tenants:provider_hours' assignment.user.pk obj.pk %}">
+                            <i data-lucide="clock"></i> Hours
+                          </a>
+                        {% else %}
+                          <span class="text-muted">Not bookable</span>
+                        {% endif %}
+                      </span>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          {% include "partials/_empty_state.html" with icon="user-plus" title="Nobody assigned yet" message="Staff must be assigned to this site before they can work in it or take bookings here." %}
+        {% endif %}
+      </div>
+    </div>
+
+    {% comment %}
+      The agent panel renders defensively: apps.agents does not exist until
+      Module 2, so the view's helper import-guards it and returns None. This must
+      never assume the relation exists.
+    {% endcomment %}
+    <div class="card">
+      <div class="card-header">
+        <span>AI agent</span>
+        {% if agent_setting %}
+          {% if agent_setting.enabled %}
+            <span class="badge badge-green">Enabled</span>
+          {% else %}
+            <span class="badge badge-muted">Disabled</span>
+          {% endif %}
+        {% else %}
+          <span class="badge badge-amber">Not configured</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        {% if agent_setting %}
+          <dl class="grid gap-3 sm:grid-cols-2">
+            <div>
+              <dt class="form-label">Inbound number</dt>
+              <dd class="m-0">{{ agent_setting.inbound_phone_number|phone_e164 }}</dd>
+            </div>
+            <div>
+              <dt class="form-label">Voice mode</dt>
+              <dd class="m-0">{{ agent_setting.get_voice_provider_display }}</dd>
+            </div>
+          </dl>
+        {% else %}
+          <p class="text-muted">
+            This location has no agent configuration yet. Agent Setup &amp;
+            Telephony is Module 2, which is not built &mdash; until then no phone
+            number answers here.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="space-y-4">
+    <div class="card">
+      <div class="card-header"><span>Actions</span></div>
+      <div class="card-body grid gap-2">
+
+        <a class="btn btn-outline w-full" href="{% url 'tenants:location_edit' obj.pk %}">
+          <i data-lucide="pencil"></i> Edit location
+        </a>
+
+        {% if obj.is_active %}
+          <form method="post" action="{% url 'tenants:location_delete' obj.pk %}"
+                onclick="return confirm('Deactivate {{ obj.name|escapejs }}? Staff will no longer be able to work there. Its history is kept.');">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger w-full">
+              <i data-lucide="power-off"></i> Deactivate
+            </button>
+          </form>
+        {% else %}
+          <p class="text-muted text-sm">
+            This site is inactive. Edit it and tick <strong>Active</strong> to bring
+            it back into service.
+          </p>
+        {% endif %}
+
+        <a class="btn btn-outline w-full" href="{% url 'tenants:location_list' %}">
+          <i data-lucide="arrow-left"></i> Back to list
+        </a>
+
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
