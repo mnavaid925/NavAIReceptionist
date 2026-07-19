@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Good day, {{ user.display_name }}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li>Dashboard</li>
+    </ol>
+  </nav>
+</div>
+
+<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" style="margin-block-end: 18px;">
+
+  <div class="stat-card">
+    <span class="stat-icon blue" aria-hidden="true"><i data-lucide="building-2"></i></span>
+    <div>
+      <div class="stat-value">{{ stats.locations }}</div>
+      <div class="stat-label">Your locations</div>
+      <div class="stat-meta">Sites you can switch into</div>
+    </div>
+  </div>
+
+  <div class="stat-card">
+    <span class="stat-icon green" aria-hidden="true"><i data-lucide="users"></i></span>
+    <div>
+      <div class="stat-value">{{ stats.assignments }}</div>
+      <div class="stat-label">Staff assignments</div>
+      <div class="stat-meta">Across this business</div>
+    </div>
+  </div>
+
+  <div class="stat-card">
+    <span class="stat-icon purple" aria-hidden="true"><i data-lucide="shield-check"></i></span>
+    <div>
+      <div class="stat-value">{{ stats.tier }}</div>
+      <div class="stat-label">Your role</div>
+      <div class="stat-meta">{{ active_tenant.name|default:"No business" }}</div>
+    </div>
+  </div>
+
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 card">
+    <div class="card-header"><span>Your locations</span></div>
+    <div class="card-body">
+      {% if assigned_locations %}
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th scope="col">Location</th>
+                <th scope="col">City</th>
+                <th scope="col">Timezone</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for location in assigned_locations %}
+                <tr>
+                  <td>
+                    {{ location.name }}
+                    {% if active_location and location.pk == active_location.pk %}
+                      <span class="badge badge-info">Active</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ location.city|default:"&mdash;" }}</td>
+                  <td>{{ location.timezone }}</td>
+                  <td>
+                    {% if location.is_active %}
+                      <span class="badge badge-green">Active</span>
+                    {% else %}
+                      <span class="badge badge-muted">Inactive</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        {% include "partials/_empty_state.html" with icon="map-pin-off" title="No locations assigned" message="You have not been assigned to any location yet. An owner or manager can assign you from the staff directory." %}
+      {% endif %}
+    </div>
+  </div>
+
+  <aside class="space-y-4">
+    <div class="card">
+      <div class="card-header"><span>Session</span></div>
+      <div class="card-body">
+        <dl class="grid gap-3">
+          <div>
+            <dt class="form-label">Business</dt>
+            <dd class="m-0">{{ active_tenant.name|default:"None — platform superuser" }}</dd>
+          </div>
+          <div>
+            <dt class="form-label">Active location</dt>
+            <dd class="m-0">
+              {% if active_location %}
+                {{ active_location.name }}
+              {% else %}
+                <span class="text-muted">Not selected</span>
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt class="form-label">Signs out after</dt>
+            <dd class="m-0">{{ user.effective_inactivity_timeout }} minutes idle</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Build status</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          Sub-module 0.1 &mdash; Authentication &amp; Session is live. The sidebar
+          lists every module in the catalog; greyed rows are not built yet.
+        </p>
+      </div>
+    </div>
+  </aside>
+
+</div>
+{% endblock %}
