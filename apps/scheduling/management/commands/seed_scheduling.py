@@ -255,6 +255,15 @@ DEMO_APPOINTMENTS = {
          'cancellation_reason': 'Caller rearranged around work'},
     ],
     'uptown': [
+        # TODAY at Uptown too — the calendar defaults to today at whichever
+        # location is active, so every seeded site needs a day-0 row or switching
+        # location lands on what looks like a broken page.
+        {'contact': ('Priya', 'Raman'), 'service': 'Routine check-up',
+         'resource': 'Surgery 1', 'day_offset': 0, 'hour': 10, 'minute': 0,
+         'status': 'scheduled', 'source': 'manual', 'reason': 'Check-up'},
+        {'contact': ('Owen', 'Baptiste'), 'service': 'Phone consultation',
+         'resource': None, 'day_offset': 0, 'hour': 13, 'minute': 30,
+         'status': 'confirmed', 'source': 'ai_phone', 'reason': 'Follow-up call'},
         {'contact': ('Dana', 'Whitfield'), 'service': 'Orthodontic review',
          'resource': 'Surgery 1', 'day_offset': 1, 'hour': 9, 'minute': 30,
          'status': 'scheduled', 'source': 'manual',
@@ -283,6 +292,9 @@ DEMO_APPOINTMENTS = {
          'status': 'scheduled', 'source': 'web', 'reason': 'Follow-up by phone'},
     ],
     'lakeside': [
+        {'contact': ('Helena', 'Ostrom'), 'service': 'Follow-up',
+         'resource': 'Consult room A', 'day_offset': 0, 'hour': 9, 'minute': 30,
+         'status': 'scheduled', 'source': 'ai_phone', 'reason': 'Review'},
         {'contact': ('Theo', 'Nakamura'), 'service': 'Follow-up',
          'resource': 'Consult room A', 'day_offset': 1, 'hour': 11, 'minute': 0,
          'status': 'scheduled', 'source': 'ai_phone', 'reason': 'Review'},
