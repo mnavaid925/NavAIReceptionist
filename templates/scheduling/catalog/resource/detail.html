@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+
+{% block title %}{{ obj.display_label }}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{{ obj.display_label }}</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li><a href="{% url 'scheduling:resource_list' %}">Resources</a></li>
+        <li>{{ obj.name }}</li>
+      </ol>
+    </nav>
+  </div>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 grid gap-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Details</span>
+        {% if obj.is_active %}
+          <span class="badge badge-green">Active</span>
+        {% else %}
+          <span class="badge badge-muted">Inactive</span>
+        {% endif %}
+      </div>
+      <div class="card-body grid gap-4 sm:grid-cols-2">
+
+        {% if not obj.is_active %}
+          <div class="alert alert-amber sm:col-span-2" role="status">
+            <span>
+              This resource is inactive, so availability will never offer a slot
+              in it. Existing bookings are unaffected.
+            </span>
+          </div>
+        {% endif %}
+
+        <div>
+          <span class="form-label">Name</span>
+          <p>{{ obj.name }}</p>
+        </div>
+
+        <div>
+          <span class="form-label">Number or code</span>
+          {% if obj.resource_number %}
+            <p>{{ obj.resource_number }}</p>
+          {% else %}
+            <p class="text-muted">&mdash;</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Location</span>
+          <p>{{ obj.location.name }}</p>
+        </div>
+
+        <div>
+          <span class="form-label">Display order</span>
+          <p>{{ obj.display_order }}</p>
+        </div>
+
+        <div class="sm:col-span-2">
+          <span class="form-label">Description</span>
+          {% if obj.description %}
+            <p>{{ obj.description|linebreaksbr }}</p>
+          {% else %}
+            <p class="text-muted">No description.</p>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Actions</span></div>
+      <div class="card-body grid gap-2">
+        <a class="btn btn-primary" href="{% url 'scheduling:resource_edit' obj.pk %}">
+          <i data-lucide="pencil"></i> Edit resource
+        </a>
+        {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+          <form method="post" action="{% url 'scheduling:resource_delete' obj.pk %}"
+                onclick="return confirm('Delete {{ obj.display_label|escapejs }}? If it has been booked, untick Active instead.');">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-danger">
+              <i data-lucide="trash-2"></i> Delete resource
+            </button>
+          </form>
+        {% endif %}
+        <a class="btn btn-outline" href="{% url 'scheduling:resource_list' %}">
+          Back to resources
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Bookings</span></div>
+      <div class="card-body">
+        {% if appointment_count is None %}
+          <p class="text-muted">
+            Booking counts appear here once the appointments sub-module is built.
+          </p>
+        {% elif appointment_count %}
+          <p>
+            On <strong>{{ appointment_count }}</strong> appointment{{ appointment_count|pluralize }}.
+          </p>
+          <p class="text-muted">
+            Because of that, this resource cannot be deleted &mdash; doing so
+            would blank the room on every one of them. Untick
+            &ldquo;Active&rdquo; instead.
+          </p>
+        {% else %}
+          <p class="text-muted">Never booked.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>One site only</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          A resource is a physical thing, so it belongs to {{ obj.location.name }}
+          and nowhere else. Another site can have a room with the same name
+          &mdash; they are separate resources.
+        </p>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
