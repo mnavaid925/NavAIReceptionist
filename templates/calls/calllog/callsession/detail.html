@@ -210,17 +210,84 @@
     </div>
 
     {% comment %}
-      The remaining panels land here, in this column, in this order:
+      5.2 lands here: the transcript viewer, then the analysis panel. Both read
+      JSON columns already on this row — Invariant 2, no new table.
 
-        5.2  the transcript viewer          (partials/_transcript.html)
+      Still to land in this column:
         5.3  the event log and the cost breakdown
         5.4  the recording player and the transfer outcome
              (partials/_audio_player.html, partials/_transfer_outcome.html)
-
-      They all read JSON columns that already exist on this same row — Invariant
-      2 means none of them adds a table. Nothing here needs to change to make
-      room for them beyond dropping the cards in.
     {% endcomment %}
+
+    {% comment %}
+      `session=obj`, not `session=session`. The partial's contract is
+      `session.transcript`, but this page's context key is `obj` — passing the
+      object under the name the partial expects. Get this wrong and it reads
+      `session.transcript` against an undefined variable, which Django resolves
+      to falsy: the empty state renders on every call, silently, never erroring.
+    {% endcomment %}
+    {% include "partials/_transcript.html" with session=obj %}
+
+    <div class="card">
+      <div class="card-header"><span>Call analysis</span></div>
+      <div class="card-body">
+        {% comment %}
+          Rendered defensively because an abandoned, failed or in-progress call
+          has `analysis == {}` — five seeded rows are exactly that. `dict_get`
+          reads a key without assuming it is present, and each value is printed
+          as-is rather than destructured: Module 3's post-call analysis step
+          (unbuilt) decides whether `success_evaluation` is a bare string or a
+          richer object, so this page must not presume a shape it was not given.
+          Nothing here is `|safe` — the summary is model-authored text about a
+          call whose other half was caller speech.
+        {% endcomment %}
+        {% if obj.analysis %}
+          {% with summary=obj.analysis|dict_get:"summary" evaluation=obj.analysis|dict_get:"success_evaluation" %}
+            {% if summary %}
+              <div class="mb-3">
+                <span class="form-label">Summary</span>
+                <p>{{ summary }}</p>
+              </div>
+            {% endif %}
+            {% if evaluation %}
+              <div class="mb-3">
+                <span class="form-label">Success evaluation</span>
+                <p>{{ evaluation }}</p>
+              </div>
+            {% endif %}
+            {% if obj.analysis.extracted_data %}
+              <div>
+                <span class="form-label">Extracted details</span>
+                <div class="table-wrap" style="margin-block-start: 6px;">
+                  <table class="table">
+                    <tbody>
+                      {% for key, value in obj.analysis.extracted_data.items %}
+                        <tr>
+                          <th scope="row">{{ key }}</th>
+                          <td>{{ value }}</td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            {% endif %}
+            {% comment %}
+              The dict is truthy but every key we know how to render is absent —
+              possible if Module 3 writes an analysis shape this page predates.
+              Say so plainly rather than showing an empty card. Kept inside the
+              `with` block so `summary` and `evaluation` are still in scope — they
+              are undefined outside it.
+            {% endcomment %}
+            {% if not summary and not evaluation and not obj.analysis.extracted_data %}
+              <p class="text-muted">This call was analysed, but none of its details are in a form this page can show yet.</p>
+            {% endif %}
+          {% endwith %}
+        {% else %}
+          {% include "partials/_empty_state.html" with icon="clipboard-x" title="No analysis" message="Nothing happened on this call to analyse — it was abandoned, failed, or is still in progress." %}
+        {% endif %}
+      </div>
+    </div>
 
   </div>
 
@@ -242,6 +309,15 @@
             <i data-lucide="user"></i> View contact
           </a>
         {% endif %}
+        {% comment %}
+          The only way to reach the print page from the product's own navigation
+          — without this link the route resolves but is unreachable except by
+          hand-editing a URL. Same tenant+location scoping as this page, so it is
+          not a wider door than the one the user already walked through.
+        {% endcomment %}
+        <a class="btn btn-outline" href="{% url 'calls:callsession_transcript_print' obj.pk %}">
+          <i data-lucide="printer"></i> Print transcript
+        </a>
         <a class="btn btn-outline" href="{% url 'calls:callsession_list' %}">
           Back to call logs
         </a>
