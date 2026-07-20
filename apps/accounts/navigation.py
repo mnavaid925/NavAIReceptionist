@@ -79,6 +79,13 @@ LIVE_LINKS = {
             'Week view': 'scheduling:calendar_week'},
     '4.5': {'Callback Requests': 'scheduling:callbackrequest_list'},
     '5.1': {'Call Logs': 'calls:callsession_list'},
+    # BUILT, and deliberately contributes no sidebar link. 5.2's surfaces — the
+    # transcript panel, the analysis panel and the print view — are all reached
+    # THROUGH the call detail page that 5.1's 'Call Logs' link already leads to.
+    # Pointing this at callsession_detail would need a pk it does not have, and
+    # pointing it back at the list would just duplicate 5.1's row. Same posture
+    # as 0.1.
+    '5.2': {},
 }
 
 
