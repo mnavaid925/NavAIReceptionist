@@ -2686,3 +2686,422 @@ no realtime surface), `qa-smoke-tester` (80/80). No changes needed from any of t
 * **The seeder's dedupe key is idempotent because of the demo data, not the model** — every seeded row
   within a location happens to carry a distinct `reason`. Documented in the seeder and the skill; a new
   row needs a distinct reason or a better key.
+
+---
+# Sub-module 5.1 — Call Log List (Module 5: Call Logs, `calls`) — plan from research-calls-5.1.md (2026-07-21)
+
+## Shape: CRUD sub-module, with an explicit list+detail-only carve-out
+
+`calls.CallSession` genuinely introduces new tenant+location-scoped data — the CRUD test ("does this
+sub-module's data already exist?") passes, so this is not a view sub-module. But CLAUDE.md names this exact
+model as the carve-out to the CRUD Completeness Rules: *"A completed `calls.CallSession` is a record of what
+happened and has **no** edit view. Its absence is correct; its unguarded presence is the bug."* So: **list +
+detail only.** No `create_view`, no `edit_view`, no `delete_view`, no `form.html`, and the list template's
+Actions column carries a View action only — never Edit or Delete. **This is also a brand-new-app run**
+(`apps/calls/` confirmed absent by the research's own repo-state check), so this plan scaffolds the whole app
+plus its config wire-up, which a sub-module run on an existing app would skip.
+
+## Models (from research — 1 model, within the 1–3 ceiling)
+
+- [ ] **`calls.CallSession`** (`apps/calls/models/CallLogList/CallSessions.py`, sub-module folder
+  `CallLogList` — PascalCase of "5.1 Call Log List") — tenant **AND** location scoped (`TenantLocationOwned`,
+  confirmed against `apps/accounts/models/_base.py` and the ERD's own scoping table: *"tenant AND location:
+  ... `calls.CallSession`"*). Verified FK targets: `tenants.Tenant`/`tenants.Location` (via the base),
+  `scheduling.Contact` (`apps/scheduling/models/ContactDirectory/Contacts.py`, grep-confirmed). Fields, per
+  the ERD (`NavAIReceptionist-ERD.md` lines 307-338) with the one flagged correction:
+  - `contact` — FK `scheduling.Contact`, **`null=True, blank=True, on_delete=models.SET_NULL`**,
+    `related_name='call_sessions'` — Contact & Booking Links / Contact column ("an unknown or withheld caller
+    ID is normal"); `SET_NULL` matches the `CallbackRequest.contact` precedent (4.5) — an erased or removed
+    contact must never cascade-delete the call record, which is the retention artefact of record.
+  - `channel` — `CharField(max_length=32, default='agent_phone')` — ERD field, single value in practice this
+    pass (inbound-phone-only product; no second channel to unify with).
+  - `mode` — `CharField(max_length=16, choices=MODE_CHOICES, default=MODE_LIVE)`,
+    `MODE_CHOICES = [('live','Live'), ('google','Google'), ('gemini','Gemini')]` — mirrors
+    `AgentSetting.VOICE_PROVIDER_CHOICES` exactly (`apps/agents/models/AgentConfiguration/AgentSettings.py`,
+    grep-confirmed) — drives the Mode filter.
+  - `status` — `CharField(max_length=16, choices=STATUS_CHOICES, default='in_progress', db_index=True)`.
+    **`STATUS_CHOICES` ships with FIVE values, not the ERD's stale three** —
+    `in_progress` / `completed` / `abandoned` / `transferred` / `failed`. Code is truth here twice over:
+    `templates/partials/_call_status_badge.html` (already shipped, already wired into 4.1's Contact detail
+    page) hard-codes exactly these five branches, and CLAUDE.md's own Filter Implementation Rules section
+    names the identical five as "the canonical call-status map." Building the ERD's literal three would make
+    the already-shipped partial's `transferred`/`failed` branches unreachable dead code. This is the one
+    deviation from the ERD's literal field table this pass — a correction, not a scope addition — and the ERD
+    prose itself needs updating in the same change (see Docs correction below).
+  - `from_number`, `to_number` — `CharField(max_length=32, db_index=True)` — E.164, real columns (the ERD's
+    own documented delta from its OraOps reference, which buried these in `metadata`) — Session List bullet.
+  - `provider_call_sid` — `CharField(max_length=64, unique=True)` — the Twilio webhook idempotency key
+    (Module 3's job to write; this pass ships the column and its unique constraint).
+  - `transcript` — `JSONField(default=list)` — `[{sequence, role, text, at, offset}]`. **No second table —
+    Invariant 2.**
+  - `logs` — `JSONField(default=list)` — `[{sequence, level, category, title, raw_json, occurred_at}]`. **No
+    second table — Invariant 2.**
+  - `analysis` — `JSONField(default=dict)` — `{summary, success_evaluation, extracted_data}`.
+  - `usage` — `JSONField(default=list)` — `[{turn_sequence, cost_breakdown, cost_usd}]`. 5.1 never appends to
+    this list and never renders it (see Per-turn cost below).
+  - `recording_blob` — `CharField(max_length=512, blank=True, default='')` — private storage path, `""` = no
+    recording. Never rendered as a `src` in this pass (no player is built until 5.4).
+  - `transfer` — `JSONField(default=dict)` — shape already fixed by the shipped `_transfer_outcome.html`
+    partial: `{result, reason, destination, initiated_at, duration_seconds}`. 5.1 reads only `.result` (for
+    the outcome filter) — the full panel is 5.4's, not this pass's (see Templates below for why the panel
+    itself is deliberately NOT included here).
+  - `waveform_peaks` — `JSONField(null=True, blank=True)` — `{caller, bot, bins}`, unused until 5.4.
+  - `started_at`, `ended_at` — `DateTimeField(null=True, blank=True)` — drives the Duration column and the
+    date-range filter.
+  - `metadata` — `JSONField(default=dict)` — **REQUIRED per the research's Compliance section even though
+    5.1 builds no consent/retention UI**: the consent basis and retention window for a recording live here,
+    and shipping the model without this field (or narrower) would block Module 3.5 and 5.4.
+  - `Meta.ordering = ['-created_at']` (ERD default; the list view's own explicit
+    `.order_by('-started_at')` is what actually governs display order — an explicit view-level order always
+    supersedes the model default, so there is no conflict).
+  - `Meta.indexes`: `models.Index(fields=['tenant','location','started_at'], name='idx_call_tenant_loc_started')`,
+    `models.Index(fields=['tenant','status'], name='idx_call_tenant_status')`,
+    `models.Index(fields=['tenant','contact'], name='idx_call_tenant_contact')` — all three named in the ERD;
+    the first is the one this sub-module's own list query hits on every page load (Synthflow's own docs warn
+    an unfiltered-by-date call-log query is slow at volume — the same failure mode applies here).
+  - `duration_display` — a **property**, never a stored column (the ERD's own "derived, never stored"
+    principle for cost applies identically to duration): `ended_at - started_at` when both are set, `"In
+    progress"` when only `started_at` is set, `"—"` when neither is set.
+  - **Form excludes: N/A — no `ModelForm` ships this pass.** List + detail only, per CLAUDE.md's own named
+    exemption for this exact model. If a form is ever added later (it should not be, for the reasons above),
+    it would exclude every field here except nothing — every single field is either server-scoped
+    (`tenant`, `location`), provider-supplied (`from_number`, `to_number`, `provider_call_sid`, `transcript`,
+    `logs`, `analysis`, `usage`, `recording_blob`, `transfer`, `waveform_peaks`, `started_at`, `ended_at`,
+    `metadata`), or workflow-controlled (`status`, `contact`).
+
+## Backend — brand-new app scaffold (`apps/calls/`)
+
+- [ ] `apps/calls/__init__.py` — empty.
+- [ ] `apps/calls/apps.py` — `class CallsConfig(AppConfig): default_auto_field =
+  'django.db.models.BigAutoField'; name = 'apps.calls'; label = 'calls'; verbose_name = 'Call Logs'`.
+- [ ] `apps/calls/migrations/__init__.py` — empty.
+- [ ] `apps/calls/models/_base.py` — re-exports `apps.accounts.models._base`'s `*` and its `__all__`
+  verbatim, same shape as `apps/scheduling/models/_base.py` — does NOT redefine `TenantOwned`/
+  `TenantLocationOwned`. Docstring notes `CallSession` takes `TenantLocationOwned` (the only model this app
+  owns this pass).
+- [ ] `apps/calls/models/CallLogList/__init__.py` — empty, makes the package importable.
+- [ ] `apps/calls/models/CallLogList/CallSessions.py` — the `CallSession` class as specified above,
+  `from apps.calls.models._base import *`, `__all__ = ['CallSession']`. Docstring quotes the ERD's own "why
+  this is ONE table with JSON columns" rationale and states plainly that 5.2/5.3/5.4 read this same row and
+  add zero models.
+- [ ] `apps/calls/models/__init__.py` — `from apps.calls.models.CallLogList.CallSessions import CallSession`;
+  `__all__ = ['CallSession']`; docstring lists the one sub-module folder (`CallLogList/ — 5.1  CallSession`)
+  and notes 5.2-5.4 add no folder here, exactly like `scheduling/models/__init__.py`'s own note about 4.4.
+- [ ] `apps/calls/forms/_common.py` — re-exports `apps.accounts.forms._common`'s `*` and `__all__`, same
+  shape as `apps/scheduling/forms/_common.py`.
+- [ ] `apps/calls/forms/__init__.py` — **no entity file this pass.** `__all__ = []`, with a docstring
+  explaining why: `CallSession` ships no model form (list+detail only), the same posture `agents/forms/
+  __init__.py` already documents for 2.4's Test Call (*"has no model form on purpose"*) — precedent, not a
+  new pattern.
+- [ ] `apps/calls/views/_common.py` — re-exports `apps.accounts.views._common`'s `*`, `__all__` and
+  `paginate`, same shape as `apps/scheduling/views/_common.py`.
+- [ ] `apps/calls/views/CallLogList/__init__.py` — empty.
+- [ ] `apps/calls/views/CallLogList/CallSessions.py` — `from apps.calls.views._common import *` plus:
+  - `_calls_for_location(request)` (entity-local helper, mirrors `scheduling`'s
+    `location_appointments(request)` exactly): returns `CallSession.objects.none()` when
+    `request.location is None`, else `CallSession.objects.filter(tenant=request.tenant,
+    location=request.location).select_related('contact', 'location')`.
+  - `OUTCOME_CHOICES = [('', 'Any outcome'), ('no_transfer', 'No transfer attempted'),
+    ('connected', 'Connected'), ('off_hours', 'Off hours'), ('disabled', 'Disabled'),
+    ('failed', 'Failed'), ('no_answer', 'No answer')]` — a derived filter axis, not a model field, so it
+    lives here rather than on `CallSession` (mirrors `_transfer_outcome.html`'s own branch set).
+  - `callsession_list_view(request)`, `@login_required`: `queryset = _calls_for_location(request)`;
+    `q = request.GET.get('q', '').strip()` → `Q(from_number__icontains=q) | Q(to_number__icontains=q) |
+    Q(contact__first_name__icontains=q) | Q(contact__last_name__icontains=q)`; `status` against
+    `dict(CallSession.STATUS_CHOICES)`; `mode` against `dict(CallSession.MODE_CHOICES)`; `outcome` — `
+    'no_transfer'` → `queryset.filter(transfer__result__isnull=True)` (a JSON key-transform lookup, which
+    returns NULL whether `transfer` is `{}` or simply lacks a `result` key — more portable across MySQL and
+    the SQLite test backend than an exact-dict-equality check on `{}`), any of the five named values →
+    `queryset.filter(transfer__result=outcome)`, anything else (including junk) → no filter, never raise;
+    date range — `date_from`/`date_to` via `apps.scheduling.views._helpers.parse_local_date` (cross-app
+    reuse, same function `appointment_list_view` already uses) converted through
+    `apps.scheduling.availability.local_day_bounds_utc(request.location, date)` — **never
+    `started_at__date`**, same MySQL `CONVERT_TZ()` trap `Appointments.py`'s own module docstring documents
+    — `queryset.filter(started_at__gte=lo)` / `.filter(started_at__lt=hi)`, only when `request.location` is
+    set. `page_obj, elided_page_range = paginate(request, queryset)`. Context passes `status_choices =
+    CallSession.STATUS_CHOICES`, `mode_choices = CallSession.MODE_CHOICES`, `outcome_choices =
+    OUTCOME_CHOICES` explicitly (Filter Implementation Rules — never assume the template can conjure a
+    queryset it wasn't given). Renders `calls/calllog/callsession/list.html`.
+  - `callsession_detail_view(request, pk)`, `@login_required`: `obj =
+    get_object_or_404(_calls_for_location(request).select_related('contact', 'location')
+    .prefetch_related('booked_appointments'), pk=pk)`. Renders `calls/calllog/callsession/detail.html`.
+    **No `callsession_create_view`, `callsession_edit_view` or `callsession_delete_view` — their absence is
+    correct**, per CLAUDE.md's own named exemption for this model.
+- [ ] `apps/calls/views/__init__.py` — `from apps.calls.views.CallLogList.CallSessions import
+  (callsession_list_view, callsession_detail_view)`; `__all__` with both names.
+- [ ] `apps/calls/urls/__init__.py` — a PACKAGE, matching `apps/scheduling/urls/__init__.py`'s shape (not a
+  flat module like `agents/urls.py` — this app is headed for more action routes across 5.2-5.4 on the same
+  entity, so the per-sub-module folder pattern is worth establishing now): `app_name = 'calls'`; imports
+  `urlpatterns as callsession_urlpatterns` from `CallLogList.CallSessions`; `urlpatterns =
+  list(callsession_urlpatterns)`.
+- [ ] `apps/calls/urls/CallLogList/__init__.py` — empty.
+- [ ] `apps/calls/urls/CallLogList/CallSessions.py` — literal route before the pk route (first-match-wins):
+  `path('', views.callsession_list_view, name='callsession_list')`,
+  `path('<int:pk>/', views.callsession_detail_view, name='callsession_detail')`.
+- [ ] `apps/calls/admin.py` — `CallSessionAdmin`: `list_display = ('provider_call_sid', 'tenant', 'location',
+  'contact', 'mode', 'status', 'started_at', 'ended_at')`, `list_filter = ('status', 'mode', 'tenant',
+  'location')`, `search_fields = ('provider_call_sid', 'from_number', 'to_number', 'contact__first_name',
+  'contact__last_name')`, `list_select_related = ('tenant', 'location', 'contact')`, `date_hierarchy =
+  'started_at'`, `ordering = ('-created_at',)`. `readonly_fields` covers every call-runtime-owned/PII-bearing
+  field — `('provider_call_sid', 'from_number', 'to_number', 'transcript', 'logs', 'analysis', 'usage',
+  'recording_blob', 'transfer', 'waveform_peaks', 'started_at', 'ended_at', 'metadata', 'created_at',
+  'updated_at')` — leaving only `tenant`/`location`/`contact`/`channel`/`mode`/`status` editable as a genuine
+  back-office correction path, same "break-glass tool" posture as `AppointmentAdmin`.
+- [ ] `apps/calls/management/__init__.py` — empty.
+- [ ] `apps/calls/management/commands/__init__.py` — empty.
+- [ ] `apps/calls/management/commands/seed_calls.py` — see Wire-up → Seeder below.
+- [ ] `apps/calls/tests/__init__.py` — empty.
+- [ ] `apps/calls/tests/conftest.py` — fixtures mirroring `apps/scheduling/tests/conftest.py`'s shape (tenant,
+  two locations, a management-tier client, a contact fixture reused from `scheduling`).
+- [ ] `makemigrations calls` → `apps/calls/migrations/0001_initial.py`, `CallSession` only.
+
+## Additive migration — `scheduling.Appointment.booked_by_session` (the second deliverable this pass)
+
+- [ ] **Only after `apps.calls` is in `INSTALLED_APPS` and its `0001_initial` migration exists** (Django
+  refuses to migrate a relation to an uninstalled app — the exact failure `Appointments.py`'s own docstring
+  already documents), edit `apps/scheduling/models/Bookings/Appointments.py`:
+  - Add: `booked_by_session = models.ForeignKey('calls.CallSession', null=True, blank=True,
+    on_delete=models.SET_NULL, related_name='booked_appointments')` — `SET_NULL`, not `CASCADE`: an erased or
+    retention-purged `CallSession` must not silently delete booking history. `related_name='booked_appointments'`
+    (not singular) — a single call could in principle produce more than one appointment.
+  - Replace the docstring's *"`booked_by_session` is deliberately absent..."* paragraph (lines 13-20) with a
+    short note that it now exists, added by 5.1's additive migration, and that `source` alone no longer
+    carries provenance unaccompanied — a real FK now backs it for AI-phone bookings.
+- [ ] `apps/scheduling/views/_helpers.py::location_appointments` — add `'booked_by_session'` to the existing
+  `.select_related(...)` tuple, so the appointment detail page's new panel (below) costs no extra query.
+- [ ] `apps/scheduling/admin.py::AppointmentAdmin` — add `'booked_by_session'` to `readonly_fields` (system-
+  written provenance, same tier as `cancelled_at`).
+- [ ] `makemigrations scheduling` → one new migration (next in sequence after 4.5's `CallbackRequest`
+  migration), adding only `booked_by_session` to `Appointment`, auto-dependent on `apps.calls`'s
+  `0001_initial` — verify no unrelated diff on any other model.
+- [ ] **Un-stub `templates/scheduling/bookings/appointment/detail.html`'s "How this was booked" card**
+  (the exact `{% comment %}` block at the point the calls app didn't exist): replace it with
+  `{% if obj.booked_by_session %}` rendering a link to `{% url 'calls:callsession_detail'
+  obj.booked_by_session.pk %}` (labelled with `obj.booked_by_session.provider_call_sid`) plus
+  `{% include "partials/_call_status_badge.html" with obj=obj.booked_by_session %}`; `{% elif obj.source ==
+  'ai_phone' %}` keeps a shorter version of the existing placeholder text (now correctly saying Module 3, the
+  call runtime, is what's still unbuilt — not the calls app, which now exists) for the case where an
+  AI-phone booking predates the runtime actually recording one.
+
+## Docs correction (carried over from 4.5's Review Notes — reconcile in 5.1)
+
+- [ ] **`NavAIReceptionist-ERD.md` lines 303-305** — `CallbackRequest`'s "Deltas from the reference" prose
+  currently reads *"...nothing writes it here — `CallSession.metadata` already carries the call-level detail,
+  and the callback links to that session)..."* — stale prose implying an FK that was never built.
+  `CallbackRequest`'s own docstring (`apps/scheduling/models/CallbackRequests/CallbackRequests.py`, built in
+  4.5) is explicit: *"No FK to `calls.CallSession`... the ERD's `CallbackRequest` specifies no session FK at
+  all. There is nothing deferred here, and no placeholder column."* Fix: reword the ERD prose to *"...
+  `CallSession.metadata` already carries the call-level detail, and `CallbackRequest` itself carries no FK to
+  it)..."* — a documentation-only fix, zero schema change. **This pass does NOT add a `CallbackRequest` →
+  `CallSession` FK** — that would be scope this sub-module's own instructions never asked for, and the
+  research independently confirmed the omission is deliberate, not a gap.
+- [ ] **`NavAIReceptionist-ERD.md` line 324** — the `CallSession.status` field row currently lists only three
+  choices (`in_progress` / `completed` / `abandoned`). Update it to the five values the shipped badge partial
+  and CLAUDE.md's canonical map already commit to: `in_progress` / `completed` / `abandoned` / `transferred`
+  / `failed`.
+
+## Realtime & agent surface
+
+**N/A this pass for its own write path** — exactly like every prior sub-module before Module 3 exists, 5.1
+registers no LLM tool, adds no consumer, calls no provider adapter, and appends nothing to
+`calls.CallSession.usage` (5.1 doesn't even render `usage` — that's 5.3's job). It ships the table Module 3
+will write into and the tool surface will one day read:
+- [ ] Document (in `CallSession`'s own model docstring) that this row is written once, by the media-stream
+  consumer Module 3 will add, and that `contact_id`/`session_id` on any future tool always come from server
+  session state — never a tool parameter — per Invariant 3. Nothing to trace through "both runtime paths"
+  yet: there is no tool to trace, only the table it will write to.
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` → `LIVE_LINKS['5.1'] = {'Call Log': 'calls:callsession_list'}` — the one
+  new entry this pass adds; every other key untouched.
+- [ ] `config/settings.py` → `INSTALLED_APPS` — add `'apps.calls'` after `'apps.scheduling'`, under a new
+  `# Module 5 — Call Logs` comment (brand-new app, so this line IS touched this pass, unlike a sub-module run
+  on an existing app).
+- [ ] `config/urls.py` → add `path('calls/', include('apps.calls.urls')),` **before**
+  `path('', include('apps.accounts.urls'))` — accounts owns the site root and must stay last or its catch-all
+  dashboard route shadows everything after it (the same ordering constraint the file's own docstring already
+  states for `tenants`/`agents`/`scheduling`).
+- [ ] `config/asgi.py` — **NOT touched.** 5.1 has no websocket route; Module 3 is what adds one.
+- [ ] `AUTH_USER_MODEL` — **N/A, already declared** in a prior run; this is not the first run of all.
+- [ ] **Seeder — `seed_calls.py`, idempotent on `provider_call_sid`, runs on top of `seed_tenants` +
+  `seed_accounts` + `seed_scheduling` (looks up existing `Location`/`Contact`/`Appointment` rows by their
+  established slugs/names rather than inventing a second demo universe, exactly like `seed_scheduling`'s own
+  precedent):**
+  - `DEMO_CALL_SESSIONS` keyed by location slug (`downtown`, `uptown`, `riverside`, `lakeside` — all FOUR
+    demo locations, per Seed Command Rule 6), 2-3 rows each, covering:
+    - all **five** `status` values across the whole set (so the badge partial's every branch is exercised),
+    - a mix of `mode` values (`live`/`google`/`gemini`),
+    - some rows with `contact=None` (an unidentified caller — resolved by phone-only, no name),
+    - some rows linked to an existing seeded `Contact` (e.g. `('Dana', 'Whitfield')` at `downtown`,
+      `('Helena', 'Ostrom')` at `riverside`) via the same `(tenant, first_name, last_name)` lookup
+      `seed_scheduling._seed_appointments` already uses,
+    - `transfer.result` spanning `connected` / `off_hours` / `disabled` / `failed` / `no_answer` on a handful
+      of rows (so the outcome filter has a real bucket for each value) and `transfer={}` (no attempt) on the
+      rest — the common case, since most calls never ask for a human,
+    - realistic `transcript` (a short hand-authored `[{sequence, role, text, at, offset}]` list),
+      `logs` (`[{sequence, level, category, title, raw_json, occurred_at}]`), `analysis`
+      (`{summary, success_evaluation, extracted_data}` — deliberately `{}` on the `abandoned`/`failed` rows,
+      so 5.2's defensive rendering has a real empty case to prove itself against) and `usage`
+      (`[{turn_sequence, cost_breakdown, cost_usd}]`) — all hand-authored JSON, never touching a provider.
+    - `provider_call_sid` pattern `f'FAKE-CALL-{location.slug}-{n:04d}'` — globally unique by construction,
+      which is also the dedupe key: `if CallSession.objects.filter(provider_call_sid=sid).exists(): skip`.
+    - **At least one `completed`-status row sets `booked_by_session`** on an existing seeded
+      `Appointment` — e.g. the Downtown `('Dana', 'Whitfield')` / `'Routine check-up'` appointment
+      `seed_scheduling` already creates — resolved by `(tenant, location, contact, service__name)` and
+      updated via `appointment.booked_by_session = session; appointment.save(update_fields=
+      ['booked_by_session', 'updated_at'])`, so the Contact & Booking Links bullet is demonstrable end to
+      end without inventing a new appointment.
+  - **Runs entirely under `PROVIDER_MODE=fake` and never reaches a real provider** — Module 3's fake/sandbox
+    provider adapters don't exist yet, so this seeder hand-authors the JSON directly rather than routing
+    through an adapter object; per the research's own Compliance note, this still satisfies the "seeders
+    never touch a real provider" rule, because nothing here dials anything.
+  - Print-instructions block: extend the existing seeder chain's final message (or add its own, if run
+    standalone) noting call sessions are location-scoped like appointments, and that one seeded call created
+    a real booking link.
+
+## Templates (`templates/calls/calllog/callsession/` — new sub-module + entity folder)
+
+- [ ] `templates/calls/calllog/callsession/list.html` — extends `base.html`; page header "Call Log", no
+  primary "add" action (there is nothing to add by hand); includes `_filters.html`; table columns: Started
+  (`started_at`, or `—` when null), Duration (`obj.duration_display`), From, To, Contact
+  (`{% url 'scheduling:contact_detail' %}` link + `display_name`, or "Unknown caller" un-linked when
+  `contact` is null), Status (`{% include "partials/_call_status_badge.html" with obj=session %}` —
+  **reused verbatim, never re-inlined**), Booking (a link to `scheduling:appointment_detail` when
+  `session.booked_appointments.exists()`, else `—`), Actions (**View only** — a single eye-icon link to
+  detail; no Edit, no Delete icon, no delete form — their absence is correct); pagination via
+  `partials/_pagination.html`; two empty-state variants exactly like `bookings/appointment/list.html`'s own
+  pattern — "choose a location" when `request.location` is None, "no calls match" (with a "clear filters"
+  affordance) otherwise.
+- [ ] `templates/calls/calllog/callsession/_filters.html` — `q` search input; `status` `<select>` from
+  `status_choices` (`==` string comparison, Filter Implementation Rules); `mode` `<select>` from
+  `mode_choices`; `outcome` `<select>` from `outcome_choices`; `from`/`to` date inputs; Reset link clearing
+  the querystring.
+- [ ] `templates/calls/calllog/callsession/detail.html` — header card: From/To numbers, Contact (link or
+  "Unknown caller"), Location, Mode (`{{ obj.get_mode_display }}`), Status
+  (`{% include "partials/_call_status_badge.html" with obj=obj %}`), Started/Ended timestamps, Duration
+  (`obj.duration_display`). A "Booked from this call" card listing `obj.booked_appointments.all` with links
+  to `scheduling:appointment_detail`, or "No appointment was booked from this call." **Deliberately does
+  NOT render `_transfer_outcome.html`, `_transcript.html` or `_audio_player.html`** — the research is
+  explicit that 5.1 needs only the outcome *filter*, not the transfer/transcript/recording *panels*, which
+  are 5.2's and 5.4's surfaces. In their place, one placeholder card: "Transcript, event log, cost breakdown
+  and recording appear once Module 5.2-5.4 are built." Actions sidebar: "Back to call log" link only — no
+  Edit, no Delete.
+
+## Verify
+
+- [ ] `makemigrations calls` → one new migration, `CallSession` only; `makemigrations scheduling` → one new
+  migration, `booked_by_session` on `Appointment` only; `migrate`.
+- [ ] `seed_calls` ×2 (idempotent on `provider_call_sid`) — second run reports every row already present, 0
+  duplicates; `seed_scheduling` unaffected (it never re-runs the calls seeder's work).
+- [ ] `manage.py check` — no new issues.
+- [ ] `PROVIDER_MODE=fake` asserted — `seed_calls` makes zero provider calls (there is no provider adapter to
+  route through yet, and the seeder hand-authors JSON directly, never dialing anything).
+- [ ] `pytest apps/calls` — new files:
+  - `test_models.py` — `STATUS_CHOICES` has exactly five values matching the shipped badge partial's
+    branches; `provider_call_sid` unique constraint raises `IntegrityError` on a duplicate insert (**this IS
+    the idempotency-key test this pass can actually run** — the full webhook redelivery path is Module 3's,
+    but the schema guarantee it will lean on is provable now); `duration_display`'s three branches (both
+    timestamps set / only `started_at` / neither); `contact` `SET_NULL` proved through a real delete (an
+    erased/removed `Contact` leaves the `CallSession` row intact with `contact=None`); default `Meta.ordering`
+    is `-created_at`.
+  - `test_views.py` — list defaults to newest-first by `started_at` (not `created_at`); every filter axis
+    (status/mode/outcome/date-range/search) narrows correctly and a junk value degrades to "no filter", never
+    raises; `outcome=no_transfer` matches rows with `transfer={}`; pagination; the Contact column links when
+    `contact` is set and reads "Unknown caller" un-linked when it is not; the Booking column links only when
+    `booked_appointments.exists()`; detail page renders the header fields and the placeholder card; **no
+    `callsession_create`/`callsession_edit`/`callsession_delete` URL exists** — `reverse()` on any of those
+    names raises `NoReverseMatch`, proving the carve-out rather than merely trusting it.
+  - `test_security.py` — cross-tenant `admin_acme` gets 404 on a `globex` `CallSession`'s detail page;
+    cross-location — a user assigned only to Downtown gets 404 on an Uptown `CallSession`'s detail page; the
+    list view returns zero rows (not another tenant's/location's rows) when `request.location` is `None`.
+  - Extend `apps/scheduling/tests/test_booking_models.py` / `test_booking_views.py` — `booked_by_session`
+    round-trips; deleting the linked `CallSession` leaves the `Appointment` intact with
+    `booked_by_session=None` (`SET_NULL` proved through a real delete, mirroring `Contact.anonymize()`'s own
+    `SET_NULL` proof pattern); the un-stubbed "How this was booked" panel renders the link when
+    `booked_by_session` is set and the shorter placeholder when it is not.
+- [ ] Twilio webhook signature + idempotency — **N/A for signature verification** (5.1 ships no webhook,
+  Module 3 does). The **idempotency key itself is tested at the model level** — see
+  `test_models.py`'s `provider_call_sid` uniqueness test above, which proves the schema Module 3's webhook
+  will depend on.
+- [ ] Websocket connect/reject — **N/A**, this sub-module ships no consumer.
+- [ ] `temp/verify_5_1.py` smoke sweep as `admin_acme` (password `navai-demo-2026`, confirmed from
+  `apps/accounts/management/commands/seed_accounts.py`'s own `DEMO_PASSWORD` constant, printed at the end of
+  the seed run): `calls:callsession_list` 200, newest-first, all five status badges visible across the
+  seeded set; each filter axis narrows the list (`?status=`, `?mode=`, `?outcome=`, `?from=`/`?to=`, `?q=`);
+  `calls:callsession_detail` 200 for a seeded row, contact link resolves for an identified row and reads
+  "Unknown caller" for an unidentified one, the Booked appointment link resolves for the row that set
+  `booked_by_session`; cross-tenant `globex` call pk → 404; switch location to Uptown → sees Uptown's calls,
+  not Downtown's; `scheduling:appointment_detail` for the linked appointment now shows the "Originating call"
+  panel with a working link back to `calls:callsession_detail`; no `{#`/`{% comment` leaks; sidebar shows
+  `5.1` Live under Module 5 with a working "Call Log" link.
+
+## Close-out
+
+- [ ] Review agents, in order: `code-reviewer` → `explorer` (confirm the app scaffold matches the
+  Backend Package Structure rule exactly, confirm every `__init__.py` re-export block is complete) →
+  `frontend-reviewer` (confirm `_call_status_badge.html` is `{% include %}`-ed, never re-inlined; confirm
+  no `_transfer_outcome.html`/`_transcript.html`/`_audio_player.html` leaked into 5.1's detail page ahead of
+  schedule) → `performance-reviewer` (confirm the list view hits `idx_call_tenant_loc_started`, confirm no
+  N+1 on the Booking column via `prefetch_related('booked_appointments')`) → `realtime-reviewer` (expected
+  to find nothing — no realtime surface yet, same as every `scheduling` sub-module) → `qa-smoke-tester` →
+  `security-reviewer` (confirm the list/detail 404 correctly on cross-tenant AND cross-location, confirm no
+  create/edit/delete route exists at all, confirm `transcript`/`logs`/`recording_blob` are never logged at
+  INFO anywhere in the new views) → `test-writer`.
+- [ ] **Author** `.claude/skills/calls/SKILL.md` — brand-new app, first sub-module: Overview, Models
+  (`CallSession` — fields, choices, FKs, the Invariant 2 rationale), URLs/routes (`calls:callsession_list`,
+  `calls:callsession_detail` — explicitly note the absence of create/edit/delete and why), Templates,
+  Tools & prompt surface ("no tool registered yet — Module 3 will add one; identity args will come from
+  server state, never the model, per Invariant 3"), Realtime surfaces ("none yet — see Module 3"), Seeder
+  (`seed_calls`, the `DEMO_CALL_SESSIONS` shape, the `booked_by_session` link), Conventions & gotchas (tenant
+  AND location scoping, the five-value `STATUS_CHOICES` correction, the `outcome` filter's JSON key-transform
+  lookup), Common tasks (add a filter, extend the seeder), Sidebar wiring (`LIVE_LINKS['5.1']`).
+- [ ] README — note the new Call Log page, only if the project README already enumerates other modules'
+  pages.
+
+## Later passes / deferred
+
+Carried over verbatim from `research-calls-5.1.md`'s own Deferred / Out-of-scope / Belongs-to-siblings
+sections:
+
+- **Session header detail rendering (full), speaker-attributed transcript, analysis panel, transcript print
+  view** → 5.2 Call Detail & Transcript (reads `CallSession.transcript`/`.analysis`, adds zero models).
+- **Structured event log, tool-call trace, per-turn cost breakdown, runtime error surface** → 5.3 Event Log &
+  Cost (reads `CallSession.logs`/`.usage`, adds zero models).
+- **Waveform player, signed media access, the full transfer-outcome panel, PII handling write-up** → 5.4
+  Recording & Transfer Outcome (reads `CallSession.waveform_peaks`/`.recording_blob`/`.transfer`, adds zero
+  models). 5.1 ships only the outcome *filter*.
+- **The actual writer of `CallSession` rows from a real inbound call** (webhook resolution, the media-stream
+  consumer, the turn loop) → Module 3 (Call Runtime), none of which exists yet.
+- **Populating `booked_by_session` from a live call** → Module 3.3's `book_appointment` tool, once it exists.
+- **`Contact.anonymize()`'s erasure cascade extended to `CallSession` — deliberately NOT done this pass.**
+  `CallSession.contact` is `SET_NULL`, same precedent as `CallbackRequest.contact`, so an erased contact
+  never cascade-deletes the call record. But unlike `CallbackRequest.caller_name`/`caller_phone` (a
+  duplicated copy of caller identity, and therefore correctly scrubbed by 4.5's cascade fix),
+  `CallSession.from_number`/`to_number`/`transcript` ARE the call detail record itself, not a duplicated
+  identity field — scrubbing them on contact erasure would destroy a record a retention policy may still
+  require keeping. The correct erasure mechanism is the call detail record's own retention window, enforced
+  by Module 3.5's scheduled job (per the Module 3 catalog: *"the retention window is enforced by a scheduled
+  job"*), not a contact-triggered field blank. Revisit only alongside that job, since the two are the same
+  policy decision made once, not twice — never scrubbing it anywhere in the meantime is a known, visible GDPR
+  gap this note exists to keep from being forgotten, not silently accepted.
+- **Per-row disposition icons** (composed from `booked_appointments.exists()`/`transfer.result`/`status`,
+  Smith.ai's strongest researched signal) — real and buildable now, but genuinely "beyond the bullets"; a
+  polish pass, not this one.
+- **Booking-outcome as a second "outcome" filter value** (`booked` vs. `not booked`) — buildable now that
+  `booked_by_session` exists, deliberately not folded into the same outcome dropdown as `transfer.result` (
+  keeps that filter's semantics singular) — a dedicated icon/column in a later polish pass instead.
+- **Configurable/reorderable list columns** (Bland, Retell) — no schema impact, not asked for by the bullets.
+- **Custom post-call analysis field filtering** (Retell) and **talk-time/speaker-ratio filtering** (Dialpad)
+  — both belong conceptually with 5.2/5.3's analysis surfaces, not the plain list.
+- **CSV export of the call log** (Synthflow, Ruby) — not named by any Module 5 sub-module's bullets.
+- **Lead-priority tiers / caller classification** (Smith.ai) — out of scope for this product; no CRM-style
+  scoring layer among the seven capabilities, and `Contact.source` already covers the one provenance axis
+  this product actually models.
+- **Multi-channel unified inbox** (Ruby/Rosie) — this product is inbound-phone-only.
+- **Contact-center agent performance analytics** (Dialpad, PolyAI) — there are no human agents fielding these
+  calls in this product's model.
+
+## Review notes
+
+(filled in at the end)
