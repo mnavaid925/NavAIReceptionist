@@ -2620,6 +2620,69 @@ Carried over verbatim from `research-scheduling-4.5.md`'s own Deferred / Out-of-
   (see the cascade fix above): those fields are the queue's own operational message, not caller identity: a
   well-scoped future addition if a stricter erasure policy is ever adopted, not silently expanded to now.
 
-## Review notes
+## Review notes — 4.5 Bookings List & Callback Requests
 
-(filled in at the end)
+Built as planned: one model (`CallbackRequest`), full CRUD + resolve, the two scoped extras, and the
+erasure cascade. 34 commits. Final state: **536 tests passing** (424 before), `manage.py check` clean,
+`makemigrations --check` reports no changes, seeder idempotent on a second run, both IDOR classes 404.
+
+### The finding that mattered: erasure was incomplete in two different ways
+
+The research flagged that `CallbackRequest.contact` being `SET_NULL` creates a PII exposure — erasing a
+person leaves the caller identity copied onto the callback row. Fixing that took **three** passes, because
+each fix revealed the next hole:
+
+1. **The plan's fix** cascaded from `Contact.anonymize()`. Correct as far as it went.
+2. **`code-reviewer` caught** that `contact_delete_view` hard-deletes and never touched the cascade — so
+   the HARD erasure path erased *less* than the soft one, on a view whose own docstring calls it a
+   GDPR/CCPA erasure. Fixed by overriding `Contact.delete()` rather than patching the one call site, so
+   the view, the admin's single-object confirmation and the shell are all covered.
+3. **`security-reviewer` caught** that the admin changelist's "Delete selected" calls `queryset.delete()`,
+   which Django executes in bulk without instantiating rows — so `Contact.delete()` never runs. The FK
+   nulls either way, which is the trap: the action *looks* like it worked. Fixed with
+   `ContactAdmin.delete_queryset`.
+
+Worth recording: my `delete()` docstring claimed it "covers the view, the admin, the shell" — which was
+**wrong**, and the security reviewer caught the claim, not just the code. A confident comment asserting
+coverage it does not have is worse than no comment, because it stops the next reader from checking.
+
+`reason` and `notes` are deliberately NOT scrubbed by any of the three paths — they are the queue's
+operational message, not caller identity. That boundary is documented in the method rather than left to
+be rediscovered.
+
+### Other review findings applied
+
+* **`code-reviewer`** — the mark action was check-then-act (`is_open` test, then `save()`), so two
+  receptionists marking completed and no-show together both passed and the later write silently won.
+  Folded the precondition into the `UPDATE ... WHERE`, so the database settles it and the loser is told.
+* **`code-reviewer`** — the `tel:` link was applied to any non-empty `caller_phone`, including the
+  free-text values `clean_caller_phone` deliberately preserves. Added `dialable_phone`; the raw value
+  stays the visible label always, only the LINK is withheld.
+* **`performance-reviewer`** — the `refresh_from_db` after the conditional UPDATE was redundant, because
+  `OPEN_STATUSES` shares no value with `completed`/`no_show`. The comment justifying it was wrong.
+
+### Clean on first pass
+
+`explorer` (all 9 consistency checks), `frontend-reviewer` (all 10 checks), `realtime-reviewer` (correctly
+no realtime surface), `qa-smoke-tester` (80/80). No changes needed from any of the four.
+
+### Carried forward to Module 5
+
+* **`Appointment.booked_by_session`** is still absent — Django refuses a relation to the uninstalled
+  `calls` app. 5.1 must add it as an additive migration and un-stub the "originating call" panel in
+  `bookings/appointment/detail.html`.
+* **An ERD contradiction to reconcile in 5.1.** `NavAIReceptionist-ERD.md` line 303 (prose) says a callback
+  "links to that session", but the `CallbackRequest` field list (lines 297–300) specifies no session FK.
+  The two disagree. `realtime-reviewer` confirmed nothing built here obstructs adding one later —
+  `CallSession.callback_requests` would not clash with `Contact.callback_requests`, and a nullable FK
+  column leaves `idx_callback_tenant_loc_status` untouched.
+
+### Knowingly left as-is
+
+* **`CallbackRequest.status` carries both `db_index=True` and the composite `(tenant, location, status)`
+  index.** The bare index serves no query this app issues, since everything is tenant-scoped, so it is a
+  wasted index write per insert. Kept because `Appointment.status` already does exactly the same, and
+  making one model diverge from its sibling for a micro-optimisation costs more in confusion than it saves.
+* **The seeder's dedupe key is idempotent because of the demo data, not the model** — every seeded row
+  within a location happens to carry a distinct `reason`. Documented in the seeder and the skill; a new
+  row needs a distinct reason or a better key.
