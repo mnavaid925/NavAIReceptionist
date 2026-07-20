@@ -78,6 +78,7 @@ LIVE_LINKS = {
     '4.4': {'Calendar': 'scheduling:calendar_day',
             'Week view': 'scheduling:calendar_week'},
     '4.5': {'Callback Requests': 'scheduling:callbackrequest_list'},
+    '5.1': {'Call Logs': 'calls:callsession_list'},
 }
 
 
