@@ -57,6 +57,37 @@
           </div>
         {% endif %}
       </dl>
+      {% comment %}
+        The attempt trail, when there was more than one. A location can configure
+        a secondary number, so "primary rang out, secondary answered" is a real
+        path — and the single `result`/`destination` pair above only ever shows
+        where the call FINISHED. Without this, the fact that the first number was
+        tried and failed exists nowhere a reader or a query can reach it.
+
+        Rendered only for 2+ attempts: on the overwhelmingly common single-try
+        transfer it would just repeat the Destination row above.
+      {% endcomment %}
+      {% if transfer.attempts and transfer.attempts|length > 1 %}
+        <div style="margin-block-start: 12px;">
+          <span class="form-label">Numbers tried, in order</span>
+          <ol class="text-sm" style="margin-block-start: 6px; padding-inline-start: 20px;">
+            {% for attempt in transfer.attempts %}
+              <li>
+                {{ attempt.destination|phone_e164|default:"Unknown number" }}
+                {% if attempt.result == 'connected' %}
+                  <span class="badge badge-green">Connected</span>
+                {% elif attempt.result == 'no_answer' %}
+                  <span class="badge badge-amber">No answer</span>
+                {% elif attempt.result == 'failed' %}
+                  <span class="badge badge-red">Failed</span>
+                {% else %}
+                  <span class="badge badge-muted">{{ attempt.result|default:"Unknown" }}</span>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ol>
+        </div>
+      {% endif %}
     </div>
   </div>
 {% endif %}
