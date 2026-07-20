@@ -315,15 +315,36 @@
       </div>
       <div class="card-body">
         {% if obj.logs %}
-          <ol class="grid gap-3" style="list-style: none; padding: 0; margin: 0;">
+          {% comment %}
+            Bounded and scrollable — reusing `.transcript-scroll` (max-height +
+            overflow-y), the same guard the transcript uses for the same reason:
+            `logs` is a runtime-written list of unknown length, and a long call's
+            full event stream must not render as unbounded DOM. `role="log"` so a
+            screen reader announces it as an event stream, `tabindex="0"` so it is
+            keyboard-scrollable.
+          {% endcomment %}
+          {% comment %}
+            No `grid gap-3` here: `.transcript-scroll` already lays its children
+            out as a flex column with a gap, and adding `display: grid` on top
+            would fight it. The list markers and default padding still need
+            clearing.
+          {% endcomment %}
+          <ol class="transcript-scroll" role="log" tabindex="0"
+              aria-label="Call event log" style="list-style: none; padding: 0; margin: 0;">
             {% for entry in obj.logs %}
               <li style="padding-block-end: 12px; border-block-end: 1px solid var(--border);">
                 <div class="flex flex-wrap items-center gap-2">
-                  <span class="badge {{ entry.level|level_badge }}">{{ entry.level|default:"info" }}</span>
+                  {% comment %}
+                    Text and colour must agree: `level_badge` defaults a missing
+                    level to `badge-muted`, so the visible text defaults to a dash
+                    (also muted-reading) rather than "info", which would show grey
+                    text claiming to be the info level.
+                  {% endcomment %}
+                  <span class="badge {{ entry.level|level_badge }}">{{ entry.level|default:"—" }}</span>
                   {% if entry.category %}<span class="text-muted text-xs">{{ entry.category }}</span>{% endif %}
                   <span class="font-medium">{{ entry.title }}</span>
                   {% if entry.occurred_at %}
-                    <time class="text-muted text-xs" datetime="{{ entry.occurred_at }}">{{ entry.occurred_at }}</time>
+                    <time class="text-muted text-xs" datetime="{{ entry.occurred_at }}">{{ entry.occurred_at|iso_time }}</time>
                   {% endif %}
                 </div>
 
@@ -346,6 +367,19 @@
                       <span class="text-muted">· {{ entry.raw_json.duration_ms }}ms</span>
                     {% endif %}
                   </div>
+                  {% comment %}
+                    `error.message` is rendered raw, and that is the one spot in
+                    this block with no `redact_args` net under it — by contract,
+                    not oversight. The tool-result envelope is
+                    `{ok, data, error:{code, message}}`; `code` is lower_snake_case
+                    and `message` is a SERVER-authored string describing why the
+                    tool refused, not caller data. `redact_args` also could not
+                    help: it redacts dict VALUES by key name, and this is a free
+                    string with no key to match. If Module 3 ever composes a
+                    message that interpolates an argument, the redaction belongs on
+                    the WRITE side that builds the string — a log surface cannot
+                    scan free text for a name it was never told to look for.
+                  {% endcomment %}
                   {% if not entry.raw_json.ok and entry.raw_json.error %}
                     <p class="text-xs" style="margin-block-start: 2px;">
                       <code>{{ entry.raw_json.error.code }}</code>
@@ -367,10 +401,15 @@
                 {% comment %}
                   The raw payload, expandable and OFF by default — available for a
                   developer, not dumped at rest. Redacted first so the disclosure
-                  cannot become a hole around the trace above, and pretty_json
-                  returns an UNSAFE string so autoescape still escapes it inside
-                  the <pre>. `redact_args` returns {} for a non-dict raw_json, so
-                  the disclosure simply renders an empty object rather than raising.
+                  cannot become a hole around the trace above: `redact_args` walks
+                  to a bounded depth through nested dicts and lists, so it hides
+                  the SAME fields whether it is handed `arguments` (the trace) or
+                  the whole `raw_json` with `arguments` nested inside (here) — a
+                  shallower filter would leak a doubly-nested value in exactly this
+                  spot. `pretty_json` then returns an UNSAFE string so autoescape
+                  still escapes it inside the <pre>, and `redact_args` returns {}
+                  for a non-dict raw_json, so this renders an empty object rather
+                  than raising.
                 {% endcomment %}
                 {% if entry.raw_json %}
                   <details style="margin-block-start: 4px;">
