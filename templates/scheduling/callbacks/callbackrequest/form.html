@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}{% if is_edit %}Edit callback{% else %}Log a callback{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">{% if is_edit %}Edit callback{% else %}Log a callback{% endif %}</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li><a href="{% url 'scheduling:callbackrequest_list' %}">Callbacks</a></li>
+      <li>{% if is_edit %}Edit{% else %}Log{% endif %}</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  One template serves create and edit.
+
+  Neither `tenant` nor `location` is rendered — TenantLocationModelForm stamps
+  both from the request, so a callback always lands at the site you are working
+  at. `source` is not a field either: it is the provenance record of how the row
+  came into existence, and editing a callback the agent logged on a call must
+  not be able to relabel it as manually added.
+{% endcomment %}
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2">
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="card">
+        <div class="card-body grid gap-4 sm:grid-cols-2">
+
+          {% if form.non_field_errors %}
+            <div class="alert alert-red sm:col-span-2" role="alert">
+              <span>{{ form.non_field_errors|join:" " }}</span>
+            </div>
+          {% endif %}
+
+          {% for field in form %}
+            <div class="form-group{% if field.name == 'reason' or field.name == 'notes' %} sm:col-span-2{% endif %}">
+              <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+              {{ field }}
+              {% if field.help_text %}
+                <span class="text-muted text-sm">{{ field.help_text }}</span>
+              {% endif %}
+              {% if field.errors %}
+                <span class="form-error">{{ field.errors|join:" " }}</span>
+              {% endif %}
+            </div>
+          {% endfor %}
+
+        </div>
+
+        <div class="card-header">
+          {% if is_edit %}
+            <a class="btn btn-outline" href="{% url 'scheduling:callbackrequest_detail' obj.pk %}">Cancel</a>
+          {% else %}
+            <a class="btn btn-outline" href="{% url 'scheduling:callbackrequest_list' %}">Cancel</a>
+          {% endif %}
+          <button type="submit" class="btn btn-primary">
+            <i data-lucide="check"></i>
+            {% if is_edit %}Save changes{% else %}Log callback{% endif %}
+          </button>
+        </div>
+      </div>
+
+    </form>
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Not knowing who rang is normal</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          Leave the contact blank when you do not know who called &mdash; that is
+          the ordinary outcome of an inbound call, not a gap to fill in. Whatever
+          name or number you did catch is enough to work the callback, and it can
+          be attached to a contact later.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>The number to ring back on</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          This is often not the number they rang from &mdash; "call my mobile
+          instead". It is kept exactly as you type it, so an extension or an
+          &ldquo;ask for Dana&rdquo; note survives; a value that is nothing but a
+          number is tidied into international form.
+        </p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>This site's queue</span></div>
+      <div class="card-body">
+        <p class="text-muted">
+          {% if active_location %}
+            This callback belongs to {{ active_location.name }} and appears only
+            in that site's queue, because it is the staff there who will ring
+            back. The contact list, by contrast, is business-wide &mdash; a caller
+            who usually visits another site can still be picked here.
+          {% else %}
+            Choose a location first &mdash; a callback is worked by the staff at
+            one site, so it has to belong to one.
+          {% endif %}
+        </p>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
