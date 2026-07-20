@@ -86,6 +86,10 @@ LIVE_LINKS = {
     # pointing it back at the list would just duplicate 5.1's row. Same posture
     # as 0.1.
     '5.2': {},
+    # BUILT, empty for the same reason as 5.2: the event log and cost breakdown
+    # are two more cards on the call detail page that 5.1's 'Call Logs' link
+    # already reaches. No page of its own to point at.
+    '5.3': {},
 }
 
 
