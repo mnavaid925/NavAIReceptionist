@@ -388,8 +388,28 @@ def appointment_mark_view(request, pk, new_status):
         )
         return redirect('scheduling:appointment_detail', pk=obj.pk)  # noqa: F405
 
-    obj.status = new_status
-    obj.save(update_fields=['status', 'updated_at'])
+    # A conditional UPDATE, not `obj.save()`. The `is_open` test above and the
+    # write are otherwise check-then-act: two receptionists clicking "completed"
+    # and "no-show" on the same row at the same moment both pass the check and
+    # the later write silently wins, with no sign the other ever happened.
+    # Folding the precondition into the WHERE clause makes the database settle
+    # it — the loser matches zero rows and is told so, rather than believing it
+    # succeeded. No lock needed: this is one row and one statement.
+    updated = location_appointments(request).filter(
+        pk=obj.pk, status__in=Appointment.OPEN_STATUSES,
+    ).update(status=new_status, updated_at=dj_timezone.now())
+
+    if not updated:
+        messages.error(  # noqa: F405
+            request,
+            'Someone else closed this booking out a moment ago. Reload to see '
+            'where it landed.',
+        )
+        return redirect('scheduling:appointment_detail', pk=obj.pk)  # noqa: F405
+
+    # Refresh so the confirmation names the status that actually landed rather
+    # than the one this request hoped for.
+    obj.refresh_from_db(fields=['status'])
 
     logger.info('Appointment marked appointment_id=%s new_status=%s by user_id=%s',
                 obj.pk, new_status, request.user.pk)
