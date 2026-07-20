@@ -3423,6 +3423,52 @@ Carried over verbatim from `research-calls-5.2.md`'s own Deferred / Beyond-the-b
   explicitly out of scope: this product's every reader is an authenticated tenant user, and building one would
   be a security regression against the same reasoning that governs recording access, not a feature gap.
 
-## Review notes
+## Review notes — 5.2 Call Detail & Transcript
 
-(filled in at the end)
+A VIEW sub-module, and the discipline was in NOT rebuilding what 5.1 shipped. One thin print view, two
+`detail.html` panels, zero models, `makemigrations --check` clean. ~20 commits. Final state: **630 tests
+passing** (616 before, 14 new), both IDOR classes 404 on the print page, and no mutation surface.
+
+### The two integration details that carried the real risk
+
+* **The `session=obj` rename.** The transcript partial reads `session.transcript`, but the page's context key
+  is `obj`. Django resolves an undefined variable to falsy rather than raising, so a wrong include renders the
+  "no transcript" empty state on EVERY call — silently, past any smoke test that only checks for a 200. Got it
+  right at both include sites and asserted a real speaker label renders.
+* **The analysis panel's `{% with %}` scoping.** My first draft referenced `summary`/`evaluation` in a
+  fallback check that sat OUTSIDE the `{% endwith %}`, where they are undefined. Caught it on my own review
+  before running and moved the whole branch inside the block.
+
+### Review findings applied
+
+* **`code-reviewer`** (Important) — `location_sessions` (then `_location_sessions`) had a docstring promising
+  it would move to `views/_helpers.py` the moment a second sub-module shared it, and 5.2 was that sub-module.
+  The code and its own comment disagreed. Promoted it, dropped the leading underscore to match scheduling's
+  shared `location_appointments`, and updated all three callers + the tests.
+* **`frontend-reviewer`** — the print page had no on-screen heading (only `<title>`), so a screen-reader user
+  navigating by headings landed on nothing; added a bare `.page-title` `<h1>` (no `.page-header`, so no
+  breadcrumb the print CSS wouldn't hide). And the `extracted_data` table assumed a dict — a non-dict shape
+  would render a header over an empty tbody; guarded the loop on `.items` so it falls through to the fallback.
+* **`performance-reviewer`** — one finding, and its recommendation was to LEAVE it: the print path carries
+  `location_sessions`'s `booked_appointments__service` prefetch, which it never renders — one cheap, bounded,
+  unused query, which is the right trade for a single audited scoping helper over two. Recorded, not "fixed".
+* **`security-reviewer`** — no vulnerabilities. It surfaced, as an explicitly-not-a-finding pre-existing
+  observation, that the transcript pages set no `Cache-Control: no-store`, so a conversation could be restored
+  from the browser back-forward cache after logout on a shared workstation. I chose to close it for the two
+  TRANSCRIPT-bearing pages (`@never_cache` on detail + print), because a transcript is the most sensitive PII
+  in the product and 5.2 is what makes it renderable — see the deferred item below for why not the whole app.
+* **`qa-smoke-tester`** — 38/38, no fixes.
+
+### Deliberately deferred
+
+* **App-wide `no-store` on PII pages.** The `@never_cache` I added covers only the two transcript pages. The
+  call-log LIST (caller numbers), the contact pages (phone, DOB), the appointment pages — the whole product's
+  read surface has the same latent bfcache gap. The right fix is a shared decorator or a middleware applied
+  once and consistently, not a per-view sweep smuggled in under a 5.2 banner. Half-sweeping it would read as
+  "these pages are special" when the gap is uniform. Flagged here for a dedicated hardening pass.
+
+### Realtime step
+
+**N/A, and noted rather than run.** 5.2 adds no async code, no consumer, no provider call, no tool, and
+touches no schema — the realtime reviewer would have nothing to inspect. Recorded here so the skipped step is
+a decision, not an omission.
