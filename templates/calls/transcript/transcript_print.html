@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% comment %}
+  The printable transcript (sub-module 5.2).
+
+  A STANDALONE page, not an entity list/detail/form, so it sits at
+  `templates/calls/transcript/` rather than inside `calllog/callsession/`
+  (Template Folder Structure rule 6, which names this exact path as its example).
+
+  It reuses `base.html` for ONE reason: `static/css/theme.css` already carries an
+  `@media print` block that hides the sidebar, topbar, footer, settings drawer,
+  `.page-actions`, pagination and table actions, un-shadows `.card`, and lets
+  `.transcript-scroll` overflow visibly. Extending base means that block applies
+  with zero CSS work here — the page reads as an app page on screen and as a clean
+  document on paper. The two on-screen controls live in a `.page-actions` wrapper
+  precisely because that class is one the print stylesheet already removes.
+
+  This is the SAME transcript the detail page renders — PII, a second time. The
+  view behind it is scoped identically (login + tenant + location); nothing on
+  this page is ever `|safe`.
+{% endcomment %}
+
+{% block title %}Transcript — {% if obj.contact %}{{ obj.contact.display_name }}{% elif obj.from_number %}{{ obj.from_number|phone_e164 }}{% else %}unknown caller{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-actions" style="margin-block-end: 16px;">
+  <button type="button" class="btn btn-primary" onclick="window.print()">
+    <i data-lucide="printer"></i> Print
+  </button>
+  <a class="btn btn-outline" href="{% url 'calls:callsession_detail' obj.pk %}">
+    Back to call
+  </a>
+</div>
+
+<div class="card" style="margin-block-end: 16px;">
+  <div class="card-header">
+    <span>Call transcript</span>
+    {% include "partials/_call_status_badge.html" with obj=obj %}
+  </div>
+  <div class="card-body grid gap-4 sm:grid-cols-2">
+    <div>
+      <span class="form-label">From</span>
+      <p>{{ obj.from_number|phone_e164|default:"Withheld" }}</p>
+    </div>
+    <div>
+      <span class="form-label">To</span>
+      <p>{{ obj.to_number|phone_e164|default:"—" }}</p>
+    </div>
+    <div>
+      <span class="form-label">Caller</span>
+      <p>
+        {% if obj.contact %}
+          {{ obj.contact.display_name }}
+        {% else %}
+          Unidentified caller
+        {% endif %}
+      </p>
+    </div>
+    <div>
+      <span class="form-label">Location</span>
+      <p>{{ obj.location.name }}</p>
+    </div>
+    <div>
+      <span class="form-label">Mode</span>
+      <p>{{ obj.get_mode_display }}</p>
+    </div>
+    <div>
+      <span class="form-label">Duration</span>
+      <p>{{ obj.duration_display }}</p>
+    </div>
+    <div>
+      <span class="form-label">Started</span>
+      <p>
+        {% if obj.started_at %}
+          <time datetime="{{ obj.started_at|date:'c' }}">{{ obj.started_at|date:"j M Y, H:i" }}</time>
+        {% else %}
+          <span class="text-muted">Not started</span>
+        {% endif %}
+      </p>
+    </div>
+    <div>
+      <span class="form-label">Ended</span>
+      <p>
+        {% if obj.ended_at %}
+          <time datetime="{{ obj.ended_at|date:'c' }}">{{ obj.ended_at|date:"j M Y, H:i" }}</time>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </p>
+    </div>
+  </div>
+</div>
+
+{% comment %}
+  `session=obj` — same rename as the detail page. The partial's contract is
+  `session.transcript`; this page's context key is `obj`.
+{% endcomment %}
+{% include "partials/_transcript.html" with session=obj %}
+{% endblock %}
