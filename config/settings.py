@@ -105,6 +105,8 @@ INSTALLED_APPS = [
     'apps.agents',
     # Module 4 — Calendar & Bookings
     'apps.scheduling',
+    # Module 5 — Call Logs
+    'apps.calls',
 ]
 
 
