@@ -26,6 +26,8 @@ blobs inside `logs` are personal data by definition. Nothing here logs a field
 value — and the detail view logs nothing at all, because "who read whose call" is
 an audit question this module has no audit trail to answer honestly.
 """
+from django.views.decorators.cache import never_cache
+
 from apps.calls.models import CallSession
 from apps.calls.views._common import *  # noqa: F401,F403
 from apps.calls.views._helpers import location_sessions
@@ -203,6 +205,15 @@ def callsession_list_view(request):
     })
 
 
+# `never_cache` because 5.2 put a full transcript on this page. A phone in a
+# browser's back-forward cache on a shared clinic workstation is a real way for
+# the next person to read a conversation after the receptionist logged out — and
+# a transcript is the most sensitive PII this product holds. This sets no-store /
+# no-cache / must-revalidate so the page is re-fetched (and re-authorised) rather
+# than restored. It covers the two TRANSCRIPT-bearing pages only; the list and
+# the rest of the product carry the same latent gap and want a shared fix, noted
+# in this sub-module's review section rather than half-swept here.
+@never_cache
 @login_required  # noqa: F405
 @require_http_methods(['GET'])  # noqa: F405
 def callsession_detail_view(request, pk):
