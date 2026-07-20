@@ -8,10 +8,17 @@ Sub-module folders, in build order:
 * `ContactDirectory/`   — 4.1  ContactForm
 * `ServicesResources/`  — 4.2  ServiceForm, ResourceForm
 * `Bookings/`           — 4.3  AppointmentForm, AppointmentCancelForm
+* `CallbackRequests/`   — 4.5  CallbackRequestForm, CallbackResolveForm
+
+4.4 (the calendar) added no forms — it reads the booking tables it renders.
 """
 from apps.scheduling.forms.Bookings.Appointments import (
     AppointmentCancelForm,
     AppointmentForm,
+)
+from apps.scheduling.forms.CallbackRequests.CallbackRequests import (
+    CallbackRequestForm,
+    CallbackResolveForm,
 )
 from apps.scheduling.forms.ContactDirectory.Contacts import ContactForm
 from apps.scheduling.forms.ServicesResources.Resources import ResourceForm
@@ -23,4 +30,6 @@ __all__ = [
     'ResourceForm',
     'AppointmentForm',
     'AppointmentCancelForm',
+    'CallbackRequestForm',
+    'CallbackResolveForm',
 ]
