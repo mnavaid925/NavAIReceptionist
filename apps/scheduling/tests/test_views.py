@@ -204,12 +204,15 @@ def test_contact_detail_appointments_are_scoped_to_visible_locations(
     booking on the contact page and must NOT see their A2 one. The contact row
     itself is business-wide; the location-scoped records hanging off it are not.
 
-    (`calls.CallSession` is still unbuilt, so `call_sessions` stays `None` —
-    replace that half when Module 5 lands.)
+    Module 5 has since landed, so the `call_sessions` half is no longer a `None`
+    placeholder: it asserts the SAME scoping over real rows. That half matters
+    more than the appointment one — a call session carries a transcript, so a
+    leak here is caller PII and not just a timestamp.
     """
     from django.utils import timezone as dj_timezone
 
     from apps.accounts.models import UserLocation
+    from apps.calls.models import CallSession
     from apps.scheduling.models import Appointment
 
     start = dj_timezone.now() + timedelta(days=3)
@@ -222,6 +225,17 @@ def test_contact_detail_appointments_are_scoped_to_visible_locations(
         tenant=contact_a.tenant, location=location_a2, contact=contact_a,
         service=service_all_a, start_at=start,
         end_at=start + timedelta(minutes=30), reason='hidden one',
+    )
+
+    call_here = CallSession.objects.create(
+        tenant=contact_a.tenant, location=location_a1, contact=contact_a,
+        from_number='+15551110001', to_number='+15552220001',
+        provider_call_sid='CAscopedvisible0001', started_at=start,
+    )
+    call_elsewhere = CallSession.objects.create(
+        tenant=contact_a.tenant, location=location_a2, contact=contact_a,
+        from_number='+15551110002', to_number='+15552220002',
+        provider_call_sid='CAscopedhidden0002', started_at=start,
     )
 
     # Narrow the member to A1 only, then look at the contact page as them.
@@ -245,7 +259,12 @@ def test_contact_detail_appointments_are_scoped_to_visible_locations(
         'An appointment at a location this user is not assigned to leaked onto '
         'the contact page.'
     )
-    assert response.context['call_sessions'] is None
+    visible_calls = list(response.context['call_sessions'])
+    assert call_here in visible_calls
+    assert call_elsewhere not in visible_calls, (
+        'A call session from a location this user is not assigned to leaked '
+        'onto the contact page — that payload carries a transcript.'
+    )
 
 
 def test_private_location_guard_function_filters_by_assignment(
@@ -255,6 +274,7 @@ def test_private_location_guard_function_filters_by_assignment(
     from django.utils import timezone as dj_timezone
 
     from apps.accounts.models import UserLocation
+    from apps.calls.models import CallSession
     from apps.scheduling.models import Appointment
     from apps.scheduling.views.ContactDirectory.Contacts import (
         _appointments_for,
@@ -273,6 +293,17 @@ def test_private_location_guard_function_filters_by_assignment(
         end_at=start + timedelta(minutes=30),
     )
 
+    call_here = CallSession.objects.create(
+        tenant=contact_a.tenant, location=location_a1, contact=contact_a,
+        from_number='+15551110003', to_number='+15552220003',
+        provider_call_sid='CAguardvisible0003', started_at=start,
+    )
+    call_elsewhere = CallSession.objects.create(
+        tenant=contact_a.tenant, location=location_a2, contact=contact_a,
+        from_number='+15551110004', to_number='+15552220004',
+        provider_call_sid='CAguardhidden0004', started_at=start,
+    )
+
     UserLocation.objects.filter(user=member_user).exclude(
         location=location_a1
     ).delete()
@@ -287,8 +318,9 @@ def test_private_location_guard_function_filters_by_assignment(
     assert here in visible
     assert elsewhere not in visible
 
-    # Module 5 is still unbuilt, so this half stays import-guarded.
-    assert _call_sessions_for(contact_a, request) is None
+    visible_calls = list(_call_sessions_for(contact_a, request))
+    assert call_here in visible_calls
+    assert call_elsewhere not in visible_calls
 
 
 # --------------------------------------------------------------------------- #
