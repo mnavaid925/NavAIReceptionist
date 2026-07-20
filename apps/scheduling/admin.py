@@ -20,6 +20,27 @@ class ContactAdmin(admin.ModelAdmin):
     # un-erased. The record of when erasure happened must not be editable.
     readonly_fields = ('created_at', 'updated_at', 'anonymized_at')
 
+    def delete_queryset(self, request, queryset):
+        """Delete one contact at a time so the erasure cascade actually runs.
+
+        The changelist's "Delete selected" action calls `queryset.delete()`,
+        which Django executes in bulk WITHOUT instantiating rows — so
+        `Contact.delete()` never runs and its scrub of the caller identity
+        copied onto linked `CallbackRequest` rows is silently skipped. The FK
+        still nulls (it is `SET_NULL`), which is the trap: the bulk delete
+        LOOKS like it worked, and leaves `caller_name` / `caller_phone` standing
+        on rows no longer attached to anything that could ever be erased again.
+
+        Single-object admin delete is fine — `ModelAdmin.delete_model` calls
+        `obj.delete()`. It is only the bulk action that needs this.
+
+        Iterating costs one query per contact instead of one for the batch. On a
+        back-office erasure of a handful of people that is the right trade: the
+        whole point of the action is that the data is gone.
+        """
+        for contact in queryset:
+            contact.delete()
+
 
 @admin.register(Service)
 class ServiceAdmin(admin.ModelAdmin):
