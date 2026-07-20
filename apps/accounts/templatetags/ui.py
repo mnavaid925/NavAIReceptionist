@@ -133,6 +133,41 @@ _REDACT_KEY_SUBSTRINGS = (
 )
 REDACTION_MARKER = '[redacted]'
 
+# How deep to descend before giving up. Runtime-written JSON should never be this
+# nested, and an unbounded walk over an adversarial payload is a place to hang —
+# so at the cap a subtree is REPLACED with the marker rather than revealed. Over-
+# redaction is the safe direction; a value we could not fully inspect is hidden,
+# not shown. `raw_json → arguments → contact → field` is depth 4, well inside 6.
+_MAX_REDACT_DEPTH = 6
+
+
+def _redact_key(key):
+    low = str(key).lower()
+    return any(sub in low for sub in _REDACT_KEY_SUBSTRINGS)
+
+
+def _redact_value(value, depth):
+    """Redact recursively through dicts AND lists, to a bounded depth.
+
+    A sensitive KEY hides its whole value; a non-sensitive key is descended into,
+    because a benign name (`arguments`, `contact`, `attendees`) can still hold
+    sensitive fields further down. A scalar under a non-sensitive key is safe to
+    show. At `depth <= 0` a container is replaced wholesale with the marker — the
+    safe direction when we have stopped inspecting.
+    """
+    if isinstance(value, dict):
+        if depth <= 0:
+            return REDACTION_MARKER
+        return {
+            k: (REDACTION_MARKER if _redact_key(k) else _redact_value(v, depth - 1))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        if depth <= 0:
+            return REDACTION_MARKER
+        return [_redact_value(item, depth - 1) for item in value]
+    return value
+
 
 @register.filter(name='redact_args')
 def redact_args(value):
@@ -144,37 +179,21 @@ def redact_args(value):
     the page ever rendering a caller's name, number or date of birth. Non-sensitive
     keys (`service`, `day`, `window`, `topic`) keep their real values.
 
-    Recurses exactly one level into a nested dict value, so the `arguments` inside
-    a whole `raw_json` dump are covered too — the point being that the expandable
-    raw-payload disclosure cannot become a hole around this filter.
+    **Recurses to a bounded depth through both nested dicts and lists** — so it
+    redacts the SAME whether it is handed a bare `arguments` dict (the trace view)
+    or a whole `raw_json` with `arguments` nested inside it (the raw-payload
+    disclosure). That parity is the point: the two call sites sit at different
+    depths, and a one-level filter would redact `arguments.contact.first_name` in
+    the trace but leak it in the disclosure one level below. A doubly-nested value
+    or a `[{full_name: …}]` list is caught too.
 
     Never raises: anything that is not a dict returns `{}`, so a template can chain
-    it unconditionally. It returns a plain dict and touches no HTML — escaping is
-    the template layer's job (see `pretty_json`).
+    it unconditionally. It returns a plain structure and touches no HTML — escaping
+    is the template layer's job (see `pretty_json`).
     """
     if not isinstance(value, dict):
         return {}
-
-    def _sensitive(key):
-        low = str(key).lower()
-        return any(sub in low for sub in _REDACT_KEY_SUBSTRINGS)
-
-    redacted = {}
-    for key, val in value.items():
-        if _sensitive(key):
-            redacted[key] = REDACTION_MARKER
-        elif isinstance(val, dict):
-            # One level down — a benign-named key (`arguments`, `error`) can still
-            # hold sensitive fields. Not deeper: unbounded recursion over
-            # runtime-written JSON is a place to hang, and one level covers the
-            # {tool, arguments:{…}, error:{…}} shape the runtime actually writes.
-            redacted[key] = {
-                k: (REDACTION_MARKER if _sensitive(k) else v)
-                for k, v in val.items()
-            }
-        else:
-            redacted[key] = val
-    return redacted
+    return _redact_value(value, _MAX_REDACT_DEPTH)
 
 
 @register.filter(name='pretty_json')
@@ -193,6 +212,33 @@ def pretty_json(value):
         return json.dumps(value, indent=2, sort_keys=True, default=str)
     except (TypeError, ValueError):
         return str(value)
+
+
+@register.filter(name='iso_time')
+def iso_time(value):
+    """A log entry's `occurred_at` as a bare `HH:MM:SS`, from an ISO string.
+
+    `logs` stamps are `.isoformat()` strings, not datetime objects, so Django's
+    `date` filter cannot format them — it would return the raw string. The event
+    log is a within-one-call timeline under a header that already names the day,
+    so the wall-clock time is all a reader needs; the full ISO value stays in the
+    `<time datetime="…">` attribute for machines.
+
+    Accepts a datetime too (in case the runtime ever writes one). Falls back to
+    the input unchanged on anything it cannot parse — a readable-but-raw stamp
+    beats a blank cell.
+    """
+    if hasattr(value, 'strftime'):
+        return value.strftime('%H:%M:%S')
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    try:
+        from datetime import datetime as _dt
+        # `fromisoformat` handles the `+00:00` offset the seeder writes.
+        return _dt.fromisoformat(text).strftime('%H:%M:%S')
+    except (ValueError, TypeError):
+        return text
 
 
 @register.filter(name='error_log_count')
