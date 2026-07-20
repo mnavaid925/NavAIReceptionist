@@ -209,13 +209,28 @@ class CallSession(TenantLocationOwned):  # noqa: F405
                   'that applies is the policy at the time of the call.',
     )
 
+    # A NON-EMPTY `recording_blob` REQUIRES A CONSENT BASIS IN `metadata`, and
+    # nothing here can enforce that.
+    #
+    # 5.1 never writes either field, so there is nothing to validate yet — but
+    # Module 3.5 does, and this is where the rule has to be honoured: before
+    # persisting a recording path, confirm `metadata` already carries a resolved
+    # consent basis, and refuse the write (recording nothing) if it does not. A
+    # recorded call with no consent record is the failure that matters, and a
+    # malformed or replayed webhook is exactly how one gets created.
+    #
+    # It has to be application-level validation in the write path, not a
+    # `CheckConstraint`: MySQL cannot portably assert anything about a JSON
+    # sub-key, so a database constraint here would be a comfort rather than a
+    # guarantee.
     recording_blob = models.CharField(  # noqa: F405
         max_length=512,
         blank=True,
         default='',
         help_text='PRIVATE storage path; "" = no recording. Served only through '
                   'a short-lived signed URL — never rendered as a src against a '
-                  'public media path.',
+                  'public media path. Must not be set without a consent basis '
+                  'in `metadata` — see the comment above.',
     )
 
     # Null until the call actually starts / ends. Both are UTC (`USE_TZ = True`)
