@@ -294,3 +294,27 @@ class CallSession(TenantLocationOwned):  # noqa: F405
         if minutes:
             return f'{minutes}m {secs}s'
         return f'{secs}s'
+
+    @property
+    def total_cost_usd(self):
+        """The call's total cost, summed from `usage` at READ time — never stored.
+
+        Mirrors `duration_display`'s derivation discipline and the ERD's named
+        anti-pattern (a `cost_usd` COLUMN here would let a view write a total
+        independently of `usage`, so a corrected rate card would leave a stale
+        total behind instead of re-pricing history). The per-turn `cost_usd`
+        the runtime writes is itself the sum of that turn's `cost_breakdown`;
+        this is the sum of those sums.
+
+        Guards each entry: a malformed row — a non-numeric `cost_usd`, or `usage`
+        that is not even a list — contributes 0 rather than raising, because
+        `usage` is JSON the runtime writes and this property must survive a shape
+        it does not fully trust.
+        """
+        total = 0.0
+        for turn in (self.usage or []):
+            try:
+                total += float(turn.get('cost_usd', 0) or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return round(total, 4)
