@@ -24,6 +24,25 @@
   </div>
 </div>
 
+{% if quick_ranges %}
+  {% comment %}
+    Shortcuts into the SAME `?from=`/`?to=` filter the bar below posts — each
+    href is a whole querystring, so clicking one drops every other filter. That
+    is the point: these are "show me the shift I am working", not a refinement.
+
+    Absent (and this whole row gone) when no location is active, because "today"
+    has no meaning until we know which site's clock to read it off.
+  {% endcomment %}
+  <div class="card card-body flex flex-wrap items-center gap-3" style="margin-block-end: 16px;">
+    <span class="text-muted">Jump to</span>
+    <span class="flex gap-2">
+      <a class="btn btn-outline" href="{{ quick_ranges.today }}">Today</a>
+      <a class="btn btn-outline" href="{{ quick_ranges.week }}">This week</a>
+      <a class="btn btn-outline" href="{{ quick_ranges.upcoming }}">Upcoming</a>
+    </span>
+  </div>
+{% endif %}
+
 {% include "scheduling/bookings/appointment/_filters.html" %}
 
 <div class="card" style="margin-block-start: 16px;">
@@ -112,6 +131,38 @@
                          aria-label="Edit appointment for {{ a.contact.display_name }}" title="Edit">
                         <i data-lucide="pencil"></i>
                       </a>
+                      {% comment %}
+                        Closing a booking out from the row it is on — the whole
+                        point is not having to open it first. `next` carries the
+                        filters and page number back, so marking the third row of
+                        page 2 returns to page 2 rather than an unfiltered page 1.
+
+                        No confirm() on either: both are one-way but small, and a
+                        prompt on every row of a morning's list is the thing that
+                        trains people to click through prompts. Reversing a
+                        mis-mark is an edit away.
+
+                        Cancelling is deliberately NOT here — it has to record a
+                        reason, so it stays on the detail page's own form.
+                      {% endcomment %}
+                      <form method="post" action="{% url 'scheduling:appointment_mark' a.pk 'completed' %}">
+                        {% csrf_token %}
+                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                        <button type="submit" class="btn btn-icon"
+                                aria-label="Mark appointment for {{ a.contact.display_name }} as completed"
+                                title="Mark completed">
+                          <i data-lucide="check"></i>
+                        </button>
+                      </form>
+                      <form method="post" action="{% url 'scheduling:appointment_mark' a.pk 'no_show' %}">
+                        {% csrf_token %}
+                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                        <button type="submit" class="btn btn-icon"
+                                aria-label="Mark appointment for {{ a.contact.display_name }} as a no-show"
+                                title="Mark no-show">
+                          <i data-lucide="user-x"></i>
+                        </button>
+                      </form>
                     {% endif %}
                     {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
                       <form method="post" action="{% url 'scheduling:appointment_delete' a.pk %}"
