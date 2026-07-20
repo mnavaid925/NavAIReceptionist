@@ -3177,3 +3177,252 @@ sub-key; and `transfer.attempts` for the secondary-number path.
   semantics ever change, since this is the one model carrying a full transcript.
 * **The outcome filter is an accepted scan** — a JSON key transform cannot use an index. Bounded by location,
   not by time. Documented in the code so it stays a decision.
+
+---
+
+# Sub-module 5.2 — Call Detail & Transcript (Module 5: Call Logs, `calls`) — plan from research-calls-5.2.md (2026-07-21)
+
+## Shape: VIEW — ZERO new models, ZERO migrations, ZERO forms
+
+Every one of 5.2's four bullets (Session Header, Speaker-Attributed Transcript, Analysis Panel, Transcript
+Print View) is satisfied by data 5.1 already shipped: `calls.CallSession.transcript` (JSON list) and
+`.analysis` (JSON dict), plus the header scalars 5.1's `detail.html` already renders. The CRUD test ("does
+this sub-module's data already exist?") fails, which is exactly the view-shape signal. `makemigrations calls
+--check` reporting **"No changes detected"** is an acceptance criterion for this pass, not a formality. A
+`Transcript`, `TranscriptTurn`, `ToolCall` or `Analysis` table here would be an **Invariant 2** violation —
+the transcript viewer and the analysis panel are reading surfaces over columns that already exist.
+
+The Session Header bullet is **already fully built by 5.1** — `templates/calls/calllog/callsession/detail.html`
+renders numbers, contact, location, mode, status, started/ended and `duration_display` in its top card, and
+its own `{% comment %}` block (lines 4-17 and 212-223) says so explicitly and marks exactly where the
+remaining panels land: *"5.2 owns the transcript... `partials/_transcript.html`... all exist already —
+including them here would render work that no reviewer has read against a live row."* 5.2 adds **nothing** to
+the header — only the transcript panel, the analysis panel, and the print view are this pass's actual work.
+
+## Models — NONE. Tables READ: `calls.CallSession` only
+
+- [ ] Confirmed by direct read of `apps/calls/models/CallLogList/CallSessions.py`: `transcript` is
+  `JSONField(default=list)` shaped `[{sequence, role, text, at, offset}]`; `analysis` is
+  `JSONField(default=dict)` shaped `{summary, success_evaluation, extracted_data}`, "legitimately empty on an
+  abandoned or failed call" per the model's own help_text. No other table is touched. No FK is added anywhere.
+
+## Backend (`apps/calls/{views,urls}/CallDetailTranscript/` — new sub-module folder; no `models/` or `forms/` folder this pass)
+
+- [ ] **Sub-module folder name, derived per the Backend Package Structure rule's own worked precedent**:
+  PascalCase of the real heading "5.2 Call Detail & Transcript" → `CallDetailTranscript` — confirmed against
+  the as-built pattern of ampersand-bearing headings elsewhere (`apps/scheduling/views/ServicesResources/` from
+  "4.2 Services & Resources", ampersand dropped). **Entity filename stays `CallSessions.py`, unchanged from
+  5.1** — this is still the `CallSession` entity, not a new one; the project's own precedent for "same entity,
+  new sub-module folder" is `apps/agents/views/{AgentConfiguration,TwilioConnection,TransferSettings,TestCall}/
+  AgentSettings.py` — four sub-module folders, one entity filename, repeated verbatim in each. 5.2 follows that
+  shape exactly rather than scattering a second `CallSession`-related filename into the tree.
+- [ ] `apps/calls/views/CallDetailTranscript/__init__.py` — empty, new package.
+- [ ] `apps/calls/views/CallDetailTranscript/CallSessions.py` — `from apps.calls.views._common import *`;
+  `from apps.calls.views.CallLogList.CallSessions import _location_sessions` (**absolute import, reused
+  directly rather than redefined** — a second tenant+location-scoping helper over the same table is a second
+  place for a scoping bug to hide; `_location_sessions` is a leading-underscore name, but `__all__` only
+  restricts `import *`, so a direct `from ... import _location_sessions` is legal and is the intended reuse
+  path). One view:
+  - `callsession_transcript_print_view(request, pk)`, `@login_required`, `@require_http_methods(['GET'])`:
+    `obj = get_object_or_404(_location_sessions(request), pk=pk)` — **identical scoping to
+    `callsession_detail_view`**, so a pk from another tenant or another location 404s here exactly as it does
+    on the detail page. Renders `calls/transcript/transcript_print.html` with `{'obj': obj}` — same context-key
+    convention as the detail view (`obj`, not `session`); the template's own `{% include %}` line does the
+    `session=obj` rename locally.
+  - Docstring states plainly: no new model, no new migration; this route is **PII-identical to the detail
+    page** and must never become a shareable/guessable link — session-authenticated, tenant+location scoped,
+    plain incrementing `<int:pk>`, no token parameter, no `@csrf_exempt`.
+- [ ] `apps/calls/views/__init__.py` — extend the existing re-export block: add
+  `callsession_transcript_print_view` to the import (now from **two** sub-module paths —
+  `CallLogList.CallSessions` and `CallDetailTranscript.CallSessions`) and to `__all__`; update the module
+  docstring's "Sub-module folders, in build order" list to add
+  `` `CallDetailTranscript/` — 5.2  transcript print view ``.
+- [ ] `apps/calls/urls/CallDetailTranscript/__init__.py` — empty, new package.
+- [ ] `apps/calls/urls/CallDetailTranscript/CallSessions.py` — `from apps.calls import views`;
+  `path('<int:pk>/print/', views.callsession_transcript_print_view, name='callsession_transcript_print')`.
+  Docstring note: this is a literal suffix appended AFTER an existing `<int:pk>` segment — Django's
+  `IntConverter` requires the segment to end at the trailing slash, so `CallLogList`'s bare `<int:pk>/` pattern
+  cannot swallow `<pk>/print/` regardless of which file's `urlpatterns` is concatenated first; the general
+  first-match-wins rule still governs anything added after this one.
+- [ ] `apps/calls/urls/__init__.py` — add `from apps.calls.urls.CallDetailTranscript.CallSessions import
+  urlpatterns as transcript_urlpatterns`; `urlpatterns = list(call_session_urlpatterns) +
+  list(transcript_urlpatterns)` — `CallLogList`'s literal `''` and `<int:pk>/` stay listed first.
+- [ ] **No `apps/calls/models/CallDetailTranscript/` and no `apps/calls/forms/CallDetailTranscript/`** — neither
+  layer gains a file this pass, mirroring `apps/agents/models/` never growing a `TestCall/` folder for 2.4 (no
+  model) and `apps/agents/forms/` following the same "no form" posture. `apps/calls/forms/__init__.py`'s
+  existing docstring already states the "no model form, ever" reasoning for this app generally; no edit
+  required.
+- [ ] `admin.py` — **not touched.** No new field, no new model.
+- [ ] `apps/calls/management/commands/seed_calls.py` — **not touched, confirmed by direct read before writing
+  this plan.** `DEMO_CALL_SESSIONS` already carries hand-authored `transcript` and `analysis` JSON across all
+  four demo locations: `analysis={}` on every `abandoned`/`failed`/`in_progress` row (Downtown row 3, Uptown
+  row 3, Riverside rows 1 & 3, Lakeside row 2) on purpose — 5.2's defensive-rendering path — and a populated
+  `summary`/`success_evaluation`/multi-key `extracted_data` dict on every `completed`/`transferred` row
+  (Downtown row 1, Uptown rows 1-2, Riverside row 2, Lakeside row 1). No seeder edit is required for 5.2.
+
+## Realtime & agent surface
+
+**N/A.** Pure UI over a column Module 3 will one day write. No consumer, no provider adapter, no LLM tool, no
+prompt variable, no `CallSession.usage` cost line — 5.2 never renders or appends to `usage` (that is 5.3's
+surface).
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` → add `'5.2': {}` to `LIVE_LINKS`. Per the file's own docstring — *"Presence
+  of the key means BUILT; the links are optional... A sub-module whose surfaces are not pages a signed-in user
+  navigates to... maps to an empty dict. It still counts as built"* — 5.2's transcript panel, analysis panel
+  and print view are all reached **through** the existing `calls:callsession_detail` page that `'5.1'` already
+  links to; there is no new top-level page for the sidebar to point at, and pointing `'5.2'` at
+  `callsession_detail` a second time would just duplicate `'5.1'`'s row. Same pattern already used for `'0.1'`.
+- [ ] `config/settings.py` / `config/urls.py` / `config/asgi.py` — **not touched.** Not a brand-new-app run;
+  `apps.calls` is already installed and routed by 5.1.
+- [ ] **First run of all** — N/A, already satisfied by a prior run.
+
+## Templates (`templates/calls/calllog/callsession/detail.html` extended; one new standalone page)
+
+- [ ] `templates/calls/calllog/callsession/detail.html` — inside the existing marked `{% comment %}` block
+  (the one currently reading *"The remaining panels land here, in this column, in this order..."*), add, in
+  order:
+  1. **Transcript panel**: `{% include "partials/_transcript.html" with session=obj %}`. **The one integration
+     detail this task exists to get right**: the partial's own contract (confirmed by direct read) is
+     `{% include "partials/_transcript.html" with session=session %}`, but `detail.html`'s context key is
+     `obj` — so the include line MUST read `with session=obj`, passing the existing object under the name the
+     partial expects. Getting this wrong renders the partial's own empty state on every call, silently, never
+     erroring (it would read `session.transcript` against an undefined variable, which degrades to falsy rather
+     than raising).
+  2. **Analysis panel** — a new hand-authored card (no shared partial exists for this one; only
+     `_transcript.html`/`_transfer_outcome.html`/`_audio_player.html` are pre-built, confirmed by grep):
+     `{% if obj.analysis %}` branch renders `{{ obj.analysis|dict_get:"summary" }}` and
+     `{{ obj.analysis|dict_get:"success_evaluation" }}` (`{% load ui %}` already present at the top of this
+     template) — rendered **generically**, printed whatever the value is, never destructuring sub-keys the
+     JSON isn't guaranteed to have (`success_evaluation` may be a bare string or a richer dict; Module 3's
+     post-call analysis step, unbuilt, decides the concrete shape) — plus
+     `{% for key, value in obj.analysis.extracted_data.items %}` as a small key/value table (Django's dict dot
+     lookup degrades to nothing on a missing/non-dict `extracted_data` rather than raising, but guard with
+     `{% if obj.analysis.extracted_data %}` around the loop for a clean empty state instead of an empty
+     `<table>`). `{% else %}` branch: an explicit "No analysis for this call — nothing happened here to
+     analyse." message — **never** three blank rows, **never** a raw `None` printed to the page. This is the
+     abandoned/failed/in-progress case the seeder already exercises on five real rows.
+  Update the comment block's own text to drop 5.2 from the "still to land" list, leaving only 5.3 (event log +
+  cost) and 5.4 (recording + transfer outcome) named as pending.
+- [ ] `templates/calls/calllog/callsession/detail.html` — Actions sidebar (the existing card with "View
+  contact" / "Back to call logs"): add one new action, `<a class="btn btn-outline" href="{% url
+  'calls:callsession_transcript_print' obj.pk %}"><i data-lucide="printer"></i> Print transcript</a>` — the
+  only way a user reaches the print page from the product's own navigation; without this link the route is
+  functionally unreachable except by hand-editing a URL.
+- [ ] `templates/calls/transcript/transcript_print.html` — **new, standalone page, per Template Folder
+  Structure rule 6's own named worked example** (*"print pages (`calls/transcript/transcript_print.html`)"*) —
+  sits at `templates/calls/transcript/`, deliberately **not** inside `calllog/callsession/` (it is not that
+  entity's list/detail/form). Extends `base.html` (so the already-shipped `@media print` rule in
+  `static/css/theme.css` applies unmodified — confirmed by direct read: it already hides `.app-sidebar`,
+  `.app-topbar`, `.app-footer`, `.settings-drawer`, `.preloader`, `.page-actions`, `.pagination`,
+  `.table-actions`, un-shadows `.card`, and expands `.transcript-scroll` to `overflow: visible` — **zero CSS
+  work this pass**). `{% load ui %}`. Content: a compact header block reusing the same facts as the detail
+  page's top card (From/To via `phone_e164`, Contact link or "Unidentified caller", Location name,
+  `{{ obj.get_mode_display }}`, `{% include "partials/_call_status_badge.html" with obj=obj %}`, Started/Ended
+  timestamps, `obj.duration_display`) — no Actions/Record sidebar, no breadcrumb, nothing the print view
+  doesn't need; then `{% include "partials/_transcript.html" with session=obj %}` (same rename rule applies
+  here too); a `.page-actions`-wrapped row (reusing the class the print CSS already hides, rather than
+  inventing a second print-only class) holding a "Print" button (`onclick="window.print()"`) and a "Back to
+  call" link to `{% url 'calls:callsession_detail' obj.pk %}`. Never `|safe` anywhere in this template — same
+  rule `_transcript.html`'s own docstring states, because this is the identical PII rendered a second time.
+
+## Verify
+
+- [ ] `makemigrations calls --check` → **"No changes detected"** — the acceptance criterion for this
+  sub-module's shape.
+- [ ] `seed_calls` ×2 — not touched, but re-run to confirm it is still idempotent (zero new rows either run;
+  the JSON 5.2 reads already exists on every seeded session).
+- [ ] `manage.py check` — no new issues.
+- [ ] `PROVIDER_MODE=fake` asserted — trivially true, 5.2 imports no provider adapter.
+- [ ] `pytest apps/calls` — new file `apps/calls/tests/test_transcript_views.py` (mirrors
+  `apps/scheduling/tests/test_calendar_views.py`'s naming convention for a pure view sub-module; no new
+  `conftest.py` fixtures needed — `make_call_session`, `session_a1`, `session_a2`, `session_b` already cover
+  every case here):
+  - transcript renders in document order (`turn.sequence` 1..N in DOM order) with the correct
+    `agent`/`user` speaker label and CSS class branch, and `turn.offset` rendered inside the `<time>` element,
+    against a `make_call_session(..., transcript=[...])` with 3+ turns;
+  - an empty `transcript` (`[]`, the default) degrades to the partial's own empty state (`"No transcript"` /
+    `message-square-off` icon), never a raw empty `<div>`;
+  - a populated `analysis` renders `summary`, `success_evaluation` and every `extracted_data` key/value pair;
+  - an empty `analysis` (`{}`, the default) degrades to the explicit "no analysis" message — never a raw
+    `None`, never three blank rows;
+  - a malformed `analysis` shape (`extracted_data` absent, or present but not a dict) does not 500 — mirrors
+    5.1's own `test_detail_view_malformed_json_blob_still_renders` precedent, extended to this panel;
+  - `callsession_transcript_print_view` 200s for a seeded/factory row and renders
+    `calls/transcript/transcript_print.html` with `context['obj']` equal to the session;
+  - print view cross-tenant pk → 404 (`session_b` fixture, mirroring `test_security.py`'s own pattern) and
+    leaves the row's `transcript`/`status` untouched;
+  - print view cross-location pk → 404 (`session_a2` fixture);
+  - print view anonymous → 302 to `accounts:login`;
+  - print view POST → 405, no side effect;
+  - **regression check**: `test_security.py`'s existing `test_no_create_edit_or_delete_url_exists`
+    parametrization is unaffected — `callsession_transcript_print` is a real, legitimate route and must never
+    be added to that "must not resolve" list; add a companion assertion that
+    `reverse('calls:callsession_transcript_print', args=[pk])` DOES resolve, so the two facts (create/edit/delete
+    absent, print present) are both provable rather than one merely assumed from the other.
+- [ ] Twilio signature / idempotency — N/A, 5.2 ships no webhook.
+- [ ] Websocket connect/reject — N/A, 5.2 ships no consumer.
+- [ ] `temp/` smoke sweep as `admin_acme` (password `navai-demo-2026`, confirmed from
+  `apps/accounts/management/commands/seed_accounts.py`): the Downtown `completed`/booked-appointment call's
+  detail page shows the transcript panel with its 9 seeded turns in order AND the analysis panel with its
+  summary, `success` evaluation and 5-key `extracted_data` table; an `abandoned`/`failed`/`in_progress` row's
+  detail page shows the analysis panel's "no analysis" message (and, where that row's transcript is also thin,
+  confirms the transcript panel still renders whatever turns exist rather than treating "no analysis" as "no
+  transcript" too); "Print transcript" link on the detail page resolves and `calls:callsession_transcript_print`
+  200s, rendering the same transcript; cross-tenant `globex` session pk on the print route → 404; cross-location
+  Uptown pk while active at Downtown → 404; no `{#`/`{% comment` leaks on either page; sidebar shows `5.2` Live
+  under Module 5, contributing no new link row (the empty-dict entry).
+
+## Close-out
+
+- [ ] Review agents, in order: `code-reviewer` → `explorer` (confirm `CallDetailTranscript/` matches the
+  Backend Package Structure rule's PascalCase-of-heading convention and the `AgentSettings`-family precedent
+  for "same entity, new sub-module folder"; confirm both `views/__init__.py` and `urls/__init__.py` re-export
+  blocks are complete) → `frontend-reviewer` (confirm `_transcript.html` is included with the `session=obj`
+  rename and never re-authored; confirm the analysis panel never renders `|safe` on `extracted_data` values;
+  confirm no invented badge class appears in the new panels) → `performance-reviewer` (confirm the print view
+  adds **zero** extra queries beyond what `_location_sessions`'s existing `select_related`/`prefetch_related`
+  chain already pays for — it is the exact same helper the detail view uses) → `realtime-reviewer` (expected
+  to find nothing — no realtime surface) → `qa-smoke-tester` → `security-reviewer` (confirm the print route is
+  session-authenticated and tenant+location scoped identically to the detail view; confirm it is not a
+  token/guessable-path surface and is never `@csrf_exempt`; confirm no transcript body, caller number or
+  `extracted_data` value is ever logged) → `test-writer`.
+- [ ] **UPDATE** `.claude/skills/calls/SKILL.md` in place (5.1 authored it; do NOT re-author) — flip the
+  Build-state table's `5.2` row from "not built" to **BUILT**; add `CallDetailTranscript/` to the Routes
+  section (`calls:callsession_transcript_print`); document the analysis panel's rendering contract (`dict_get`,
+  generic `success_evaluation` rendering, the `extracted_data` key/value table) under Templates; note the print
+  view's security posture (session-authenticated, tenant+location scoped via `_location_sessions`, no
+  server-generated PDF, no shareable/guessable link) under Conventions & gotchas; the existing "Add a view
+  sub-module (5.2/5.3/5.4)" Common Task already generalizes this shape correctly, so it needs no edit.
+- [ ] README — update only if it already enumerates per-module page status.
+
+## Later passes / deferred
+
+Carried over verbatim from `research-calls-5.2.md`'s own Deferred / Beyond-the-bullets / Out-of-scope sections:
+
+- **In-transcript keyword search / jump-to-phrase** (Dialpad, PolyAI) — client-side-only, no schema impact;
+  worth a later polish pass once transcripts are long enough to need it.
+- **CSV download of a single transcript** (Dialpad) — distinct from "print"; not named by the bullet.
+- **List-row AI summary** shown inline in the call log LIST row (reads the same `analysis.summary` this
+  sub-module unlocks) — belongs to 5.1's list template as a polish pass, not 5.2's detail-page scope.
+- **Server-rendered, durably-stored PDF export with a signed download link** — deliberately declined this
+  pass (a second, un-signed, potentially longer-lived copy of PII outside the existing `recording_blob`
+  private-path + signed-URL discipline); revisit only alongside 5.4's Signed Media Access pattern, never as a
+  new mechanism invented here.
+- **Per-turn tool-call/function-result markers inside the transcript** ("Transcripts now include function call
+  results" — Retell) → **5.3's Tool-Call Trace** (`logs`, not `transcript`) — kept out so the transcript panel
+  stays a pure speaker-turn view.
+- **Tabbed detail-page layout** (Overview/Transcript/Analysis/Summary as separate tabs — Synthflow) — not
+  adopted; the existing single-scrolling-page-with-stacked-cards shape (and `detail.html`'s own comment
+  committing to it) stays.
+- **Per-turn sentiment/emotion scoring** (Dialpad) — no field exists on `transcript`'s documented
+  `{sequence, role, text, at, offset}` shape; adding one would be a schema change this VIEW sub-module must
+  not make.
+- **Externally shareable/guessable transcript links** ("share the link with a teammate" — Dialpad) —
+  explicitly out of scope: this product's every reader is an authenticated tenant user, and building one would
+  be a security regression against the same reasoning that governs recording access, not a feature gap.
+
+## Review notes
+
+(filled in at the end)
