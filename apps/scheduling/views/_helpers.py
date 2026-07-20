@@ -53,7 +53,13 @@ def location_appointments(request):
         return Appointment.objects.none()
     return Appointment.objects.filter(
         tenant=request.tenant, location=request.location
-    ).select_related('contact', 'service', 'resource', 'provider', 'location')
+    ).select_related(
+        'contact', 'service', 'resource', 'provider', 'location',
+        # `booked_by_session` since 5.1: the detail page's "how this was booked"
+        # panel reads the session's number, status, start and duration, which is
+        # a whole extra query on a page people open all day without it.
+        'booked_by_session',
+    )
 
 
 def parse_local_date(raw):
