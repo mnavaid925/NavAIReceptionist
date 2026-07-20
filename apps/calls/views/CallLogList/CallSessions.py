@@ -91,7 +91,15 @@ def _location_sessions(request):
         return CallSession.objects.none()
     return CallSession.objects.filter(
         tenant=request.tenant, location=request.location
-    ).select_related('contact', 'location').prefetch_related('booked_appointments')
+    ).select_related('contact', 'location').prefetch_related(
+        # `booked_appointments__service`, not just `booked_appointments`. The
+        # detail page names the service each booking is for, and `service` is a
+        # FORWARD FK on the far side of a REVERSE one — the prefetch gets the
+        # appointments in one query and then pays a query per appointment for
+        # the service unless it is spanned here too. Bounded (a call books one
+        # appointment, usually zero) but free to close.
+        'booked_appointments__service',
+    )
 
 
 def _apply_outcome_filter(queryset, outcome):
@@ -107,6 +115,17 @@ def _apply_outcome_filter(queryset, outcome):
     catch only the first and would also compile differently across MySQL and the
     SQLite test backend, which is the kind of divergence that passes CI and
     returns the wrong rows in production.
+
+    **A known, accepted scan.** A JSON key transform cannot use an index, so this
+    predicate is evaluated per row. It is bounded by LOCATION — the caller has
+    already applied `tenant=` and `location=`, which ride
+    `idx_call_tenant_loc_started` — but it is NOT bounded by time unless the user
+    also set a date range. This table grows per call, faster than anything else
+    in the product, so on a long-lived location an outcome filter with no
+    `?from=` eventually scans that site's whole history. Acceptable now, and
+    written down so it stays a decision rather than becoming a surprise. If this
+    filter ever turns hot the answer is a generated column on `transfer.result`,
+    not a different lookup here.
     """
     if outcome == OUTCOME_NO_TRANSFER:
         return queryset.filter(transfer__result__isnull=True)
@@ -126,7 +145,20 @@ def callsession_list_view(request):
     # actually opens, so a slow answer can reorder the pair. The page is about
     # when calls HAPPENED, and this ordering is also what lets the query ride
     # `idx_call_tenant_loc_started`.
-    queryset = _location_sessions(request).order_by('-started_at')
+    # `.defer(...)` the seven JSON columns. This page renders none of them, and
+    # a call's transcript and event log are by far the largest things on the row
+    # — today they are hand-authored fixtures, but Module 3 will write real ones,
+    # and 25 of those per page is a payload the list never looks at. Not a query
+    # count problem; a bytes-off-the-database problem.
+    #
+    # Deferred HERE and not inside `_location_sessions`, deliberately. The detail
+    # page reads the whole row on purpose — that is Invariant 2's design, one
+    # document fetched together — and 5.2/5.3/5.4 read these very columns.
+    # Deferring on the shared helper would silently turn each of those reads into
+    # its own extra query, which is the same N+1 in a new coat.
+    queryset = _location_sessions(request).order_by('-started_at').defer(
+        'transcript', 'logs', 'analysis', 'usage', 'waveform_peaks', 'metadata',
+    )
 
     search = request.GET.get('q', '').strip()
     if search:
