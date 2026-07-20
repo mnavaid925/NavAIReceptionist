@@ -111,6 +111,14 @@ def test_cancel_view_cross_tenant_pk_is_404_and_row_survives(client_a, tenant_b,
     assert appt.status == Appointment.STATUS_SCHEDULED
 
 
+def test_mark_view_cross_tenant_pk_is_404_and_row_survives(client_a, tenant_b, location_b1, contact_b, make_appointment):
+    appt = make_appointment(tenant_b, location_b1, contact_b, status=Appointment.STATUS_SCHEDULED)
+    response = client_a.post(_url('appointment_mark', appt.pk, 'completed'))
+    assert response.status_code == 404
+    appt.refresh_from_db()
+    assert appt.status == Appointment.STATUS_SCHEDULED
+
+
 def test_list_view_never_contains_another_tenants_rows(
     client_a, tenant_a, tenant_b, location_a1, location_b1, contact_a, contact_b, make_appointment,
 ):
@@ -199,6 +207,15 @@ def test_reschedule_view_cross_location_pk_is_404(client_a, tenant_a, location_a
 def test_cancel_view_cross_location_pk_is_404_and_row_survives(client_a, tenant_a, location_a2, contact_a, make_appointment):
     appt = make_appointment(tenant_a, location_a2, contact_a)
     response = client_a.post(_url('appointment_cancel', appt.pk), {'reason': 'nope'})
+    assert response.status_code == 404
+    appt.refresh_from_db()
+    assert appt.status == Appointment.STATUS_SCHEDULED
+
+
+def test_mark_view_cross_location_pk_is_404_and_row_survives(client_a, tenant_a, location_a2, contact_a, make_appointment):
+    """`client_a` active at A1; the appointment belongs to the SAME tenant's A2."""
+    appt = make_appointment(tenant_a, location_a2, contact_a, status=Appointment.STATUS_SCHEDULED)
+    response = client_a.post(_url('appointment_mark', appt.pk, 'completed'))
     assert response.status_code == 404
     appt.refresh_from_db()
     assert appt.status == Appointment.STATUS_SCHEDULED
