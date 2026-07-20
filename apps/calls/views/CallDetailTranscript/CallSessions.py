@@ -8,7 +8,7 @@ transcript.
 
 **It is PII-identical to the detail page, and scoped identically on purpose.** A
 transcript is PII by definition, so this route is `@login_required`, tenant- AND
-location-scoped through the very same `_location_sessions` helper the detail view
+location-scoped through the very same `location_sessions` helper the detail view
 uses, addressed by a plain incrementing `<int:pk>` — never a shareable token,
 never a guessable public path, never a server-generated durably-stored PDF.
 Printing is the browser's job over the `@media print` rules already in
@@ -16,10 +16,9 @@ Printing is the browser's job over the `@media print` rules already in
 """
 from apps.calls.views._common import *  # noqa: F401,F403
 # Reused, not redefined. A second tenant+location-scoping helper over the same
-# table would be a second place for a scoping bug to hide. `_location_sessions`
-# is underscore-prefixed, but `__all__` only governs `import *` — a direct import
-# of the name is legal and is the intended reuse path.
-from apps.calls.views.CallLogList.CallSessions import _location_sessions
+# table would be a second place for a scoping bug to hide — so both this page and
+# 5.1's list/detail pages pull the ONE `location_sessions` from `views/_helpers`.
+from apps.calls.views._helpers import location_sessions
 
 __all__ = ['callsession_transcript_print_view']
 
@@ -29,13 +28,13 @@ __all__ = ['callsession_transcript_print_view']
 def callsession_transcript_print_view(request, pk):
     """A clean, printable transcript for records and disputes.
 
-    `get_object_or_404(_location_sessions(request), pk=pk)` — the identical
+    `get_object_or_404(location_sessions(request), pk=pk)` — the identical
     scoping to `callsession_detail_view`, so a pk from another tenant or another
     location 404s here exactly as it does there. There is no wider door: this
     page shows nothing the detail page would not, to nobody the detail page would
     not.
     """
-    obj = get_object_or_404(_location_sessions(request), pk=pk)  # noqa: F405
+    obj = get_object_or_404(location_sessions(request), pk=pk)  # noqa: F405
     return render(request, 'calls/transcript/transcript_print.html', {  # noqa: F405
         'obj': obj,
     })
