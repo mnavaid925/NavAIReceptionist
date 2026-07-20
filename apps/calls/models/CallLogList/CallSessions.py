@@ -7,17 +7,37 @@ outcome are JSON COLUMNS ON THIS ROW — not `CallTurn`, not `CallEvent`, not
 a refactor, and this docstring exists so that nobody "improves" the schema into
 three tables without first reading why it is one.
 
-**Why one table with JSON columns.** A call session is written once, by one
-process — the media-stream consumer Module 3 will add, which owns the call for
-its whole life — and read as a whole, on one detail page. Nothing in this
-application queries ACROSS turns: there is no cross-call transcript search, no
-per-turn billing rollup, no analytics surface. The transcript, the event log,
-the usage list and the transfer outcome are all *documents about this one call*,
-and they are always fetched together with it. So: one row written, one row read,
-no join, no ordering bug, no second source of truth for "what happened on this
-call". A `Call` + `CallTurn` + `CallEvent` split would buy query power nothing
-uses and cost a database write PER TURN on the latency-critical realtime loop,
-which is the one place in this product where a few milliseconds are audible.
+**Why one table with JSON columns.** A call session is written by ONE process —
+the media-stream consumer Module 3 will add, which owns the call for its whole
+life — and read as a whole, on one detail page. Nothing in this application
+queries ACROSS turns: there is no cross-call transcript search, no per-turn
+billing rollup, no analytics surface. The transcript, the event log, the usage
+list and the transfer outcome are all *documents about this one call*, and they
+are always fetched together with it. So: one row, one read, no join, no ordering
+bug, no second source of truth for "what happened on this call". A `Call` +
+`CallTurn` + `CallEvent` split would buy query power nothing uses and cost a
+database write PER TURN on the latency-critical realtime loop, which is the one
+place in this product where a few milliseconds are audible.
+
+**One WRITER is not one WRITE — do not read the above as "save it all at the
+end".** The row is created when the inbound webhook resolves the dialed number,
+appended to as the call proceeds, and finalized in the consumer's `disconnect()`.
+Buffering a whole call in process memory for a single closing `UPDATE` would mean
+a worker restart mid-call loses the entire transcript, event log and cost trail,
+not merely the tail — and would leave the row stranded at `in_progress` with no
+`ended_at` forever. `usage` in particular is APPENDED per turn as a delta
+(`{turn_sequence, cost_breakdown, cost_usd}`) and never re-aggregated, which is
+also why a call's cost is summed from the list at read time rather than stored.
+The operational contract is `/voice-agent-runtime` §13–§14; this docstring must
+not be read as contradicting it.
+
+**Concurrent appends are the writer's problem, not the schema's.** These are
+plain JSON documents with no version column, so two coroutines that each read a
+list, append, and save will silently drop one entry. That is the accepted cost of
+Invariant 2, and the guard belongs in Module 3 — a single writer task per call, or
+`select_for_update()` inside a `transaction.atomic()` wrapped in
+`database_sync_to_async`. Written down here because the schema cannot enforce it
+and the failure is invisible.
 
 **5.2, 5.3 and 5.4 add ZERO models.** The transcript viewer, the cost breakdown
 and the recording/transfer panel are all reading surfaces over the JSON columns
@@ -164,10 +184,15 @@ class CallSession(TenantLocationOwned):  # noqa: F405
     )
     transfer = models.JSONField(  # noqa: F405
         default=dict,
-        help_text='{result, reason, destination, initiated_at, duration_seconds}. '
-                  'Shape fixed by the shipped partials/_transfer_outcome.html. '
-                  'Empty dict = no transfer was ever attempted, which is the '
-                  'common case — most callers never ask for a human.',
+        help_text='{result, reason, destination, initiated_at, duration_seconds, '
+                  'attempts}. `result` and `destination` are the FINAL outcome '
+                  'and the number that produced it. `attempts` is an optional '
+                  '[{destination, result}] list recording each number tried in '
+                  'order — AgentSetting carries a transfer_secondary_number, so '
+                  '"primary rang out, secondary answered" is a designed path, '
+                  'and without this list it could only be narrated in `reason`, '
+                  'where nothing can query it. Empty dict = no transfer was ever '
+                  'attempted, the common case.',
     )
     waveform_peaks = models.JSONField(  # noqa: F405
         null=True,
