@@ -216,6 +216,30 @@ def make_appointment(db):
     return _make
 
 
+# --------------------------------------------------------------------------- #
+# Callback requests (sub-module 4.5)
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def make_callback(db):
+    """Factory: `make_callback(tenant, location, **overrides)` -> a saved
+    `CallbackRequest`. Defaults to an unidentified-by-contact caller captured
+    manually, matching the shape a receptionist would type in by hand.
+    """
+    def _make(tenant, location, **overrides):
+        from apps.scheduling.models import CallbackRequest
+
+        defaults = {
+            'caller_name': 'Dana Caller',
+            'caller_phone': '+13125550199',
+            'reason': 'Wants to reschedule Tuesday',
+            'source': CallbackRequest.SOURCE_MANUAL,
+        }
+        defaults.update(overrides)
+        return CallbackRequest.objects.create(tenant=tenant, location=location, **defaults)
+    return _make
+
+
 @pytest.fixture
 def location_chicago(tenant_a):
     """A tenant A location in `America/Chicago` — the DST isolation fixture.
