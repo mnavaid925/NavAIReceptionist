@@ -210,11 +210,11 @@
     </div>
 
     {% comment %}
-      5.2 lands here: the transcript viewer, then the analysis panel. Both read
-      JSON columns already on this row — Invariant 2, no new table.
+      5.2 lands the transcript and analysis panels here; 5.3 the event log and
+      cost breakdown below them. All read JSON columns already on this row —
+      Invariant 2, no new table.
 
       Still to land in this column:
-        5.3  the event log and the cost breakdown
         5.4  the recording player and the transfer outcome
              (partials/_audio_player.html, partials/_transfer_outcome.html)
     {% endcomment %}
@@ -295,6 +295,147 @@
           {% endwith %}
         {% else %}
           {% include "partials/_empty_state.html" with icon="clipboard-x" title="No analysis" message="Nothing happened on this call to analyse — it was abandoned, failed, or is still in progress." %}
+        {% endif %}
+      </div>
+    </div>
+
+    {% comment %}
+      5.3 — the event log. One chronological timeline over `obj.logs`, folding the
+      structured log, the tool-call trace and the runtime errors into a single
+      stream because that is how they actually happened: interleaved, in order.
+    {% endcomment %}
+    <div class="card">
+      <div class="card-header">
+        <span>Event log</span>
+        {% with errors=obj.logs|error_log_count %}
+          {% if errors %}
+            <span class="badge badge-red">{{ errors }} error{{ errors|pluralize }}</span>
+          {% endif %}
+        {% endwith %}
+      </div>
+      <div class="card-body">
+        {% if obj.logs %}
+          <ol class="grid gap-3" style="list-style: none; padding: 0; margin: 0;">
+            {% for entry in obj.logs %}
+              <li style="padding-block-end: 12px; border-block-end: 1px solid var(--border);">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="badge {{ entry.level|level_badge }}">{{ entry.level|default:"info" }}</span>
+                  {% if entry.category %}<span class="text-muted text-xs">{{ entry.category }}</span>{% endif %}
+                  <span class="font-medium">{{ entry.title }}</span>
+                  {% if entry.occurred_at %}
+                    <time class="text-muted text-xs" datetime="{{ entry.occurred_at }}">{{ entry.occurred_at }}</time>
+                  {% endif %}
+                </div>
+
+                {% comment %}
+                  A tool-call entry gets the trace treatment: the outcome, the
+                  error when it failed, and the arguments run through `redact_args`
+                  so a caller's name or DOB never reaches the page even if the
+                  write path forgot to strip it. Never `|safe`.
+                {% endcomment %}
+                {% if entry.category == 'tool' %}
+                  <div class="text-xs" style="margin-block-start: 4px;">
+                    <span class="text-muted">tool</span>
+                    <code>{{ entry.raw_json.tool|default:entry.title }}</code>
+                    {% if entry.raw_json.ok %}
+                      <span class="badge badge-green">ok</span>
+                    {% else %}
+                      <span class="badge badge-red">failed</span>
+                    {% endif %}
+                    {% if entry.raw_json.duration_ms %}
+                      <span class="text-muted">· {{ entry.raw_json.duration_ms }}ms</span>
+                    {% endif %}
+                  </div>
+                  {% if not entry.raw_json.ok and entry.raw_json.error %}
+                    <p class="text-xs" style="margin-block-start: 2px;">
+                      <code>{{ entry.raw_json.error.code }}</code>
+                      &mdash; {{ entry.raw_json.error.message }}
+                    </p>
+                  {% endif %}
+                  {% with safe_args=entry.raw_json.arguments|redact_args %}
+                    {% if safe_args %}
+                      <dl class="grid gap-1 text-xs" style="margin-block-start: 4px; grid-template-columns: max-content 1fr;">
+                        {% for key, value in safe_args.items %}
+                          <dt class="text-muted">{{ key }}</dt>
+                          <dd class="m-0">{{ value }}</dd>
+                        {% endfor %}
+                      </dl>
+                    {% endif %}
+                  {% endwith %}
+                {% endif %}
+
+                {% comment %}
+                  The raw payload, expandable and OFF by default — available for a
+                  developer, not dumped at rest. Redacted first so the disclosure
+                  cannot become a hole around the trace above, and pretty_json
+                  returns an UNSAFE string so autoescape still escapes it inside
+                  the <pre>. `redact_args` returns {} for a non-dict raw_json, so
+                  the disclosure simply renders an empty object rather than raising.
+                {% endcomment %}
+                {% if entry.raw_json %}
+                  <details style="margin-block-start: 4px;">
+                    <summary class="text-muted text-xs">Raw payload</summary>
+                    <pre class="text-xs" style="white-space: pre-wrap; overflow-x: auto;">{{ entry.raw_json|redact_args|pretty_json }}</pre>
+                  </details>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ol>
+        {% else %}
+          {% include "partials/_empty_state.html" with icon="scroll-text" title="No event log" message="This call logged no events — it ended before the runtime recorded anything." %}
+        {% endif %}
+      </div>
+    </div>
+
+    {% comment %}
+      5.3 — the cost breakdown. One row per turn across the four cost components,
+      a per-turn total, and a grand total from `total_cost_usd` (summed at read
+      time, never a stored column). An abandoned call has no `usage` and shows an
+      empty state rather than a $0.0000 that reads like a real free call.
+    {% endcomment %}
+    <div class="card">
+      <div class="card-header">
+        <span>Cost breakdown</span>
+        {% if obj.usage %}
+          <span class="text-muted">${{ obj.total_cost_usd|floatformat:4 }}</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        {% if obj.usage %}
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th scope="col">Turn</th>
+                  <th scope="col" class="text-right">STT</th>
+                  <th scope="col" class="text-right">LLM</th>
+                  <th scope="col" class="text-right">TTS</th>
+                  <th scope="col" class="text-right">Telephony</th>
+                  <th scope="col" class="text-right">Turn total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for turn in obj.usage %}
+                  <tr>
+                    <td>{{ turn.turn_sequence }}</td>
+                    <td class="text-right">${{ turn.cost_breakdown.stt_usd|default:0|floatformat:4 }}</td>
+                    <td class="text-right">${{ turn.cost_breakdown.llm_usd|default:0|floatformat:4 }}</td>
+                    <td class="text-right">${{ turn.cost_breakdown.tts_usd|default:0|floatformat:4 }}</td>
+                    <td class="text-right">${{ turn.cost_breakdown.telephony_usd|default:0|floatformat:4 }}</td>
+                    <td class="text-right">${{ turn.cost_usd|default:0|floatformat:4 }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+              <tfoot>
+                <tr>
+                  <th scope="row" colspan="5" class="text-right">Total</th>
+                  <td class="text-right font-medium">${{ obj.total_cost_usd|floatformat:4 }}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        {% else %}
+          {% include "partials/_empty_state.html" with icon="receipt" title="No cost recorded" message="This call has no per-turn usage — an abandoned or failed call costs nothing to bill." %}
         {% endif %}
       </div>
     </div>
