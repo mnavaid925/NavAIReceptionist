@@ -20,7 +20,9 @@ though this module itself has **no realtime surface**.
 | 4.2 Services & Resources | **BUILT** | `Service`, `Resource` |
 | 4.3 Availability & Booking | **BUILT** | `Appointment` (+ `availability.py`) |
 | 4.4 Calendar Views | **BUILT** | none — a **view** sub-module |
-| 4.5 Bookings List & Callback Requests | not built | `CallbackRequest` |
+| 4.5 Bookings List & Callback Requests | **BUILT** | `CallbackRequest` |
+
+**Module 4 is complete — all five models exist.** A sixth model in this app would be a scope error.
 
 > **Update this file, never re-author it.** Each sub-module run appends its models / routes / templates /
 > seeder rows. Rewriting the file clobbers the previous sub-module's documentation.
@@ -97,6 +99,40 @@ must add it as an additive migration**, and un-stub the "originating call" panel
 Members: `duration_minutes`, `buffer_minutes`, `blocks_until`, `is_open`, `is_cancelled`, `local_start()`,
 `local_end()`. `OPEN_STATUSES` gates edit / reschedule / cancel.
 
+### `CallbackRequest` — 4.5 · `models/CallbackRequests/CallbackRequests.py`
+
+Base `TenantLocationOwned`. The "take a message" outcome: a caller the agent could not fully serve.
+
+**`contact` is NULLABLE and `SET_NULL` — the deliberate opposite of `Appointment.contact`'s PROTECT.**
+A callback is a transient queue item, not permanent booking history, so it must survive erasing a person
+rather than block it. An unidentified caller simply leaves `contact` null and carries `caller_name` /
+`caller_phone` as free text (Invariant 1 — never a second identity table).
+
+Statuses `pending` / `contacted` / `closed` (default `pending`). `source` is server-stamped provenance
+(`ai_phone` default / `manual` / `web`) and is excluded from **both** forms. Index
+`(tenant, location, status)`, ordering `-created_at`.
+
+Members: `display_caller` (contact → `caller_name` → `'Unidentified caller'`, never empty),
+`dialable_phone`, `is_resolved` (`status == closed` only — `contacted` is NOT an end state, so gating the
+resolve control on it would strand a rung-once callback in the queue forever).
+
+**`dialable_phone` exists because `caller_phone` is deliberately NOT normalised.** The form stores an
+unparseable value verbatim so `"312 555 0142 x204"` or `"ask for Dana"` survives — right for the record,
+wrong to hand a dialer. Templates render the raw value as the visible label always, and use
+`dialable_phone` to decide whether that label is also a `tel:` link.
+
+**No FK to `calls.CallSession`** — and unlike `Appointment.booked_by_session`, nothing is deferred here:
+the ERD's `CallbackRequest` field list specifies no session FK at all. Note its *prose* (ERD line 303) says
+the callback "links to that session", contradicting its own field list — reconcile that in Module 5 before
+adding anything.
+
+**Erasure cascade (`Contact.anonymize()` / `Contact.delete()` → `_scrub_linked_callback_requests()`).**
+Because `contact` is SET_NULL, erasing a person would otherwise leave `caller_name` / `caller_phone`
+standing on the callback row, detached from anything that could erase them again. Both paths now scrub
+them; `reason` and `notes` are deliberately KEPT (the queue's operational message, not caller identity).
+**A bulk `queryset.delete()` skips the model override entirely** — that is why `ContactAdmin.delete_queryset`
+iterates. Any new bulk erasure path must route through the instance `delete()` or scrub explicitly.
+
 ### `availability.py` — 4.3 · flat at the app root
 
 **Module 3.3's LLM tools call these directly**, so every function re-authorises rather than trusting its
@@ -134,8 +170,13 @@ No pk routes at all — a calendar addresses a date through the query string
 **4.3** — `urls/Bookings/Appointments.py`:
 `appointment_list` · `appointment_create` · `appointment_slots` · `appointment_book` (POST) ·
 `appointment_detail` · `appointment_edit` · `appointment_delete` (POST) ·
-`appointment_reschedule` (POST) · `appointment_cancel` (POST).
+`appointment_reschedule` (POST) · `appointment_cancel` (POST) ·
+`appointment_mark` (POST, added by 4.5 — `appointments/<int:pk>/mark/<str:new_status>/`).
 `slots/` and `book/` are literals and MUST stay ahead of `<int:pk>`.
+
+**4.5** — `urls/CallbackRequests/CallbackRequests.py`, `callbacks/` prefix:
+`callbackrequest_list` · `callbackrequest_create` · `callbackrequest_detail` · `callbackrequest_edit` ·
+`callbackrequest_delete` (POST, management-tier) · `callbackrequest_resolve` (POST).
 
 ## Templates
 
@@ -149,10 +190,19 @@ Shared partials used: `partials/_pagination.html`, `_empty_state.html`, and (onc
 `_appointment_status_badge.html` / `_call_status_badge.html` — **both take `obj=`**, not
 `appointment=`/`session=`.
 
+`templates/scheduling/callbacks/callbackrequest/` — `list`, `detail`, `form`, `_filters` (4.5).
+
 **Each list header says something different, on purpose, because each model is scoped differently:**
 contacts → the business name and "all locations" (not location-scoped); services → the business name plus
-which site you are working at (nullable location); resources → the **active location name** (fully
-location-scoped, so the rows change on a switch and nothing else on screen would explain why).
+which site you are working at (nullable location); resources and callbacks → the **active location name**
+(fully location-scoped, so the rows change on a switch and nothing else on screen would explain why).
+
+**The callback queue's status filter is the subtlest thing in this app.** An ABSENT `status` parameter and
+a PRESENT-BUT-EMPTY one mean different things — "I opened the queue" (→ default to `pending`) versus "I
+picked All in the filter bar" (→ no status filter) — and `request.GET.get('status', '')` collapses them,
+which makes the All option unreachable. The view branches on `'status' in request.GET` and hands the
+template a resolved `selected_status`; **`_filters.html` preselects off that, never off `request.GET`.**
+A junk value degrades to All. Four cases, all four tested in `test_callback_views.py`.
 
 ### 4.4 Calendar Views — a VIEW sub-module
 
@@ -226,7 +276,16 @@ not a neutral default, and it made availability return nothing everywhere.
 **4.4 added day-0 appointments at all four locations** — the calendar opens on today, and the earlier
 offsets (-14, -7, +1…+4) skipped it, so the first thing anyone saw was an empty grid that looks broken.
 
+**4.5 seeds 9 callback requests** across all four demo locations, spanning all three statuses, identified
+and unidentified callers, and mixed provenance — including one logged at a DIFFERENT site from the
+contact's usual one, which proves a business-wide contact is reachable from either queue. Dedupe key is
+`(tenant, location, caller_phone, reason)`. That is idempotent because every seeded row within a location
+carries a distinct `reason` — a property of the demo data, not of the model, so a new row needs a distinct
+reason or a better key.
+
 **Flush order matters**: appointments before contacts, because `Appointment.contact` is PROTECT.
+Callbacks flush alongside appointments — `CallbackRequest.contact` is SET_NULL so it would not raise, but
+ordering it defensively costs nothing and survives someone later tightening the FK.
 
 > **The dedupe lookup must normalise before comparing.** `Contact.save()` normalises on write, so keying on
 > the raw spec value re-creates the unnormalised row on every run. That bug shipped once and was caught by
@@ -339,6 +398,7 @@ rows.
         'Find a slot': 'scheduling:appointment_slots'},
 '4.4': {'Calendar': 'scheduling:calendar_day',
         'Week view': 'scheduling:calendar_week'},
+'4.5': {'Callback Requests': 'scheduling:callbackrequest_list'},
 ```
 
 ## Tests
@@ -347,7 +407,14 @@ rows.
 `test_security.py`; 4.2: `test_catalog_models.py`, `test_catalog_forms.py`, `test_catalog_views.py`,
 `test_catalog_security.py`; 4.3: `test_booking_models.py`, `test_booking_forms.py`,
 `test_booking_availability.py`, `test_booking_views.py`, `test_booking_security.py`; 4.4:
-`test_calendar_views.py`. **424 passing.**
+`test_calendar_views.py`; 4.5: `test_callback_models.py`, `test_callback_forms.py`,
+`test_callback_views.py`, `test_callback_security.py`. **536 passing.**
+
+**Query-count tests measure the VIEW, not the request.** A `Client`-driven request carries a constant ~6
+queries of session + auth + tenant/location middleware + the navigation context processor's
+`assigned_locations()`, so a literal `assert_max_num_queries(2)` through the full stack can never pass.
+Assert on the view's own queryset + `paginate()` directly, and keep a separate "count does not grow with
+row count" test through `Client` for N+1 protection.
 Run with
 `venv\Scripts\python.exe -m pytest -q apps/scheduling`. Fixtures live in the repo-root `conftest.py` (two
 tenants, three locations, owner/manager/staff users, and client fixtures that activate a location through the
