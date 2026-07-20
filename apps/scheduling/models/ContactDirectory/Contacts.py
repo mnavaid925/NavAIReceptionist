@@ -137,10 +137,27 @@ class Contact(TenantOwned):  # noqa: F405
         reason the method exists: without it, "delete me" is unanswerable for
         exactly the people who have used the business most.
 
-        Not idempotent-safe to call twice by accident, but harmless if it is —
-        the second call blanks already-blank fields and leaves the original
-        `anonymized_at` timestamp, which is the honest record of when erasure
-        actually happened.
+        **Erasure cascades to linked callback requests.** Blanking this row's own
+        columns is not sufficient, because `CallbackRequest.contact` is SET_NULL
+        rather than PROTECT: those rows carry their OWN free-text
+        `caller_name` / `caller_phone`, captured before the agent knew who was
+        ringing and often a different number from the one on this row. They are
+        independent copies of the caller's identity, so an erasure that stopped
+        here would leave that PII standing in the callback queue — and would
+        eventually orphan it entirely, since the FK nulls itself the moment this
+        contact is removed. `_scrub_linked_callback_requests()` closes that.
+
+        `CallbackRequest.reason` and `.notes` are deliberately NOT scrubbed. They
+        are the queue's operational message — what the callback was about and
+        what happened when someone rang back — not caller identity, and erasing
+        them would destroy the front desk's working record of its own shift. A
+        stricter policy that also scrubs them is a deliberate future decision,
+        not something this method should quietly expand into.
+
+        Idempotent: the guard below returns before anything is written, so a
+        second call cannot re-stamp `anonymized_at` (the honest record of when
+        erasure actually happened) and cannot re-run the cascade. The cascade is
+        independently safe to repeat anyway — it blanks fields to a constant.
         """
         if self.anonymized_at:
             return self
@@ -156,4 +173,33 @@ class Contact(TenantOwned):  # noqa: F405
             'first_name', 'last_name', 'phone_e164', 'email',
             'date_of_birth', 'notes', 'anonymized_at', 'updated_at',
         ])
+        self._scrub_linked_callback_requests()
         return self
+
+    def _scrub_linked_callback_requests(self):
+        """Blank the caller identity duplicated onto this contact's callbacks.
+
+        See `anonymize()` for why this exists and why `reason` / `notes` are out
+        of scope; this method only carries out that decision.
+
+        The import is local because `CallbackRequest` FKs `Contact` — importing
+        it at module level would be a circular import through the models
+        package. Same lazy-import reasoning as
+        `views/ContactDirectory/Contacts.py::_appointments_for`, though this one
+        needs no `ImportError` guard: `CallbackRequest` ships in this app.
+
+        `tenant_id` is redundant given the `contact=self` match and is included
+        anyway — an erasure query is the last place to rely on a single
+        predicate being enough, and it keeps the filter honest if the FK ever
+        gains a cross-tenant escape hatch.
+
+        `.update()` is a single UPDATE that bypasses `save()`, so `auto_now` on
+        `updated_at` never fires — hence stamping it by hand. Doing this row by
+        row instead would issue one query per callback for no benefit: there is
+        nothing to validate and no `save()` side effect worth triggering.
+        """
+        from apps.scheduling.models import CallbackRequest
+
+        CallbackRequest.objects.filter(
+            contact=self, tenant_id=self.tenant_id
+        ).update(caller_name='', caller_phone='', updated_at=timezone.now())  # noqa: F405
