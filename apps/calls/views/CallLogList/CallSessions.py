@@ -28,6 +28,7 @@ an audit question this module has no audit trail to answer honestly.
 """
 from apps.calls.models import CallSession
 from apps.calls.views._common import *  # noqa: F401,F403
+from apps.calls.views._helpers import location_sessions
 from apps.scheduling.availability import local_day_bounds_utc
 from apps.scheduling.views._helpers import parse_local_date
 
@@ -64,42 +65,10 @@ OUTCOME_CHOICES = [
 ]
 
 
-def _location_sessions(request):
-    """Calls at the active location. Tenant AND location scoped, always.
-
-    Entity-local on purpose, mirroring 4.5's `_location_callbacks`: only this
-    module reads call sessions today. It moves to `views/_helpers.py` when a
-    SECOND sub-module actually shares it — 5.2's transcript page and 5.3's cost
-    page will both want it, and that is the moment to promote it, not now.
-
-    Returns nothing when no location is active — the safe direction, matching
-    `location_appointments`. A user who has not chosen a site sees an empty log
-    and the global "choose a location" banner, never another site's calls.
-
-    `select_related('contact', 'location')` because every row on the list renders
-    the caller's display name and the site's timezone; without it a 25-row page
-    costs 51 queries.
-
-    `prefetch_related('booked_appointments')` for the same reason one level out:
-    both the list and the detail page render what the call booked, and that is a
-    REVERSE FK, which `select_related` cannot follow. Without it the list pays
-    one extra query per row — the N+1 that `select_related` above is there to
-    prevent, reintroduced by a different relation. One query for the whole page
-    either way.
-    """
-    if request.location is None:
-        return CallSession.objects.none()
-    return CallSession.objects.filter(
-        tenant=request.tenant, location=request.location
-    ).select_related('contact', 'location').prefetch_related(
-        # `booked_appointments__service`, not just `booked_appointments`. The
-        # detail page names the service each booking is for, and `service` is a
-        # FORWARD FK on the far side of a REVERSE one — the prefetch gets the
-        # appointments in one query and then pays a query per appointment for
-        # the service unless it is spanned here too. Bounded (a call books one
-        # appointment, usually zero) but free to close.
-        'booked_appointments__service',
-    )
+# `location_sessions` — the tenant+location-scoped call queryset — moved to
+# `views/_helpers.py` when 5.2's transcript page became its second reader (the
+# moment CLAUDE.md's Backend Package Structure rule 5 names for promotion). It is
+# imported at the top of this module.
 
 
 def _apply_outcome_filter(queryset, outcome):
@@ -158,12 +127,12 @@ def callsession_list_view(request):
     # and 25 of those per page is a payload the list never looks at. Not a query
     # count problem; a bytes-off-the-database problem.
     #
-    # Deferred HERE and not inside `_location_sessions`, deliberately. The detail
+    # Deferred HERE and not inside `location_sessions`, deliberately. The detail
     # page reads the whole row on purpose — that is Invariant 2's design, one
     # document fetched together — and 5.2/5.3/5.4 read these very columns.
     # Deferring on the shared helper would silently turn each of those reads into
     # its own extra query, which is the same N+1 in a new coat.
-    queryset = _location_sessions(request).order_by('-started_at').defer(
+    queryset = location_sessions(request).order_by('-started_at').defer(
         'transcript', 'logs', 'analysis', 'usage', 'waveform_peaks', 'metadata',
     )
 
@@ -239,16 +208,16 @@ def callsession_list_view(request):
 def callsession_detail_view(request, pk):
     """One call. Deliberately thin — the rich panels belong to 5.2-5.4.
 
-    Scoped through `_location_sessions`, so a pk from another tenant or another
+    Scoped through `location_sessions`, so a pk from another tenant or another
     site 404s rather than rendering: a bare `get_object_or_404(CallSession,
     pk=pk)` here would be a cross-location IDOR onto a transcript.
 
     The `booked_appointments` prefetch this page needs lives on
-    `_location_sessions` rather than here, because the LIST needs it just as
+    `location_sessions` rather than here, because the LIST needs it just as
     much — it renders the same reverse FK per row, where the cost is per row
     rather than once.
     """
-    obj = get_object_or_404(_location_sessions(request), pk=pk)  # noqa: F405
+    obj = get_object_or_404(location_sessions(request), pk=pk)  # noqa: F405
 
     return render(request, 'calls/calllog/callsession/detail.html', {  # noqa: F405
         'obj': obj,
