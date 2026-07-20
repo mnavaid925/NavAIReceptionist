@@ -16,6 +16,7 @@ urlpatterns = [
     path('manage/', include('apps.tenants.urls')),
     path('agent/', include('apps.agents.urls')),
     path('schedule/', include('apps.scheduling.urls')),
+    path('calls/', include('apps.calls.urls')),
     path('', include('apps.accounts.urls')),
 ]
 
