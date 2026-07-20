@@ -12,10 +12,10 @@ from django.urls import reverse
 from django.utils import timezone as dj_timezone
 
 from apps.calls.models import CallSession
+from apps.calls.views._helpers import location_sessions
 from apps.calls.views.CallLogList.CallSessions import (
     OUTCOME_CHOICES,
     OUTCOME_NO_TRANSFER,
-    _location_sessions,
 )
 from apps.scheduling.availability import _local_naive_to_utc
 from apps.scheduling.models import Contact
@@ -397,7 +397,7 @@ def test_list_queryset_query_count_does_not_grow_with_row_count(tenant_a, locati
     for i in range(3):
         make_call_session(tenant_a, location_a1, provider_call_sid=f'CA-qc-small-{i:04d}')
     with CaptureQueriesContext(connection) as small:
-        queryset = _location_sessions(request).order_by('-started_at').defer(
+        queryset = location_sessions(request).order_by('-started_at').defer(
             'transcript', 'logs', 'analysis', 'usage', 'waveform_peaks', 'metadata',
         )
         page_obj, _elided = paginate(request, queryset)
@@ -406,7 +406,7 @@ def test_list_queryset_query_count_does_not_grow_with_row_count(tenant_a, locati
     for i in range(3, 30):
         make_call_session(tenant_a, location_a1, provider_call_sid=f'CA-qc-big-{i:04d}')
     with CaptureQueriesContext(connection) as big:
-        queryset = _location_sessions(request).order_by('-started_at').defer(
+        queryset = location_sessions(request).order_by('-started_at').defer(
             'transcript', 'logs', 'analysis', 'usage', 'waveform_peaks', 'metadata',
         )
         page_obj, _elided = paginate(request, queryset)
@@ -444,7 +444,7 @@ def test_list_queryset_query_count_is_bounded_regardless_of_bookings(
     request = SimpleNamespace(tenant=tenant_a, location=location_a1, GET={})
 
     with django_assert_max_num_queries(4):
-        queryset = _location_sessions(request).order_by('-started_at').defer(
+        queryset = location_sessions(request).order_by('-started_at').defer(
             'transcript', 'logs', 'analysis', 'usage', 'waveform_peaks', 'metadata',
         )
         page_obj, _elided = paginate(request, queryset)
@@ -456,7 +456,7 @@ def test_list_queryset_query_count_is_bounded_regardless_of_bookings(
 def test_detail_view_does_not_n_plus_1_on_booked_appointments_service(
     django_assert_max_num_queries, tenant_a, location_a1, make_call_session,
 ):
-    """The detail page's `_location_sessions` prefetch must cover the SAME
+    """The detail page's `location_sessions` prefetch must cover the SAME
     reverse relation the list page does — a call that booked several
     appointments must not cost one query per appointment for `service`.
     """
@@ -478,6 +478,6 @@ def test_detail_view_does_not_n_plus_1_on_booked_appointments_service(
     request = SimpleNamespace(tenant=tenant_a, location=location_a1)
 
     with django_assert_max_num_queries(3):
-        obj = _location_sessions(request).get(pk=session.pk)
+        obj = location_sessions(request).get(pk=session.pk)
         names = [appt.service.name for appt in obj.booked_appointments.all()]
         assert len(names) == 5
