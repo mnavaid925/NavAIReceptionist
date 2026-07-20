@@ -3,6 +3,14 @@
 Helpers used by a single entity stay in that entity's own view module. These are
 here because 4.4's calendar reads exactly the same appointments, columns and
 query parameters that 4.3's bookings pages do.
+
+**`parse_local_date` has a cross-app consumer**: Module 5's call-log list
+(`apps/calls/views/CallLogList/CallSessions.py`) imports it for its own date
+filter. That is deliberate — the clamping in `MIN_QUERY_DATE`/`MAX_QUERY_DATE`
+below exists to stop `?date=9999-12-31` reaching arithmetic that raises
+`OverflowError`, and a second copy in `apps/calls` would be one more place for
+that bound to rot out of sync. Anything moved or renamed in here is therefore
+not private to this app; check `apps/calls` before changing it.
 """
 import logging
 from datetime import date, datetime
