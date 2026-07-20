@@ -3102,6 +3102,78 @@ sections:
 - **Contact-center agent performance analytics** (Dialpad, PolyAI) — there are no human agents fielding these
   calls in this product's model.
 
-## Review notes
+## Review notes — 5.1 Call Log List
 
-(filled in at the end)
+Built as planned: the `apps/calls` app, `CallSession` (one model, seven JSON columns), list + detail only,
+and the long-deferred `Appointment.booked_by_session` FK. ~45 commits. Final state: **616 tests passing**
+(536 before, 80 new in `apps/calls`), `check` clean, `makemigrations --check` reports no changes, `seed_calls`
+idempotent, both IDOR classes 404, and no mutating route for `CallSession` exists at all.
+
+### The ERD was wrong twice, and the code was right both times
+
+Research flagged that the ERD lists **three** `CallSession` statuses while the already-shipped
+`_call_status_badge.html` partial — wired into the Contact detail page since 4.1 — branches on **five**.
+I verified it before acting: building the ERD's three would have made the partial's `transferred` and
+`failed` branches unreachable dead code. CLAUDE.md's own rule settles it (the ERD is intent, the code is
+truth), so `CallSession` ships five and **the ERD was corrected**, not the code.
+
+The second contradiction was internal to the ERD: the `CallbackRequest` prose said the callback "links to
+that session" while its own field list two lines above specified no such FK. Resolved in favour of the field
+list, with the reasoning written down — that ambiguity was exactly what would have produced an accidental
+schema change in a later sub-module.
+
+### The deferred FK, and what installing the app broke
+
+`Appointment.booked_by_session` had been impossible since 4.3 (Django refuses a relation to an uninstalled
+app). Installing `apps.calls` unblocked it; it landed as `scheduling/0005`, and I proved the `SET_NULL`
+semantics with a rolled-back delete probe — purging a call log nulls the provenance link without destroying
+the booking that call produced.
+
+Installing the app also **broke two scheduling tests, and that was the useful part.** Both asserted
+`_call_sessions_for(...) is None` — the `ImportError` fallback branch — which stopped being reachable the
+moment the app existed. Their names promised cross-location scoping coverage they never had. They now create
+real `CallSession` rows at a visible and a non-visible location and assert only the visible one appears.
+**Lesson worth keeping: a placeholder assertion keyed on "the other module doesn't exist yet" is a test that
+fails the day that stops being true, and until then it is coverage theatre.**
+
+### Review findings applied
+
+* **`code-reviewer`** — an N+1: the list renders each call's bookings, a REVERSE FK `select_related` cannot
+  follow. Also caught that my "how this was booked" panel withheld the *link* to a call at another location
+  but still printed its caller number, status and timing. My own comment defended it ("losing the link must
+  not lose the fact") — right about the fact, wrong about the number.
+* **`frontend-reviewer`** — a regression I introduced while fixing the above: the panel rendered the number
+  raw, bypassing `phone_e164`, and the file never loaded the tag library. Also that my `|default:` fallback
+  **could never fire**, since `phone_e164` returns `''` for a falsy value — the same bug then left a
+  screen-reader label reading "View the call from " and trailing off.
+* **`performance-reviewer`** — a chained N+1 (`booked_appointments` prefetched, its `service` not);
+  `location_appointments` missing `booked_by_session` (the plan called for it and it didn't ship); and the
+  list SELECTing seven JSON columns it never renders. Deferred **at the list call site, not the shared
+  helper** — the detail page and 5.2–5.4 read the whole row on purpose, so deferring there would be the same
+  N+1 in a new coat.
+* **`realtime-reviewer`** — two forward-compatibility catches worth more than any bug here. The model
+  docstring said the row is "written once", which would have invited Module 3 to buffer a whole call in
+  memory and lose the entire transcript on a mid-call worker restart; it now says **one WRITER is not one
+  WRITE**. And `transfer` had nowhere to record "primary rang out, secondary answered" — a designed path,
+  since `AgentSetting` carries a secondary number — so it gained an optional `attempts` list.
+* **`qa-smoke-tester`** — 85/86. A POST to the detail view returned 200; both views are now GET-only. It also
+  found the seeder-ordering trap: `seed_scheduling --flush` after `seed_calls` nulls every session's contact
+  silently, because `Contact` is recreated and the FK is `SET_NULL`.
+* **`security-reviewer`** — no Critical or High findings.
+
+### Carried forward to Module 3 / 3.5
+
+Written into the model itself, not just here, because that is what a runtime implementer reads first:
+one-writer-is-not-one-write; `usage` appended per turn as a delta, never re-aggregated; concurrent JSON
+appends are the writer's problem (no version column exists); **a non-empty `recording_blob` requires a
+consent basis in `metadata`**, enforceable only in the write path since MySQL cannot assert on a JSON
+sub-key; and `transfer.attempts` for the secondary-number path.
+
+### Knowingly left as-is
+
+* **The admin leaves `tenant`/`location` editable on `CallSession`** — a project-wide pattern every other
+  admin shares, reachable only by `is_staff`, which no tenant-side role has. Flagged rather than fixed
+  because diverging one model from its siblings costs more confusion than it saves; revisit if `is_staff`
+  semantics ever change, since this is the one model carrying a full transcript.
+* **The outcome filter is an accepted scan** — a JSON key transform cannot use an index. Bounded by location,
+  not by time. Documented in the code so it stays a decision.
