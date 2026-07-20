@@ -1,0 +1,97 @@
+{% comment %}
+  Filter bar for the call log.
+
+  Four axes plus search, and every one of them compares against a plain string —
+  there is no FK filter on this page, so nothing here needs |stringformat:"d".
+  `status` and `mode` are model choices; `outcome` is a DERIVED axis read out of
+  the `transfer` JSON column, which is why its choices come from the view's own
+  OUTCOME_CHOICES rather than from a model.
+
+  OUTCOME_CHOICES ships WITHOUT a leading blank pair (the view's list starts at
+  `no_transfer`), so the "Any outcome" option is written out here. The same is
+  true of status and mode. Do not add a blank pair to the view lists to tidy this
+  up: those lists are also what `_apply_outcome_filter` and the two
+  `dict(...)` membership checks validate against, and a '' member would make the
+  empty string a *valid filter value* instead of the "no filter" it has to mean.
+
+  The date inputs are LOCAL calendar days at the active location. The view turns
+  each into a half-open UTC range via `local_day_bounds_utc` rather than using
+  `started_at__date`, which converts in the wrong timezone and, on MySQL,
+  returns nothing at all. Nothing about that is visible from here — this bar
+  just posts `?from=`/`?to=` and the view does the honest thing with them.
+
+  Every filter degrades to "no filter" on junk rather than raising, so a
+  hand-edited query string can never 500 the page it sits on.
+{% endcomment %}
+<form class="card card-body flex flex-wrap items-end gap-3" method="get">
+
+  <div class="form-group grow">
+    <label class="form-label" for="f-q">Search</label>
+    {% comment %}
+      Matches the raw numbers AND the linked contact, because the same caller is
+      findable either way — a first-time caller is only a number, and a returning
+      one has a name attached. The placeholder says both so nobody assumes this
+      box searches what was SAID: the transcript is 5.2's surface and is not
+      searched from here.
+    {% endcomment %}
+    <input class="form-input" type="search" id="f-q" name="q"
+           placeholder="Caller number or contact name"
+           value="{{ request.GET.q|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-from">From</label>
+    <input class="form-input" type="date" id="f-from" name="from"
+           value="{{ request.GET.from|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-to">To</label>
+    <input class="form-input" type="date" id="f-to" name="to"
+           value="{{ request.GET.to|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-status">Status</label>
+    <select class="form-select" id="f-status" name="status">
+      <option value="">All statuses</option>
+      {% for value, label in status_choices %}
+        <option value="{{ value }}" {% if request.GET.status == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-outcome">Transfer</label>
+    {% comment %}
+      Labelled "Transfer", not "Outcome": `transfer.result` is specifically what
+      happened when the caller asked for a human, and a call that never made that
+      request has no outcome to report — "No transfer attempted" is that case,
+      and it is the common one.
+    {% endcomment %}
+    <select class="form-select" id="f-outcome" name="outcome">
+      <option value="">Any outcome</option>
+      {% for value, label in outcome_choices %}
+        <option value="{{ value }}" {% if request.GET.outcome == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-mode">Mode</label>
+    <select class="form-select" id="f-mode" name="mode">
+      <option value="">Any mode</option>
+      {% for value, label in mode_choices %}
+        <option value="{{ value }}" {% if request.GET.mode == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <span class="flex gap-2">
+      <button type="submit" class="btn btn-primary"><i data-lucide="filter"></i> Filter</button>
+      <a class="btn btn-outline" href="{{ request.path }}">Reset</a>
+    </span>
+  </div>
+
+</form>
