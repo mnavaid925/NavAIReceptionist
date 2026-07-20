@@ -22,6 +22,8 @@ Sub-modules seeded so far:
        bug has somewhere to show up.
 * 4.3  Appointment — bookings at every demo location spanning all five statuses,
        anchored to deterministic days so a re-run matches instead of duplicating.
+* 4.5  CallbackRequest — a queue per location spanning all three statuses,
+       identified and unidentified callers, and mixed source values.
 """
 from django.core.management.base import BaseCommand
 from django.db import transaction
@@ -305,9 +307,79 @@ DEMO_APPOINTMENTS = {
 }
 
 
+# -- 4.5 Callback requests --------------------------------------------------- #
+#
+# Keyed by LOCATION slug: a callback is worked by the staff at the site that took
+# the call, so the queue is per site exactly like the diary is.
+#
+# `contact` is a `(first_name, last_name)` pair resolved against the tenant, or
+# None for a caller nobody identified — the case Invariant 1 exists to protect,
+# since the tempting fix for it is a second lightweight identity table. Both
+# shapes are seeded at every location so the "Unidentified caller" fallback in
+# `display_caller` is exercised by real data rather than only by tests.
+#
+# Every row carries a `reason`, including the ones a caller left half-finished:
+# it is both the point of the queue and half the dedupe key below, and a queue of
+# rows whose reason column is empty reads as a broken page.
+DEMO_CALLBACK_REQUESTS = {
+    'downtown': [
+        # `caller_phone` differs from Dana's contact number on purpose — "ring my
+        # mobile instead" is the ordinary case, and it is why `caller_phone`
+        # exists at all rather than being read off the contact.
+        {'contact': ('Dana', 'Whitfield'), 'caller_name': '',
+         'caller_phone': '+13125550102', 'status': 'pending',
+         'source': 'ai_phone', 'notes': '',
+         'reason': 'Called after hours asking about Saturday availability'},
+        {'contact': None, 'caller_name': '', 'caller_phone': '+13125550777',
+         'status': 'contacted', 'source': 'ai_phone',
+         'reason': 'Wanted a price for two crowns',
+         'notes': 'Called back, offered 9am Tuesday — waiting for confirmation.'},
+        {'contact': ('Owen', 'Baptiste'), 'caller_name': '', 'caller_phone': '',
+         'status': 'closed', 'source': 'manual',
+         'reason': 'Asked for the whitening price list by email',
+         'notes': 'Emailed price list, resolved.'},
+    ],
+    'uptown': [
+        # A name but no contact row: the agent got as far as "Grace" before the
+        # transfer failed, which is exactly the half-captured caller the free-text
+        # fields are for.
+        {'contact': None, 'caller_name': 'Grace',
+         'caller_phone': '+17735550199', 'status': 'pending',
+         'source': 'ai_phone', 'notes': '',
+         'reason': 'Asked to be transferred to billing, transfer failed'},
+        # Dana is an Acme contact whose usual site is Downtown. Logging her
+        # callback at Uptown proves a business-wide contact can appear in another
+        # site's queue — and that the queue still scopes by location, so this row
+        # must NOT show up on Downtown's page.
+        {'contact': ('Dana', 'Whitfield'), 'caller_name': '',
+         'caller_phone': '', 'status': 'closed', 'source': 'web',
+         'reason': 'Web form: asked whether Uptown does orthodontics',
+         'notes': 'Replied by email — Uptown does, booked separately.'},
+    ],
+    'riverside': [
+        {'contact': ('Helena', 'Ostrom'), 'caller_name': '', 'caller_phone': '',
+         'status': 'pending', 'source': 'ai_phone', 'notes': '',
+         'reason': 'Wants to move her physio block to mornings'},
+        {'contact': None, 'caller_name': '', 'caller_phone': '+15035550444',
+         'status': 'pending', 'source': 'ai_phone', 'notes': '',
+         'reason': 'Hung up before giving details'},
+    ],
+    'lakeside': [
+        {'contact': ('Theo', 'Nakamura'), 'caller_name': '', 'caller_phone': '',
+         'status': 'contacted', 'source': 'ai_phone',
+         'reason': 'Asked about parking and access on the day',
+         'notes': 'Left voicemail, awaiting response.'},
+        {'contact': None, 'caller_name': '', 'caller_phone': '',
+         'status': 'closed', 'source': 'ai_phone',
+         'reason': 'No-answer transfer fallback triggered after hours',
+         'notes': 'Called back next morning, resolved directly.'},
+    ],
+}
+
+
 class Command(BaseCommand):
-    help = ('Seed demo contacts, services, resources and appointments for the '
-            'calendar and bookings module. Idempotent.')
+    help = ('Seed demo contacts, services, resources, appointments and callback '
+            'requests for the calendar and bookings module. Idempotent.')
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -335,13 +407,26 @@ class Command(BaseCommand):
             # contacts while any booking still references them raises
             # ProtectedError and the whole flush rolls back. Children first,
             # parents after — appointments, then the catalogue, then contacts.
-            from apps.scheduling.models import Appointment
+            from apps.scheduling.models import Appointment, CallbackRequest
 
             deleted, _ = Appointment.objects.filter(
                 tenant__slug__in=slugs
             ).delete()
             self.stdout.write(self.style.WARNING(
                 f'Flushed {deleted} demo appointment row(s).'
+            ))
+            # `CallbackRequest.contact` is SET_NULL, so this one would NOT block
+            # the contact delete below and could sit anywhere in the sequence.
+            # It goes here anyway, with the other contact-referencing children,
+            # so the block stays readable as one rule — "anything pointing at a
+            # contact goes before the contacts" — instead of two rules split by
+            # on_delete flavour. If this FK ever tightens to PROTECT, the flush
+            # is already correct rather than newly broken.
+            deleted, _ = CallbackRequest.objects.filter(
+                tenant__slug__in=slugs
+            ).delete()
+            self.stdout.write(self.style.WARNING(
+                f'Flushed {deleted} demo callback request row(s).'
             ))
             deleted, _ = Resource.objects.filter(tenant__slug__in=slugs).delete()
             self.stdout.write(self.style.WARNING(
@@ -393,6 +478,7 @@ class Command(BaseCommand):
         self._seed_services(tenants)
         self._seed_resources(tenants)
         self._seed_appointments(tenants)
+        self._seed_callback_requests(tenants)
 
         self.stdout.write('')
         self.stdout.write('Sign in as a TENANT ADMIN to see this data:')
@@ -419,6 +505,12 @@ class Command(BaseCommand):
         self.stdout.write(
             '  Appointments are location-scoped: each site has its own diary, '
             'and availability only offers slots where a provider has hours.'
+        )
+        self.stdout.write(
+            '  Callback requests are location-scoped too: the queue is worked '
+            'by the site that took the call, so switch location to see the '
+            'other queue. The list defaults to Pending — set ?status= to see '
+            'the contacted and closed rows.'
         )
 
     def _seed_appointments(self, tenants):
@@ -523,6 +615,84 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(
                 f'  {unresolved} appointment(s) skipped — a contact, service or '
                 'time could not be resolved at that location.'
+            ))
+
+    # -- 4.5 ---------------------------------------------------------------- #
+
+    def _seed_callback_requests(self, tenants):
+        """Seed the callback queue at every demo location.
+
+        Dedupe key is `(tenant, location, caller_phone, reason)`. There is no
+        natural key on this model — two callers can share a number, one caller
+        can ring twice about different things, and `contact` is null on the rows
+        that matter most — so the key is the pair of fields that actually
+        distinguishes one seeded row from another. It holds only because every
+        spec above carries a distinct reason within its location; that is a
+        property of the demo data, not of the model, and a new spec that
+        duplicates an existing (phone, reason) pair at the same site will be
+        silently skipped rather than created.
+
+        `caller_phone` is matched raw, NOT through `normalize_e164`: unlike
+        `Contact.phone_e164`, this field is stored exactly as the caller gave it
+        (see the model's own help text), so normalising here would look for a
+        value the row never had and re-create it on every run.
+        """
+        from apps.scheduling.models import CallbackRequest, Contact
+
+        created = 0
+        skipped = 0
+        unresolved = 0
+
+        locations = {
+            location.slug: location
+            for location in Location.objects.filter(tenant__in=tenants.values())
+            .select_related('tenant')
+        }
+
+        for location_slug, specs in DEMO_CALLBACK_REQUESTS.items():
+            location = locations.get(location_slug)
+            if location is None:
+                continue
+            tenant = location.tenant
+
+            for spec in specs:
+                contact = None
+                if spec['contact']:
+                    first, last = spec['contact']
+                    contact = Contact.objects.filter(
+                        tenant=tenant, first_name=first, last_name=last
+                    ).first()
+                    if contact is None:
+                        # Named in the spec but absent from the directory — seed
+                        # the row anyway and it would silently become an
+                        # "unidentified caller", which is a different demo shape
+                        # from the one intended. Skip and say so instead.
+                        unresolved += 1
+                        continue
+
+                if CallbackRequest.objects.filter(
+                    tenant=tenant, location=location,
+                    caller_phone=spec['caller_phone'], reason=spec['reason'],
+                ).exists():
+                    skipped += 1
+                    continue
+
+                CallbackRequest.objects.create(
+                    tenant=tenant, location=location, contact=contact,
+                    caller_name=spec['caller_name'],
+                    caller_phone=spec['caller_phone'],
+                    reason=spec['reason'], status=spec['status'],
+                    source=spec['source'], notes=spec['notes'],
+                )
+                created += 1
+
+        self.stdout.write(self.style.SUCCESS(
+            f'Callback requests: {created} created, {skipped} already present.'
+        ))
+        if unresolved:
+            self.stdout.write(self.style.WARNING(
+                f'  {unresolved} callback request(s) skipped — the named contact '
+                'is not in that tenant\'s directory.'
             ))
 
     # -- 4.2 ---------------------------------------------------------------- #
