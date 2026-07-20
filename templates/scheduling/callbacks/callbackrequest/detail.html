@@ -62,15 +62,21 @@
         <div>
           <span class="form-label">Callback number</span>
           {% comment %}
-            urlencode on the href, unlike the contact page's bare
+            Linked only when `dialable_phone` says a dialer could ring it, and
+            urlencoded when it is — unlike the contact page's bare
             tel:{{ phone_e164 }}. This field is stored as the caller gave it and
             legitimately holds spaces, a comma or an "x204" extension — the form
             only normalises a value that is purely dialling characters. The
-            visible text stays verbatim so nobody loses the part they need to
-            complete the call.
+            visible text stays verbatim either way, so nobody loses the part they
+            need to complete the call; only the LINK is withheld, because a
+            `tel:` wrapped around "ask for Dana" dials something wrong.
           {% endcomment %}
           {% if obj.caller_phone %}
-            <p><a href="tel:{{ obj.caller_phone|urlencode }}">{{ obj.caller_phone|phone_e164 }}</a></p>
+            {% if obj.dialable_phone %}
+              <p><a href="tel:{{ obj.dialable_phone|urlencode }}">{{ obj.caller_phone|phone_e164 }}</a></p>
+            {% else %}
+              <p>{{ obj.caller_phone }}</p>
+            {% endif %}
           {% else %}
             <p class="text-muted">&mdash;</p>
           {% endif %}
