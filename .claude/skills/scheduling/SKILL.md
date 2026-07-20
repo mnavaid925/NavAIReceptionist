@@ -92,9 +92,17 @@ badge partial matches it literally). `source` is server-stamped provenance.
 **`end_at` is `start_at + duration_minutes` — the buffer is NOT in it.** Folding the buffer in would make
 every appointment render longer than it is. The buffer only extends what blocks the NEXT booking.
 
-**`booked_by_session` is absent.** Django refuses a string FK to the uninstalled `calls` app. **Module 5
-must add it as an additive migration**, and un-stub the "originating call" panel in
-`bookings/appointment/detail.html`.
+**`booked_by_session` landed in 5.1** (`migrations/0005_appointment_booked_by_session.py`) — FK to
+`calls.CallSession`, `SET_NULL`, `related_name='booked_appointments'`. It was absent from 4.3 until then
+because Django refuses a string FK to an uninstalled app, and a placeholder integer column would have
+looked like a foreign key while enforcing none of the integrity of one. `SET_NULL` is load-bearing:
+purging a call log under its retention window must null the provenance link, never delete the booking
+that call produced.
+
+The "originating call" panel in `bookings/appointment/detail.html` is un-stubbed accordingly. It
+withholds the WHOLE description — number, outcome, timing — not just the link, when the session's
+location differs from the appointment's: rendering them would hand one site a readable summary of
+another site's call, which is what the 404 on the link exists to prevent.
 
 Members: `duration_minutes`, `buffer_minutes`, `blocks_until`, `is_open`, `is_cancelled`, `local_start()`,
 `local_end()`. `OPEN_STATUSES` gates edit / reschedule / cancel.
@@ -122,9 +130,10 @@ wrong to hand a dialer. Templates render the raw value as the visible label alwa
 `dialable_phone` to decide whether that label is also a `tel:` link.
 
 **No FK to `calls.CallSession`** — and unlike `Appointment.booked_by_session`, nothing is deferred here:
-the ERD's `CallbackRequest` field list specifies no session FK at all. Note its *prose* (ERD line 303) says
-the callback "links to that session", contradicting its own field list — reconcile that in Module 5 before
-adding anything.
+the ERD's `CallbackRequest` field list specifies no session FK at all. Its *prose* used to say the callback
+"links to that session", contradicting that list; **5.1 resolved it in favour of the field list** and
+corrected the ERD. Adding the FK later remains a clean additive migration, but it is now a decision to take
+deliberately rather than something to infer from a stray sentence.
 
 **Erasure cascade (`Contact.anonymize()` / `Contact.delete()` → `_scrub_linked_callback_requests()`).**
 Because `contact` is SET_NULL, erasing a person would otherwise leave `caller_name` / `caller_phone`
@@ -186,9 +195,9 @@ No pk routes at all — a calendar addresses a date through the query string
 which has TWO modes: normally each slot books a new appointment; with `?reschedule=<pk>` it MOVES an
 existing one. The pk rides a hidden field so it survives a re-search — without that the next POST silently
 creates a second booking.
-Shared partials used: `partials/_pagination.html`, `_empty_state.html`, and (once 4.3 / Module 5 land)
-`_appointment_status_badge.html` / `_call_status_badge.html` — **both take `obj=`**, not
-`appointment=`/`session=`.
+Shared partials used: `partials/_pagination.html`, `_empty_state.html`,
+`_appointment_status_badge.html` and `_call_status_badge.html` (both live now — 4.3 and 5.1 have landed)
+— **both take `obj=`**, not `appointment=`/`session=`.
 
 `templates/scheduling/callbacks/callbackrequest/` — `list`, `detail`, `form`, `_filters` (4.5).
 
@@ -421,4 +430,9 @@ tenants, three locations, owner/manager/staff users, and client fixtures that ac
 real `accounts:switch_location` endpoint rather than poking the session).
 
 The 4.1 `TODO(4.3)` marker has been discharged: `test_views.py` now carries the real cross-location
-assertion. The `calls.CallSession` half is still `None` — **Module 5 replaces that one.**
+assertion. **The `calls.CallSession` half was discharged by 5.1 too.** Both tests previously asserted
+`_call_sessions_for(...) is None` — the `ImportError` fallback — which stopped being reachable the
+moment `apps.calls` entered `INSTALLED_APPS`, and they failed. They now create real `CallSession` rows
+at a visible and a non-visible location and assert only the visible one appears. Worth remembering as a
+pattern: a placeholder assertion keyed on "the other module does not exist yet" is a test that fails the
+day that stops being true, and its name promised scoping coverage it never had.
