@@ -231,15 +231,57 @@
           </p>
         </div>
         {% comment %}
-          The link to the originating CallSession is deliberately absent: the
-          calls app does not exist yet, so Appointment carries no
-          booked_by_session FK. Module 5 adds both the column and this panel's
-          link. Saying so beats a dead placeholder.
+          The originating call, now that 5.1 has added the FK. `source` says HOW
+          the booking came about; `booked_by_session` says WHICH call — so an
+          `ai_phone` pill with a session beside it is evidence rather than a
+          claim taken on trust.
+
+          Three states, all of them real:
+            - a session is set -> describe the call and link to it.
+            - source=ai_phone with no session -> the agent booked it, but the
+              call is not linked. Either the booking predates this column (it
+              was added additively, so every historical row is NULL) or the log
+              has since been retention-purged, which SET_NULL empties without
+              taking the booking down. Both are ordinary; neither is data loss.
+            - anything else -> nothing to say. A manual or web booking has no
+              call behind it, and an empty panel row would only ask the reader
+              to wonder what is missing.
         {% endcomment %}
-        {% if obj.source == 'ai_phone' %}
+        {% if obj.booked_by_session %}
+          <div>
+            <span class="form-label">Originating call</span>
+            <p>
+              {% comment %}
+                calls:callsession_detail is tenant AND location scoped, so a
+                session recorded at another site would 404 rather than open.
+                That should not arise — the runtime books into the location it
+                answered for — but nothing constrains the pair, so the link is
+                offered only where it will actually resolve. The call is
+                described either way: losing the link must not lose the fact.
+              {% endcomment %}
+              {% if obj.booked_by_session.location_id == obj.location_id %}
+                <a href="{% url 'calls:callsession_detail' obj.booked_by_session.pk %}">
+                  {{ obj.booked_by_session.from_number|default:"Unknown caller" }}
+                </a>
+              {% else %}
+                {{ obj.booked_by_session.from_number|default:"Unknown caller" }}
+              {% endif %}
+              {% include "partials/_call_status_badge.html" with obj=obj.booked_by_session %}
+              <span class="block text-muted text-xs">
+                {% if obj.booked_by_session.started_at %}
+                  <time datetime="{{ obj.booked_by_session.started_at|date:'c' }}">{{ obj.booked_by_session.started_at|date:"j M Y, H:i" }}</time>
+                  · {{ obj.booked_by_session.duration_display }}
+                {% else %}
+                  The call had not started when this session was written.
+                {% endif %}
+              </span>
+            </p>
+          </div>
+        {% elif obj.source == 'ai_phone' %}
           <p class="text-muted">
-            The recording and transcript of the call that made this booking will
-            link here once the call logs module is built.
+            Booked by the agent, but the call itself is not linked — it either
+            predates the call log or has since been purged under its retention
+            window. The booking itself is unaffected.
           </p>
         {% endif %}
         <div>
