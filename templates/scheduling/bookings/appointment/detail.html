@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load ui %}
 
 {% block title %}{{ obj.contact.display_name }} — {{ obj.start_at|date:"j M" }}{% endblock %}
 
@@ -266,8 +267,20 @@
             {% endcomment %}
             {% if obj.booked_by_session.location_id == obj.location_id %}
               <p>
+                {% comment %}
+                  `phone_e164`, not the raw column, and not `|default:` either.
+                  Every caller number in this product renders through that one
+                  filter so the same number never appears in two shapes; and
+                  `|default:` cannot stand in for the empty case here, because
+                  `phone_e164` returns '' for a falsy value, so the fallback
+                  would never fire and a withheld number would render as blank.
+                {% endcomment %}
                 <a href="{% url 'calls:callsession_detail' obj.booked_by_session.pk %}">
-                  {{ obj.booked_by_session.from_number|default:"Unknown caller" }}
+                  {% if obj.booked_by_session.from_number %}
+                    {{ obj.booked_by_session.from_number|phone_e164 }}
+                  {% else %}
+                    Unknown caller
+                  {% endif %}
                 </a>
                 {% include "partials/_call_status_badge.html" with obj=obj.booked_by_session %}
                 <span class="block text-muted text-xs">
