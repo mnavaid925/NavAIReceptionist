@@ -407,9 +407,12 @@ def appointment_mark_view(request, pk, new_status):
         )
         return redirect('scheduling:appointment_detail', pk=obj.pk)  # noqa: F405
 
-    # Refresh so the confirmation names the status that actually landed rather
-    # than the one this request hoped for.
-    obj.refresh_from_db(fields=['status'])
+    # Set locally rather than re-reading. Winning the UPDATE above already tells
+    # us what the row holds: the WHERE clause required an OPEN status, and
+    # `OPEN_STATUSES` shares no value with `completed`/`no_show`, so the row can
+    # no longer match any other mark's precondition. A second SELECT could only
+    # return what we just wrote.
+    obj.status = new_status
 
     logger.info('Appointment marked appointment_id=%s new_status=%s by user_id=%s',
                 obj.pk, new_status, request.user.pk)
