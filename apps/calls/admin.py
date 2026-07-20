@@ -52,6 +52,24 @@ class CallSessionAdmin(admin.ModelAdmin):
                        'metadata', 'started_at', 'ended_at',
                        'created_at', 'updated_at')
 
+    def get_queryset(self, request):
+        """Leave the JSON columns on the database for the changelist.
+
+        `readonly_fields` above governs the CHANGE FORM; the changelist still
+        does `SELECT *`, so every row on it drags a full transcript, event log
+        and cost list across the wire for columns `list_display` never renders.
+        Harmless against today's hand-authored fixtures and much less so once
+        Module 3 writes real ones.
+
+        `defer`, not `only`: the change form and the detail pages want the whole
+        row, and deferring names the few columns to skip rather than trying to
+        keep an inclusion list in step with `list_display`.
+        """
+        return super().get_queryset(request).defer(
+            'transcript', 'logs', 'analysis', 'usage', 'waveform_peaks',
+            'metadata',
+        )
+
     def has_add_permission(self, request, obj=None):
         """No hand-made call logs.
 
