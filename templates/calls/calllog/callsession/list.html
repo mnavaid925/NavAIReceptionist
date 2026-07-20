@@ -159,7 +159,14 @@
                   {% endcomment %}
                   <span class="table-actions">
                     <a class="btn btn-icon" href="{% url 'calls:callsession_detail' s.pk %}"
-                       aria-label="View the call from {% if s.contact %}{{ s.contact.display_name }}{% else %}{{ s.from_number|phone_e164 }}{% endif %}"
+                       {% comment %}
+                         The third branch is not padding. `phone_e164` returns ''
+                         for a falsy value, so a caller with neither a contact nor
+                         a number would leave this reading "View the call from "
+                         and trail off — the one row where a screen reader gets
+                         LESS than the visible cell, which says "Withheld" plainly.
+                       {% endcomment %}
+                       aria-label="View the call from {% if s.contact %}{{ s.contact.display_name }}{% elif s.from_number %}{{ s.from_number|phone_e164 }}{% else %}a withheld number{% endif %}"
                        title="View">
                       <i data-lucide="eye"></i>
                     </a>
