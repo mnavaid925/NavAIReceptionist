@@ -190,15 +190,23 @@ class Contact(TenantOwned):  # noqa: F405
         was meant to prevent.
 
         Overriding `delete()` rather than patching `contact_delete_view` covers
-        every instance-delete path at once — the view, the admin, the shell, and
-        whatever calls it next — instead of the one call site that happens to
+        every INSTANCE-delete path at once — the view, the admin's single-object
+        confirmation, the shell — instead of the one call site that happens to
         exist today.
 
-        NOT triggered by a queryset `.delete()`, which Django executes in bulk
-        without instantiating rows. The only bulk delete of contacts in this
-        project is `seed_scheduling --flush`, which deletes the callbacks in the
-        same pass, so nothing is stranded there. A future bulk erasure path must
-        scrub explicitly.
+        It does NOT cover a queryset `.delete()`, which Django executes in bulk
+        without instantiating rows, so this method never runs. Two such paths
+        exist, and both are handled where they live rather than here:
+
+        * The admin changelist's "Delete selected" action — the reachable one.
+          `ContactAdmin.delete_queryset` overrides it to delete row by row so
+          this cascade runs. Without that override the bulk action LOOKS like it
+          worked, because the FK nulls either way, while the caller identity
+          stays behind.
+        * `seed_scheduling --flush`, which deletes the callbacks in the same
+          pass, so nothing is stranded.
+
+        Any new bulk erasure path must route through here or scrub explicitly.
         """
         self._scrub_linked_callback_requests()
         return super().delete(*args, **kwargs)
