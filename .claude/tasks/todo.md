@@ -2261,3 +2261,365 @@ week is Monday-anchored with exactly one now-line.
 
 The dev Daphne on :8000 predates these changes and does not auto-reload — **restart it to see 4.4**. A
 second launch entry on :8001 was added so a preview can run without colliding with it.
+
+---
+# Sub-module 4.5 — Bookings List & Callback Requests (Module 4: Calendar & Bookings, `scheduling`) — plan from research-scheduling-4.5.md (2026-07-21)
+
+## Shape: CRUD — one new model, plus a small enrichment of an already-built surface
+
+`CallbackRequest` is the one genuinely new tenant+location-scoped domain table this pass introduces — the
+CRUD test ("does this sub-module's data already exist?") fails for it, so it gets full list/create/detail/
+edit/delete. The Booking List and Appointment Detail bullets, by contrast, are **already built in 4.3**
+(`appointment_list_view`'s full filter set, `bookings/appointment/detail.html`'s contact/service/resource/
+notes panel) — re-verified by direct read of `apps/scheduling/views/Bookings/Appointments.py` and
+`templates/scheduling/bookings/appointment/{list,detail}.html` before writing this plan. Their only honest gap
+(no one-click status transition, no quick date-range presets) is a small, secondary enrichment of the
+EXISTING `Appointment` views/templates — not a second model and not a rebuild.
+
+## Models (from research — 1 new model, within the 1–3 ceiling)
+
+- [ ] **`scheduling.CallbackRequest`** — tenant **AND** location-scoped (`TenantLocationOwned`, confirmed in
+  advance by `apps/scheduling/models/_base.py`'s own docstring, which already names this model alongside
+  `Resource` and `Appointment`). Verified FK targets: `tenants.Tenant`/`tenants.Location` (via the base),
+  `scheduling.Contact` (`apps/scheduling/models/ContactDirectory/Contacts.py`, grep-confirmed). Fields, per
+  ERD lines 293-305 and the research's build scope, each tied to a specific researched feature:
+  - `contact` — FK `scheduling.Contact`, **`null=True, blank=True`, `on_delete=models.SET_NULL`** — a
+    deliberate CONTRAST with `Appointment.contact`'s `PROTECT`: a callback is a transient operational queue
+    item, not permanent booking history, so it must survive a contact's removal rather than block it
+    (research: "Beyond the bullets"). Drives: Callback Request Queue's "an unidentified caller" case
+    (Invariant 1 — never a second identity table; an identified caller gets `contact` set from server state,
+    an unknown one leaves it null).
+  - `caller_name` — `CharField(max_length=255, blank=True)` — Callback Request Queue ("name ... captured even
+    for an unidentified caller").
+  - `caller_phone` — `CharField(max_length=32, blank=True)` — Callback Request Queue ("phone ... captured"),
+    the confirmed callback number; drives the Rosie-style `tel:` tap-to-call link in the templates.
+  - `reason` — `TextField(blank=True)` — Callback Request Queue ("reason").
+  - `status` — `CharField(max_length=16, choices=STATUS_CHOICES, default='pending', db_index=True)`,
+    `STATUS_CHOICES = [('pending','Pending'), ('contacted','Contacted'), ('closed','Closed')]` — Callback
+    Request Queue + Callback Resolution bullets ("a `pending`/`contacted`/`closed` status").
+  - `source` — `CharField(max_length=32, choices=SOURCE_CHOICES, default='ai_phone')`,
+    `SOURCE_CHOICES = [('ai_phone','AI phone call'), ('manual','Added manually'), ('web','Web')]` — mirrors
+    `Contact.source`/`Appointment.source`'s established three-choice pattern (research: "Beyond the bullets" —
+    the field this model must carry so Module 3.4's documented transfer-fallback write and the future
+    `request_callback` tool have something to stamp). **Server-stamped only, never a form field** — same
+    prompt-injection discipline as `Appointment.source`.
+  - `notes` — `TextField(blank=True)` — Callback Resolution ("Close with notes").
+  - `Meta.indexes = [models.Index(fields=['tenant', 'location', 'status'], name='idx_callback_tenant_loc_status')]`;
+    `Meta.ordering = ['-created_at']` — both per ERD lines 301/305 verbatim.
+  - **No FK to `calls.CallSession`.** `apps/calls` does not exist, and Django refuses to migrate a relation to
+    an uninstalled app (the exact failure documented in `Appointment`'s own `booked_by_session` docstring).
+    Re-checked the ERD's `CallbackRequest` section itself (lines 293-305): unlike `Appointment`, it specifies
+    **no session FK at all** — there is nothing to omit-and-document beyond following the same project-wide
+    discipline; no placeholder integer column either way.
+  - **Form excludes:** `tenant`, `location` (stamped by `TenantLocationModelForm` from `request.tenant`/
+    `request.location`, never posted), `source` (server-stamped — `SOURCE_MANUAL` on staff creation through
+    this CRUD, exactly like `appointment_create_view` re-stamping `Appointment.source`), `created_at`/
+    `updated_at` (inherited `TimeStamped`).
+  - **PII discipline (compliance section of the research):** `caller_phone` and `reason` get the same
+    treatment as `Contact.notes`/`Appointment.reason` — rendered with `|linebreaksbr`, never `|safe`; never
+    logged at INFO (every log line in the views below carries `pk`/`tenant_id`/`user_id` only).
+
+## Backend (apps/scheduling/{models,forms,views,urls}/CallbackRequests/ — new sub-module folder)
+
+- [ ] `apps/scheduling/models/CallbackRequests/__init__.py` — empty, makes the package importable.
+- [ ] `apps/scheduling/models/CallbackRequests/CallbackRequests.py` — the `CallbackRequest` class as specified
+  above, `from apps.scheduling.models._base import *`, `__all__ = ['CallbackRequest']`.
+- [ ] `apps/scheduling/models/__init__.py` — add `from apps.scheduling.models.CallbackRequests.CallbackRequests
+  import CallbackRequest`; append `'CallbackRequest'` to `__all__`; extend the module docstring's sub-module
+  list with `* CallbackRequests/ — 4.5  CallbackRequest`.
+- [ ] `apps/scheduling/forms/CallbackRequests/__init__.py` — empty.
+- [ ] `apps/scheduling/forms/CallbackRequests/CallbackRequests.py` — two forms:
+  - `CallbackRequestForm(TenantLocationModelForm)` — `tenant_scoped_fields = ('contact',)`;
+    `Meta.fields = ('contact', 'caller_name', 'caller_phone', 'reason', 'status', 'notes')`; `reason`/`notes`
+    as `Textarea(rows=3)`; `contact` `required=False`; `__init__` further narrows the `contact` queryset to
+    `Contact.objects.filter(tenant=self.tenant, anonymized_at__isnull=True)` — the same "an erased contact must
+    not be re-attachable" rule `AppointmentForm.__init__` already enforces. No status restriction here (the
+    research's "no rigid linear state machine" point — the general form permits any of the three values, same
+    posture as `AppointmentForm` permitting any of its non-cancelled statuses through one form).
+  - `CallbackResolveForm(forms.ModelForm)` — `Meta.model = CallbackRequest`, `Meta.fields = ('status', 'notes')`
+    — the dedicated Callback Resolution action, structurally identical in spirit to `AppointmentCancelForm`
+    (a small, purpose-built form for one transition, not the general CRUD form). `__init__` restricts
+    `self.fields['status'].choices` to `[(CallbackRequest.STATUS_CONTACTED, 'Contacted'),
+    (CallbackRequest.STATUS_CLOSED, 'Closed')]` — resolving never regresses a callback back to `pending`;
+    that correction path is the general edit form.
+- [ ] `apps/scheduling/forms/__init__.py` — add
+  `from apps.scheduling.forms.CallbackRequests.CallbackRequests import (CallbackRequestForm, CallbackResolveForm)`;
+  append both names to `__all__`.
+- [ ] `apps/scheduling/views/CallbackRequests/__init__.py` — empty.
+- [ ] `apps/scheduling/views/CallbackRequests/CallbackRequests.py` — `_location_callbacks(request)` (an
+  entity-local helper, per Backend Package Structure rule 5 — only this file uses it, so it stays here rather
+  than in `views/_helpers.py`): returns `CallbackRequest.objects.none()` when `request.location is None`, else
+  `CallbackRequest.objects.filter(tenant=request.tenant, location=request.location).select_related('contact', 'location')`.
+  Views, all `@login_required`:
+  - `callbackrequest_list_view` — search `q` (`Q()` across `caller_name`, `caller_phone`, `reason`,
+    `contact__first_name`, `contact__last_name`, `contact__phone_e164`); status defaults to `pending` **unless
+    the querystring explicitly overrides it** (research: "the queue defaults to `pending`, not a full
+    history") — `if 'status' in request.GET: status = request.GET['status'].strip()` (empty string means
+    "all") `else: status = CallbackRequest.STATUS_PENDING`; apply `.filter(status=status)` only when `status`
+    is truthy and a valid choice — a junk value degrades to "all", never raises (Filter Implementation Rules).
+    Context passes `status_choices=CallbackRequest.STATUS_CHOICES` and `default_status='pending'` so the
+    filter bar can preselect Pending.
+  - `callbackrequest_detail_view` — `obj` via `get_object_or_404(_location_callbacks(request), pk=pk)`, plus
+    `resolve_form=CallbackResolveForm(instance=obj)`.
+  - `callbackrequest_create_view` — `CallbackRequestForm(request.POST or None, request=request)`; on success,
+    stamp `obj.source = CallbackRequest.SOURCE_MANUAL` if it isn't already (mirrors
+    `appointment_create_view`'s own re-stamp); `logger.info` with `pk`/`tenant_id`/`user_id` only; redirect to
+    detail.
+  - `callbackrequest_edit_view` — same form bound to the instance; no closed-state guard (the research's
+    "no rigid linear state machine" point applies to editing too — a queue item stays correctable at any
+    status, unlike a closed-out `Appointment`, which is a record of what already happened).
+  - `callbackrequest_delete_view` — `@tier_required(*MANAGEMENT_TIERS)`, `@require_POST` — outright delete;
+    `CallbackRequest` has no PROTECT-guarded children, so there is no `ProtectedError` branch to handle.
+    Redirect to list.
+  - `callbackrequest_resolve_view` — `@require_POST` — `CallbackResolveForm(request.POST, instance=obj)`;
+    on success, `messages.success`; redirect via
+    `safe_redirect_target(request, default=reverse('scheduling:callbackrequest_detail', args=[obj.pk]))` so
+    both the list row's quick-resolve form and the detail page's resolve card return the user to where they
+    were (a hidden `next` input carries `request.get_full_path` from whichever page posted).
+- [ ] `apps/scheduling/views/__init__.py` — add the six `callbackrequest_*_view` imports and `__all__` entries.
+- [ ] `apps/scheduling/urls/CallbackRequests/__init__.py` — empty.
+- [ ] `apps/scheduling/urls/CallbackRequests/CallbackRequests.py` — `callbacks/` prefix (distinct from
+  `contacts/`, `services/`, `resources/`, `appointments/`, `calendar/` — checked against the whole
+  concatenated list): `callbacks/` (list), `callbacks/create/` (create) — literals — then
+  `callbacks/<int:pk>/` (detail), `callbacks/<int:pk>/edit/` (edit), `callbacks/<int:pk>/resolve/` (resolve),
+  `callbacks/<int:pk>/delete/` (delete).
+- [ ] `apps/scheduling/urls/__init__.py` — import `urlpatterns as callback_request_urlpatterns` and
+  `urlpatterns += callback_request_urlpatterns` under a new `# -- 4.5 Bookings List & Callback Requests --`
+  comment section, after the existing 4.4 block.
+- [ ] `apps/scheduling/admin.py` — register `CallbackRequestAdmin`: `list_display = ('status', 'location',
+  'tenant', 'contact', 'caller_name', 'caller_phone', 'source', 'created_at')`, `list_filter = ('status',
+  'source', 'tenant', 'location')`, `search_fields = ('caller_name', 'caller_phone', 'reason',
+  'contact__first_name', 'contact__last_name')`, `list_select_related = ('tenant', 'location', 'contact')`,
+  `ordering = ('-created_at',)`, `readonly_fields = ('created_at', 'updated_at')`.
+- [ ] `makemigrations scheduling` → new migration (next in sequence after `0003_appointment.py`) adding
+  `CallbackRequest` only — no changes to any other model.
+- [ ] Extend `seed_scheduling.py` idempotently (see Wire-up → Seeder below) — same command, no new file, per
+  the Seed Command Rules.
+
+## `Contact.anonymize()` erasure-cascade fix (edit to an EXISTING file, this sub-module's own exposure)
+
+- [ ] **`apps/scheduling/models/ContactDirectory/Contacts.py` — `Contact.anonymize()`.** The research's own
+  Compliance section flags a genuine gap this sub-module CREATES: `CallbackRequest.contact` is `SET_NULL`, so
+  `Contact.anonymize()` blanking a contact's own fields leaves any linked `CallbackRequest` row's free-text
+  `caller_name`/`caller_phone` untouched — PII that is independent of the `Contact` row and survives an
+  erasure request. Fix it in this pass, since 4.5 is what creates the exposure:
+  - Add a private step called at the end of `anonymize()`, after the existing `self.save(update_fields=[...])`:
+    `self._scrub_linked_callback_requests()`.
+  - `_scrub_linked_callback_requests(self)` — local import `from apps.scheduling.models import CallbackRequest`
+    (avoids a module-level circular import, matching the lazy-import pattern already used by
+    `views/ContactDirectory/Contacts.py::_appointments_for`); `CallbackRequest.objects.filter(contact=self,
+    tenant_id=self.tenant_id).update(caller_name='', caller_phone='', updated_at=timezone.now())` — `timezone`
+    is already imported at module level (used by the existing `self.anonymized_at = timezone.now()` line), so
+    no new import. **`reason` and `notes` are deliberately left untouched** — they are the callback's
+    operational message, not caller identity, and scrubbing them would erase the queue's own working record of
+    what the callback was about; this mirrors the research's own scope boundary ("not solved this pass because
+    4.1 didn't build a cross-app erasure cascade either... but the gap should be visible" — now it's visible
+    AND fixed for the two fields the research specifically names).
+  - Update the method's docstring to note the cascade and why `reason`/`notes` are excluded from it.
+  - Idempotent by construction: re-running `anonymize()` on an already-anonymized contact returns early before
+    reaching the cascade (existing `if self.anonymized_at: return self` guard), and re-running the cascade
+    itself against already-blank fields is harmless.
+
+## Appointment enrichment (secondary — edits to EXISTING 4.3 files, not a new model)
+
+- [ ] **One-click Mark Completed / Mark No-show.** `apps/scheduling/views/Bookings/Appointments.py` —
+  new `appointment_mark_view(request, pk, new_status)`, `@login_required` + `@require_POST` (no tier gate —
+  same posture as `appointment_edit_view`). `obj = get_object_or_404(location_appointments(request), pk=pk)`;
+  reject any `new_status` not in `{Appointment.STATUS_COMPLETED, Appointment.STATUS_NO_SHOW}` (never
+  `cancelled`, which keeps its own reasoned `appointment_cancel_view` flow); reject (with a message) when
+  `not obj.is_open`; on success set `obj.status = new_status`, `obj.save(update_fields=['status', 'updated_at'])`,
+  log `appointment_id`/`new_status`/`user_id` only, then
+  `redirect(safe_redirect_target(request, default=reverse('scheduling:appointment_detail', args=[obj.pk])))` —
+  `safe_redirect_target` and `reverse` are already available via the existing
+  `from apps.scheduling.views._common import *` wildcard import, so no new import.
+  `apps/scheduling/urls/Bookings/Appointments.py` — add
+  `path('appointments/<int:pk>/mark/<str:new_status>/', views.appointment_mark_view, name='appointment_mark')`
+  as a member route (checked against the whole concatenated `urls/__init__.py` list — the `mark/` literal
+  segment is unique, so no ordering conflict with `edit/`, `delete/`, `reschedule/` or `cancel/`).
+  `apps/scheduling/views/__init__.py` — add `appointment_mark_view` to the import + `__all__`.
+- [ ] **Quick date-range presets (Today / This week / Upcoming).** `appointment_list_view` — when
+  `request.location` is set, compute `today_local = request.location.local_now().date()`,
+  `week_start = today_local - timedelta(days=today_local.weekday())`, `week_end = week_start + timedelta(days=6)`;
+  pass `quick_ranges = {'today': f'?from={today_local:%Y-%m-%d}&to={today_local:%Y-%m-%d}', 'week':
+  f'?from={week_start:%Y-%m-%d}&to={week_end:%Y-%m-%d}', 'upcoming': f'?from={today_local:%Y-%m-%d}'}` in
+  context (`None` when no active location). Pure view/template sugar over the already-existing `?from=`/`?to=`/
+  `local_day_bounds_utc` machinery — no model, no new query.
+
+## Realtime & agent surface
+
+**N/A this pass for its own write path** — exactly like every prior `scheduling` sub-module, 4.5 registers no
+LLM tool, adds no consumer, calls no provider adapter, and appends nothing to `calls.CallSession.usage`
+(`calls.CallSession` does not exist yet). It ships **the write target only**:
+- [ ] Document (in the model's own docstring) that `CallbackRequest` is the write target of a future
+  `request_callback(reason, caller_name?, caller_phone?)` tool (Module 3.3, not built) and of the documented
+  off-hours/no-answer transfer-fallback write (Module 3.4, already committed elsewhere in the catalog) —
+  `tenant_id`/`location_id`/`contact_id` (when known) would come from server session state in both cases,
+  never a model argument, exactly mirroring how 4.3 supplies `Appointment` as `book_appointment`'s write target
+  without registering a tool itself. Nothing to trace through "both runtime paths" yet — there is no tool to
+  trace, only the model shape it will need.
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` → `LIVE_LINKS['4.5'] = {'Callback Requests': 'scheduling:callbackrequest_list'}`
+  — the one new entry this pass adds; every other key untouched.
+- [ ] `config/settings.py` / `config/urls.py` / `config/asgi.py` — **untouched**, `scheduling` is not a
+  brand-new app this pass.
+- [ ] **Seeder — extend `seed_scheduling.py` idempotently, new `DEMO_CALLBACK_REQUESTS` dict keyed by location
+  slug, covering ALL FOUR demo locations (Seed Command Rule 6 — "seed at least two locations per tenant"; this
+  sub-module does both tenants):**
+  - `downtown` (3 rows): one linked to the existing `('Dana', 'Whitfield')` contact, `status='pending'`,
+    `source='ai_phone'`, `reason='Called after hours asking about Saturday availability'`; one unidentified
+    caller, `contact=None`, `caller_phone='+13125550777'`, `status='contacted'`, `source='ai_phone'`,
+    `notes='Called back, offered 9am Tuesday — waiting for confirmation.'`; one linked to
+    `('Owen', 'Baptiste')`, `status='closed'`, `source='manual'`, `notes='Emailed price list, resolved.'`.
+  - `uptown` (2 rows): one unidentified caller, `caller_name='Grace'`, `caller_phone='+17735550199'`,
+    `status='pending'`, `source='ai_phone'`, `reason='Asked to be transferred to billing, transfer failed'`;
+    one linked to `('Dana', 'Whitfield')` (proves a business-wide contact can have a callback logged at a
+    DIFFERENT site than their usual one), `status='closed'`, `source='web'`.
+  - `riverside` (2 rows): one linked to `('Helena', 'Ostrom')`, `status='pending'`, `source='ai_phone'`; one
+    unidentified caller, `caller_phone='+15035550444'`, `status='pending'`, `source='ai_phone'`,
+    `reason='Hung up before giving details'`.
+  - `lakeside` (2 rows): one linked to `('Theo', 'Nakamura')`, `status='contacted'`, `source='ai_phone'`,
+    `notes='Left voicemail, awaiting response.'`; one unidentified caller, `status='closed'`,
+    `source='ai_phone'`, `reason='No-answer transfer fallback triggered after hours'`,
+    `notes='Called back next morning, resolved directly.'`.
+  - Dedupe key (idempotent, Seed Command Rule 1): `CallbackRequest.objects.filter(tenant=tenant,
+    location=location, caller_phone=spec.get('caller_phone', ''), reason=spec['reason']).exists()` — skip if
+    already present. New `Command._seed_callback_requests(self, tenants)` method, called from `handle()` after
+    `self._seed_appointments(tenants)`; contacts resolved by the same `(tenant, first_name, last_name)` lookup
+    `_seed_appointments` already uses. Update the module docstring's "Sub-modules seeded so far" list to add
+    `* 4.5  CallbackRequest — a queue per location spanning all three statuses, identified and unidentified
+    callers, and mixed source values.` Print-instructions block gets one new line noting callback requests are
+    location-scoped like appointments.
+
+## Templates (templates/scheduling/callbacks/callbackrequest/ — new sub-module + entity folder)
+
+- [ ] `templates/scheduling/callbacks/callbackrequest/list.html` — extends `base.html`; page header + "Log a
+  callback" primary action to `callbackrequest_create`; includes `_filters.html`; table columns: Logged
+  (`created_at`), Caller (contact link + display name, or `caller_name`/"Unidentified caller" with a `tel:`
+  link on `caller_phone` when present — Rosie's tap-to-call pattern), Reason (truncated, `|linebreaksbr`),
+  Status (`pending`→`badge-amber`, `contacted`→`badge-info`, `closed`→`badge-green`, else `{% else %}` fallback
+  to `{{ obj.get_status_display }}` per the Filter Implementation Rules), Source (mirrors Contact/Appointment's
+  own three-value badge pattern), Actions (view/edit/delete-POST+confirm+csrf, all guarded by
+  `request.user.tier == 'owner' or 'manager'` for delete only); empty-state via `partials/_empty_state.html`
+  when none match, distinguishing "no location chosen" from "no callbacks match the filter" exactly like
+  `bookings/appointment/list.html` does.
+- [ ] `templates/scheduling/callbacks/callbackrequest/_filters.html` — `q` search input + `status` `<select>`
+  preselected to `default_status` (`==` string comparison, per Filter Implementation Rules) with an explicit
+  "All" option (`value=""`) so a user can see the full history, not just the pending queue; Reset link.
+- [ ] `templates/scheduling/callbacks/callbackrequest/detail.html` — Details card (contact link or
+  "Unidentified caller", `caller_name`, `tel:` link on `caller_phone`, `reason|linebreaksbr`, status/source
+  badges); a "Resolve this callback" card rendering `resolve_form` (status choice limited to
+  Contacted/Closed + notes textarea) posting to `callbackrequest_resolve` with a hidden
+  `<input type="hidden" name="next" value="{{ request.get_full_path }}">`; Actions sidebar (Edit / Delete-POST
+  +confirm+csrf, tier-gated / Back to callbacks); Record card (`created_at`/`updated_at`); `notes|linebreaksbr`.
+- [ ] `templates/scheduling/callbacks/callbackrequest/form.html` — one template for create/edit, mirrors
+  `directory/contact/form.html`'s two-column layout; sidebar note explaining `source` and `tenant`/`location`
+  are not shown because they are server-stamped, same convention as the contact form's own sidebar copy.
+
+## Templates — Appointment enrichment (edits to EXISTING files, not new templates)
+
+- [ ] `templates/scheduling/bookings/appointment/list.html` — add a small quick-range button row (Today /
+  This week / Upcoming, from `quick_ranges`) above the existing `_filters.html` include; add two inline
+  one-button POST forms in the Actions column, guarded `{% if a.is_open %}`, posting to
+  `appointment_mark a.pk 'completed'` / `appointment_mark a.pk 'no_show'` with a hidden `next` input carrying
+  `request.get_full_path`.
+- [ ] `templates/scheduling/bookings/appointment/detail.html` — add the same two Mark buttons to the Actions
+  sidebar, guarded `{% if obj.is_open %}`, alongside the existing Edit/Find-a-new-time actions.
+
+## Verify
+
+- [ ] `makemigrations scheduling` → one new migration adding only `CallbackRequest` (verify no unrelated diff
+  on `Appointment`/`Resource`/`Service`/`Contact`); `migrate`.
+- [ ] `seed_scheduling` ×2 — second run reports every new `CallbackRequest` row as already present (idempotent
+  per the `(tenant, location, caller_phone, reason)` dedupe key), 0 duplicates.
+- [ ] `manage.py check` — no new issues.
+- [ ] `PROVIDER_MODE=fake` asserted — this sub-module makes no provider call either (same blanket policy as
+  every prior `scheduling` sub-module).
+- [ ] `pytest apps/scheduling` — new files:
+  - `test_callback_models.py` — `STATUS_CHOICES` default is `pending`; `contact` `SET_NULL` proved through a
+    real delete (unlike `Appointment.contact`'s `PROTECT`); `Contact.anonymize()` blanks `caller_name`/
+    `caller_phone` on a linked `CallbackRequest` but leaves `reason`/`notes` untouched; a `CallbackRequest`
+    with `contact=None` is unaffected by anonymizing an unrelated contact; ordering is `-created_at`.
+  - `test_callback_forms.py` — `CallbackRequestForm` excludes `tenant`/`location`/`source` from rendered
+    fields; `contact` queryset excludes an anonymized contact and a different tenant's contact;
+    `CallbackResolveForm`'s `status` field never offers `pending` as a choice.
+  - `test_callback_views.py` — list defaults to `pending` when `?status=` is absent, shows all three statuses
+    when `?status=` is present-but-empty, degrades a junk `?status=` to "all" not a 500; search matches on
+    `caller_name`, `caller_phone` and `reason`; create/edit/delete/resolve round-trip; resolve rejects
+    `pending` as a posted status value; a location with zero callbacks renders the correct empty-state
+    variant.
+  - `test_callback_security.py` — cross-tenant `admin_acme` cannot reach a `globex` `CallbackRequest` (404 on
+    detail/edit/delete/resolve); cross-location — a user assigned only to Downtown gets 404 on an Uptown
+    callback's detail/edit/delete/resolve; delete is refused (redirect + message, not a 403 crash) for a
+    non-management tier.
+  - Extend `test_booking_views.py` / `test_booking_security.py` — `appointment_mark_view` accepts only
+    `completed`/`no_show` (a posted `cancelled` or junk value is refused, not silently applied); refuses a
+    closed appointment; cross-tenant/cross-location `appointment_mark` on another tenant's/location's booking
+    is 404; quick-range links produce the exact `?from=`/`?to=` pair `local_day_bounds_utc` already covers
+    (assert against the existing filter test fixtures, no new query path).
+- [ ] Twilio webhook signature + idempotency — **N/A**, this sub-module ships no webhook.
+- [ ] websocket connect/reject — **N/A**, this sub-module ships no consumer.
+- [ ] `temp/verify_4_5.py` smoke sweep as `admin_acme` (password from `seed_accounts.py`, printed at the end of
+  the seed run): `callbackrequest_list` 200, defaults to Pending, shows the seeded Downtown/Uptown rows; toggle
+  `?status=` to see `closed`/`contacted` rows; `callbackrequest_detail` 200 with contact link or "Unidentified
+  caller" rendered correctly for both seeded shapes; resolve a `pending` row to `closed` with notes, confirm
+  the list under the default Pending filter no longer shows it; create/edit/delete round-trip; cross-tenant
+  `globex` callback pk → 404; switch location to Uptown → sees Uptown's rows, not Downtown's; on the
+  appointments list, click Mark Completed on an open Downtown booking → status flips, redirected back to the
+  list with query string preserved; Mark No-show on an already-completed booking → refused with a message;
+  Today/This week/Upcoming quick-range links each 200 with the expected subset of appointments; no `{#`/
+  `{% comment` leaks; sidebar shows `4.5` Live under Module 4 with a working "Callback Requests" link.
+
+## Close-out
+
+- [ ] Review agents, in order: `code-reviewer` → `explorer` → `frontend-reviewer` (badge-class fidelity —
+  `pending`/`contacted`/`closed` are NOT the canonical call-status map, confirm no accidental reuse of
+  `_appointment_status_badge.html`; confirm the `tel:` link and `_filters.html` pattern match 4.1's contact
+  directory) → `performance-reviewer` (confirm the list view stays at a small fixed query count, confirm the
+  anonymize cascade's `.update()` doesn't trigger an N+1 anywhere it's called from) → `realtime-reviewer`
+  (expected to find nothing — no realtime surface, same as 4.1-4.4) → `qa-smoke-tester` → `security-reviewer`
+  (confirm `caller_phone`/`reason` PII discipline, confirm the anonymize cascade actually fires and doesn't
+  silently no-op, confirm `source` cannot be posted) → `test-writer`.
+- [ ] **UPDATE** `.claude/skills/scheduling/SKILL.md` — do not re-author. Flip the Build State row for 4.5 to
+  **BUILT**; add the `CallbackRequest` model/routes/templates section; document the resolve-action pattern
+  (`CallbackResolveForm` restricting choices, mirroring `AppointmentCancelForm`'s "small dedicated form"
+  convention) so a later module doesn't reinvent it differently; document the `appointment_mark_view` +
+  quick-range additions to 4.3's surface; extend the Seeder section with `DEMO_CALLBACK_REQUESTS`; add a
+  Conventions & gotchas entry for the `Contact.anonymize()` cascade (what it scrubs, what it deliberately
+  doesn't, and why) so a future contact-erasure change doesn't silently break it.
+- [ ] README — note the new Callback Requests page and the Appointment list's quick-range/mark-status
+  additions, only if the project README already enumerates 4.1-4.4's pages.
+
+## Later passes / deferred
+
+Carried over verbatim from `research-scheduling-4.5.md`'s own Deferred / Out-of-scope sections:
+
+- **`request_callback` LLM tool + its dispatcher registration + the actual live-call write path** — blocked on
+  Module 3 (Call Runtime) not existing yet; this pass ships only the write target's model shape.
+- **The off-hours/no-answer transfer-fallback write into `CallbackRequest`** — same blocker, Module 3.4.
+- **`Appointment.booked_by_session` FK completion** ("originating call" on the Appointment Detail bullet) —
+  blocked on Module 5 (`calls.CallSession`); carried forward from 4.3's own deferred list, not re-litigated.
+- **Urgency/priority tagging on `CallbackRequest`** (Smith.ai) — not in the ERD or the sub-module's bullets;
+  a well-scoped future addition if ever asked for.
+- **`resolved_by`/`resolved_at` audit pair** — reasonable future addition; `updated_at` covers "when" well
+  enough for this pass, and no researched leader's public docs specify a distinct pair either.
+- **CSV/print export** of the bookings list or the callback queue — no reporting capability documented for
+  this product yet.
+- **Instant multi-channel staff notification on a new callback** (email/SMS/push) — no outbound
+  notification/messaging capability among the seven capabilities; this product's email use is limited to the
+  Module 0 account-security flows.
+- **CRM / Zapier / Google-Sheets auto-export of leads** (Goodcall) — no integrations capability among the
+  seven.
+- **Live in-queue hold / ACD callback position** (Dialpad's In-Queue Callback) — a concurrent-live-call
+  hold-queue concept; this product transfers to one configured destination number, not a multi-agent queue.
+- **Unified inbox merging voice calls with SMS/text threads** (Rosie) — no SMS channel among the seven.
+- **Scheduled follow-up reminders** (Ruby) — would need a reminder/notification engine this product doesn't
+  have.
+- **Scrubbing `CallbackRequest.reason`/`notes` on `Contact.anonymize()`** — deliberately NOT done this pass
+  (see the cascade fix above): those fields are the queue's own operational message, not caller identity: a
+  well-scoped future addition if a stricter erasure policy is ever adopted, not silently expanded to now.
+
+## Review notes
+
+(filled in at the end)
