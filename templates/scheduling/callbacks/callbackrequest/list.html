@@ -83,10 +83,20 @@
                     caller rang from — so this is `caller_phone`, never the linked
                     contact's `phone_e164`. Tapping it dials on a mobile or a
                     softphone, which is the whole job of this page.
+
+                    Linked only when `dialable_phone` says a dialer could ring it.
+                    The form stores an unparseable value verbatim on purpose, so
+                    a note like "555 0142, ask for Dana" reaches this cell — it
+                    must still be READABLE, but a `tel:` wrapper around it just
+                    dials something wrong.
                   {% endcomment %}
                   {% if cb.caller_phone %}
                     <span class="block text-xs">
-                      <a href="tel:{{ cb.caller_phone }}">{{ cb.caller_phone|phone_e164 }}</a>
+                      {% if cb.dialable_phone %}
+                        <a href="tel:{{ cb.dialable_phone|urlencode }}">{{ cb.caller_phone|phone_e164 }}</a>
+                      {% else %}
+                        {{ cb.caller_phone }}
+                      {% endif %}
                     </span>
                   {% endif %}
                 </td>
