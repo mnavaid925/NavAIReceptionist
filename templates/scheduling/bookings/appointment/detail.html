@@ -172,6 +172,26 @@
              href="{% url 'scheduling:appointment_slots' %}?reschedule={{ obj.pk }}{% if obj.service_id %}&amp;service={{ obj.service_id }}{% endif %}">
             <i data-lucide="calendar-clock"></i> Find a new time
           </a>
+          {% comment %}
+            Recording how it went. No hidden `next` on either form: the view
+            already defaults back to this page, and once marked the booking is
+            closed, so the reader lands on the record they just wrote.
+
+            Cancelling is not one of these — it frees the slot and needs a
+            reason, which is the dedicated form beside this panel.
+          {% endcomment %}
+          <form method="post" action="{% url 'scheduling:appointment_mark' obj.pk 'completed' %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-outline">
+              <i data-lucide="check"></i> Mark completed
+            </button>
+          </form>
+          <form method="post" action="{% url 'scheduling:appointment_mark' obj.pk 'no_show' %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-outline">
+              <i data-lucide="user-x"></i> Mark no-show
+            </button>
+          </form>
         {% else %}
           <p class="text-muted">
             This appointment is {{ obj.get_status_display|lower }}, so it can no
