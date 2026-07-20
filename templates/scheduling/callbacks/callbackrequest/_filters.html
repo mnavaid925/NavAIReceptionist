@@ -1,0 +1,47 @@
+{% comment %}
+  Filter bar for the callback queue.
+
+  The status select compares against `selected_status`, NOT `request.GET.status`
+  like every other filter bar in the app. This page is the one place where an
+  ABSENT parameter and an EMPTY one mean different things: no parameter at all is
+  "I opened the queue" and the view resolves it to `pending`, while `?status=` is
+  the All option and means no filter. `request.GET.status` is the empty string in
+  both cases, so preselecting from it would leave Pending unmarked on the very
+  view that is filtered to Pending. The view hands the resolved value over
+  precisely so this template does not have to guess.
+
+  All statuses is an explicit option rather than only a Reset link, because
+  "show me the ones we already closed" is a normal thing to want and Reset takes
+  you back to the pending queue, not to the full history.
+{% endcomment %}
+<form class="card card-body flex flex-wrap items-end gap-3" method="get">
+
+  <div class="form-group grow">
+    <label class="form-label" for="f-q">Search</label>
+    <input class="form-input" type="search" id="f-q" name="q"
+           placeholder="Caller name, phone or reason"
+           value="{{ request.GET.q|default:'' }}">
+  </div>
+
+  <div class="form-group">
+    <label class="form-label" for="f-status">Status</label>
+    <select class="form-select" id="f-status" name="status">
+      <option value="" {% if not selected_status %}selected{% endif %}>All statuses</option>
+      {% for value, label in status_choices %}
+        <option value="{{ value }}" {% if selected_status == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="form-group">
+    <span class="flex gap-2">
+      <button type="submit" class="btn btn-primary"><i data-lucide="filter"></i> Filter</button>
+      {% comment %}
+        Reset goes to the bare path, which drops `status` entirely and so lands
+        back on the pending queue — the page's resting state, not "everything".
+      {% endcomment %}
+      <a class="btn btn-outline" href="{{ request.path }}">Reset</a>
+    </span>
+  </div>
+
+</form>
