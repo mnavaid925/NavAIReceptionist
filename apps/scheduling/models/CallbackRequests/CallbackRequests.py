@@ -146,6 +146,28 @@ class CallbackRequest(TenantLocationOwned):  # noqa: F405
         return 'Unidentified caller'
 
     @property
+    def dialable_phone(self):
+        """`caller_phone` if a dialer could actually ring it, else `''`.
+
+        `CallbackRequestForm.clean_caller_phone` deliberately stores a number it
+        cannot parse verbatim, so a partially-heard number or an instruction
+        like `312 555 0142, ask for Dana` survives instead of being destroyed by
+        normalisation. That is the right call for the RECORD and the wrong thing
+        to hand a phone: wrapping it in a `tel:` link produces a garbled dial,
+        under a control whose whole promise is one tap to ring back.
+
+        So the templates render the raw value as the visible label — always —
+        and use this to decide whether that label is also a link. Same test the
+        form normalises on, kept here rather than in the template because a
+        template cannot express it and two templates would drift.
+        """
+        raw = (self.caller_phone or '').strip()
+        if not raw:
+            return ''
+        stripped = raw.translate(str.maketrans('', '', '+()-. \t'))
+        return raw if stripped.isdecimal() else ''
+
+    @property
     def is_resolved(self):
         """Whether this callback is finished with.
 
