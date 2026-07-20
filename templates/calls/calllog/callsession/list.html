@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Call log{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Call log</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Call Logs</li>
+        <li>Call log</li>
+      </ol>
+    </nav>
+    {% comment %}
+      No "Add call" button, and its absence is correct rather than pending. A
+      call session is written by Module 3's media-stream consumer when a caller
+      actually rings; nothing in this module creates, edits or deletes one, so
+      there is no primary action for this header to carry.
+    {% endcomment %}
+  </div>
+</div>
+
+{% include "calls/calllog/callsession/_filters.html" %}
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header">
+    <span>{{ total_count }} call{{ total_count|pluralize }}</span>
+    {% comment %}
+      Names the ACTIVE LOCATION, like the bookings and callback lists. A call
+      belongs to the site whose number was dialled, so the rows change wholesale
+      on a location switch and nothing else on screen would explain why. The
+      timezone is named too because every timestamp below is rendered in it —
+      the middleware activates the location's tzinfo per request, so
+      `{{ s.started_at }}` is already local by the time it reaches this template.
+    {% endcomment %}
+    <span class="text-muted">
+      {% if active_location %}
+        {{ active_location.name }} &mdash; times shown in {{ active_location.timezone }}
+      {% else %}
+        No location chosen
+      {% endif %}
+    </span>
+  </div>
+  <div class="card-body">
+
+    {% if call_sessions %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Started</th>
+              <th scope="col">Duration</th>
+              <th scope="col">Numbers</th>
+              <th scope="col">Caller</th>
+              <th scope="col">Status</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in call_sessions %}
+              <tr>
+                <td>
+                  {% comment %}
+                    `started_at` is nullable: the row is created when the webhook
+                    lands and stamped when the media stream actually opens, so a
+                    session genuinely can sit here with no start time for a
+                    moment. The dash is that state, not a bug.
+                  {% endcomment %}
+                  {% if s.started_at %}
+                    <time datetime="{{ s.started_at|date:'c' }}">{{ s.started_at|date:"D j M, H:i" }}</time>
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% comment %}
+                    `duration_display` is a model property and is never empty —
+                    it already resolves the in-progress, not-yet-started and
+                    skewed-clock cases into a readable label, so there is no
+                    fallback to write here. Re-deriving it in the template would
+                    be a second copy of those three rules.
+                  {% endcomment %}
+                  {{ s.duration_display }}
+                </td>
+                <td>
+                  {% comment %}
+                    Both legs, because both answer a real question: the caller's
+                    number is who rang, and the dialled number is which of this
+                    site's lines they came in on — a location can own more than
+                    one. Both are PII and both render through `phone_e164`, the
+                    single formatter, so a number never appears grouped on one
+                    page and raw on another. Never |safe: these are strings from
+                    a telephony provider, not markup.
+                  {% endcomment %}
+                  {% if s.from_number %}
+                    {{ s.from_number|phone_e164 }}
+                  {% else %}
+                    <span class="text-muted">Withheld</span>
+                  {% endif %}
+                  <span class="block text-muted text-xs">
+                    {% comment %}
+                      Spelled out rather than `|default:"&mdash;"`: a default
+                      argument is a STRING and gets autoescaped, so that entity
+                      would render as the literal text "&mdash;".
+                    {% endcomment %}
+                    {% if s.to_number %}to {{ s.to_number|phone_e164 }}{% else %}&mdash;{% endif %}
+                  </span>
+                </td>
+                <td>
+                  {% comment %}
+                    An identified caller links through to their contact record;
+                    an unidentified one says so plainly. Most first-time callers
+                    land in the second branch and that is normal — `contact` is
+                    SET_NULL and nullable precisely because an unknown or
+                    withheld caller ID is routine.
+                  {% endcomment %}
+                  {% if s.contact %}
+                    <a href="{% url 'scheduling:contact_detail' s.contact.pk %}">{{ s.contact.display_name }}</a>
+                  {% else %}
+                    <span class="text-muted">Unidentified caller</span>
+                  {% endif %}
+                  {% comment %}
+                    What the call PRODUCED — the other half of "Contact & booking
+                    links", and the reason this log is worth reading rather than
+                    just counting. `booked_appointments` is the reverse of
+                    `Appointment.booked_by_session`; a call could in principle
+                    produce more than one, so this loops rather than assuming a
+                    single row. Each is labelled by when it is FOR, since an
+                    appointment has no human-readable number to name it by.
+                  {% endcomment %}
+                  {% for a in s.booked_appointments.all %}
+                    <span class="block text-xs">
+                      <a href="{% url 'scheduling:appointment_detail' a.pk %}">
+                        <i data-lucide="calendar-check"></i>
+                        Booked {{ a.start_at|date:"j M, H:i" }}
+                      </a>
+                    </span>
+                  {% endfor %}
+                </td>
+                <td>
+                  {% comment %}
+                    The shipped partial is the single source of truth for the
+                    five-value status map. Never inline the branches here — its
+                    own header says so, and an inlined copy is how two pages end
+                    up disagreeing about what `transferred` looks like.
+                  {% endcomment %}
+                  {% include "partials/_call_status_badge.html" with obj=s %}
+                </td>
+                <td>
+                  {% comment %}
+                    VIEW ONLY. There is no Edit and no Delete on this row and
+                    their absence is correct, not an oversight: a completed call
+                    is a record of what happened, and CLAUDE.md names this exact
+                    model as the carve-out to the CRUD Completeness Rules. An
+                    unguarded Edit button here would be the bug.
+                  {% endcomment %}
+                  <span class="table-actions">
+                    <a class="btn btn-icon" href="{% url 'calls:callsession_detail' s.pk %}"
+                       aria-label="View the call from {% if s.contact %}{{ s.contact.display_name }}{% else %}{{ s.from_number|phone_e164 }}{% endif %}"
+                       title="View">
+                      <i data-lucide="eye"></i>
+                    </a>
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/_pagination.html" %}
+
+    {% elif active_location %}
+      {% comment %}
+        Two different nothings, and telling them apart is the point. With a
+        location active this is either a site that has genuinely never taken a
+        call or a filter that matches none — and no empty state here carries an
+        action, because there is nothing a user can do to create a call except
+        wait for the phone to ring.
+      {% endcomment %}
+      {% if request.GET %}
+        {% include "partials/_empty_state.html" with icon="phone-off" title="No calls match" message="Try clearing the filters, or widening the date range. Calls appear here as the agent answers them." %}
+      {% else %}
+        {% include "partials/_empty_state.html" with icon="phone-off" title="No calls yet" message="This location has not taken a call through the agent. Once its number is live, every answered call is logged here with its transcript and outcome." %}
+      {% endif %}
+    {% else %}
+      {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Each site keeps its own call log, because a call belongs to the number that was dialled. Pick the location you are working in and its calls appear here." %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
