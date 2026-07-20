@@ -471,3 +471,187 @@ def test_cancel_view_get_is_405(client_a, tenant_a, location_a1, contact_a, make
     appt = make_appointment(tenant_a, location_a1, contact_a)
     response = client_a.get(_url('appointment_cancel', appt.pk))
     assert response.status_code == 405
+
+
+# --------------------------------------------------------------------------- #
+# appointment_mark_view — sub-module 4.5's appointment enrichment
+# --------------------------------------------------------------------------- #
+
+def test_mark_view_get_is_405(client_a, tenant_a, location_a1, contact_a, make_appointment):
+    appt = make_appointment(tenant_a, location_a1, contact_a, status=Appointment.STATUS_SCHEDULED)
+    response = client_a.get(_url('appointment_mark', appt.pk, 'completed'))
+    assert response.status_code == 405
+    appt.refresh_from_db()
+    assert appt.status == Appointment.STATUS_SCHEDULED
+
+
+@pytest.mark.parametrize('new_status', [
+    Appointment.STATUS_CANCELLED, Appointment.STATUS_SCHEDULED, Appointment.STATUS_CONFIRMED, 'not-a-real-status',
+])
+def test_mark_view_allow_list_refuses_everything_but_completed_and_no_show(
+    client_a, tenant_a, location_a1, contact_a, make_appointment, new_status,
+):
+    """`cancelled` is a VALID `Appointment` status but deliberately unreachable
+    here — a cancellation has to go through `appointment_cancel_view`'s
+    reasoned flow. This is an allow-list, not a `STATUS_CHOICES` membership
+    test, so `scheduled`/`confirmed` and outright junk are refused the same way.
+    """
+    appt = make_appointment(tenant_a, location_a1, contact_a, status=Appointment.STATUS_SCHEDULED)
+
+    response = client_a.post(_url('appointment_mark', appt.pk, new_status), follow=True)
+
+    assert response.status_code == 200
+    appt.refresh_from_db()
+    assert appt.status == Appointment.STATUS_SCHEDULED
+    messages = [str(m) for m in get_messages(response.wsgi_request)]
+    assert any('not an outcome a booking can be marked with' in m for m in messages)
+
+
+@pytest.mark.parametrize('new_status, expected', [
+    ('completed', Appointment.STATUS_COMPLETED),
+    ('no_show', Appointment.STATUS_NO_SHOW),
+])
+def test_mark_view_applies_a_valid_outcome_to_an_open_booking(
+    client_a, tenant_a, location_a1, contact_a, make_appointment, new_status, expected,
+):
+    appt = make_appointment(tenant_a, location_a1, contact_a, status=Appointment.STATUS_SCHEDULED)
+
+    response = client_a.post(_url('appointment_mark', appt.pk, new_status))
+
+    assert response.status_code == 302
+    appt.refresh_from_db()
+    assert appt.status == expected
+
+
+def test_mark_view_second_mark_on_a_now_closed_booking_is_refused(
+    client_a, tenant_a, location_a1, contact_a, make_appointment,
+):
+    appt = make_appointment(tenant_a, location_a1, contact_a, status=Appointment.STATUS_COMPLETED)
+
+    response = client_a.post(_url('appointment_mark', appt.pk, 'no_show'), follow=True)
+
+    assert response.status_code == 200
+    appt.refresh_from_db()
+    assert appt.status == Appointment.STATUS_COMPLETED
+    messages = [str(m) for m in get_messages(response.wsgi_request)]
+    assert any('already completed' in m for m in messages)
+
+
+def test_mark_view_honours_posted_next(client_a, tenant_a, location_a1, contact_a, make_appointment):
+    appt = make_appointment(tenant_a, location_a1, contact_a, status=Appointment.STATUS_SCHEDULED)
+    list_url = _url('appointment_list') + '?status=scheduled'
+
+    response = client_a.post(_url('appointment_mark', appt.pk, 'completed'), {'next': list_url})
+
+    assert response.status_code == 302
+    assert response.url == list_url
+
+
+def test_mark_view_defaults_to_detail_without_next(client_a, tenant_a, location_a1, contact_a, make_appointment):
+    appt = make_appointment(tenant_a, location_a1, contact_a, status=Appointment.STATUS_SCHEDULED)
+
+    response = client_a.post(_url('appointment_mark', appt.pk, 'completed'))
+
+    assert response.status_code == 302
+    assert response.url == _url('appointment_detail', appt.pk)
+
+
+def test_mark_view_concurrency_guard_reports_the_loss_rather_than_overwriting(
+    client_a, tenant_a, location_a1, contact_a, make_appointment, monkeypatch,
+):
+    """Simulate another request winning the race between this view's read and
+    its write: the conditional UPDATE's `status__in=OPEN_STATUSES` WHERE clause
+    then matches zero rows, and the view must report the loss rather than
+    silently overwriting whatever the other request already set.
+
+    `get_object_or_404` is monkeypatched to hand back a STALE, pre-race copy of
+    the row (so `obj.is_open` reads True, exactly as it would have a moment
+    before the race) while the real row underneath has already moved on — the
+    same "read is stale, write is authoritative" shape a genuine two-request
+    race produces, without needing actual concurrency.
+    """
+    from apps.scheduling.views.Bookings import Appointments as appointments_module
+
+    appt = make_appointment(tenant_a, location_a1, contact_a, status=Appointment.STATUS_SCHEDULED)
+    stale_copy = Appointment.objects.get(pk=appt.pk)
+    real_get_object_or_404 = appointments_module.get_object_or_404
+
+    def _stale_get_object_or_404(queryset, **kwargs):
+        if kwargs.get('pk') == appt.pk:
+            return stale_copy
+        return real_get_object_or_404(queryset, **kwargs)
+
+    monkeypatch.setattr(appointments_module, 'get_object_or_404', _stale_get_object_or_404)
+
+    # "Someone else" closes the booking out first.
+    Appointment.objects.filter(pk=appt.pk).update(status=Appointment.STATUS_CANCELLED)
+
+    response = client_a.post(_url('appointment_mark', appt.pk, 'completed'), follow=True)
+
+    assert response.status_code == 200
+    appt.refresh_from_db()
+    # The mark must NOT have overwritten the concurrent cancellation.
+    assert appt.status == Appointment.STATUS_CANCELLED
+    messages = [str(m) for m in get_messages(response.wsgi_request)]
+    assert any('Someone else closed this booking out' in m for m in messages)
+
+
+def test_mark_success_path_costs_exactly_two_queries(
+    django_assert_max_num_queries, tenant_a, location_a1, contact_a, make_appointment,
+):
+    """The mark action's whole database cost is one SELECT (the scoped fetch)
+    plus one conditional UPDATE. Tested at this level — directly against the
+    same `location_appointments()` helper the view calls, rather than through
+    `Client` — so the count reflects the ACTION's own query cost rather than
+    the constant, unrelated overhead of session/auth/location-switcher
+    middleware that wraps every authenticated request (the same reasoning
+    `test_booking_availability.py` uses when it calls `find_available_slots`
+    directly instead of through the test client).
+    """
+    from types import SimpleNamespace
+
+    from apps.scheduling.views._helpers import location_appointments
+
+    appt = make_appointment(tenant_a, location_a1, contact_a, status=Appointment.STATUS_SCHEDULED)
+    request = SimpleNamespace(tenant=tenant_a, location=location_a1)
+
+    with django_assert_max_num_queries(2):
+        obj = location_appointments(request).get(pk=appt.pk)
+        updated = location_appointments(request).filter(
+            pk=obj.pk, status__in=Appointment.OPEN_STATUSES,
+        ).update(status=Appointment.STATUS_COMPLETED, updated_at=dj_timezone.now())
+        assert updated == 1
+
+
+# --------------------------------------------------------------------------- #
+# `quick_ranges` — appointment_list_view's context (sub-module 4.5)
+# --------------------------------------------------------------------------- #
+
+def test_list_view_quick_ranges_reflects_the_locations_own_today(client_a, location_a1):
+    """Read off `location.local_now()`, not `timezone.localdate()` — a site
+    whose zone differs from the server's must not get a "Today" button that
+    drifts a day either side of its own midnight.
+    """
+    response = client_a.get(_url('appointment_list'))
+
+    assert response.status_code == 200
+    today = location_a1.local_now().date()
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    quick_ranges = response.context['quick_ranges']
+    assert quick_ranges['today'] == f'?from={today:%Y-%m-%d}&to={today:%Y-%m-%d}'
+    assert quick_ranges['week'] == f'?from={week_start:%Y-%m-%d}&to={week_end:%Y-%m-%d}'
+    # Deliberately open-ended — no `to=` — so "Upcoming" keeps running forward.
+    assert quick_ranges['upcoming'] == f'?from={today:%Y-%m-%d}'
+    assert '&to=' not in quick_ranges['upcoming']
+
+
+def test_list_view_quick_ranges_is_none_without_an_active_location(admin_user):
+    client = Client()
+    client.force_login(admin_user)
+
+    response = client.get(_url('appointment_list'))
+
+    assert response.status_code == 200
+    assert response.context['quick_ranges'] is None
