@@ -12,7 +12,7 @@ setup, calendar and staff are configured **per location**.
 
 > **Build state — read this before trusting any path below.**
 >
-> **16 of the 26 sub-modules are built.** The remaining 12 render as greyed-out roadmap rows in the
+> **17 of the 26 sub-modules are built.** The remaining 9 render as greyed-out roadmap rows in the
 > sidebar, which reflects the truth honestly. `LIVE_LINKS` in `apps/accounts/navigation.py` is the
 > build-state ledger — a sub-module is built if and only if it has an entry there.
 >
@@ -22,12 +22,12 @@ setup, calendar and staff are configured **per location**.
 > | **1 · Business & Locations** (`apps/tenants`) | 1.1 business settings · 1.2 location directory · 1.3 staff assignment · 1.4 provider working hours | — |
 > | **2 · Agent Setup & Telephony** (`apps/agents`) | 2.1 agent setup · 2.2 Twilio connection · 2.3 transfer settings · 2.4 test call | — |
 > | **3 · Call Runtime** (`apps/runtime`) | — | **the whole module.** The app does not exist. `config/asgi.py`'s `websocket_urlpatterns` is still `[]`, waiting on `apps/runtime/routing.py` |
-> | **4 · Calendar & Bookings** (`apps/scheduling`) | **4.1 contact directory · 4.2 services & resources · 4.3 availability & booking · 4.4 calendar views** | 4.5 bookings & callbacks |
+> | **4 · Calendar & Bookings** (`apps/scheduling`) | **4.1 contact directory · 4.2 services & resources · 4.3 availability & booking · 4.4 calendar views · 4.5 bookings & callbacks** — the whole module | — |
 > | **5 · Call Logs** (`apps/calls`) | — | the whole module. The app does not exist |
 >
 > Also built: `config/` (settings, ASGI + Channels, urls), the design system
 > (`static/css/theme.css`, `static/js/layout.js`, `templates/base.html` + partials), and the test suite
-> (`conftest.py` + `apps/scheduling/tests/`, 424 passing).
+> (`conftest.py` + `apps/scheduling/tests/`, 536 passing).
 >
 > **Build order note.** Module 3 is numbered before 4 and 5 but depends on both — it writes
 > `calls.CallSession` and `scheduling.Appointment`/`CallbackRequest`/`Contact`, and reads `Service` and
