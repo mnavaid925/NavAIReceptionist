@@ -12,7 +12,7 @@ setup, calendar and staff are configured **per location**.
 
 > **Build state — read this before trusting any path below.**
 >
-> **17 of the 26 sub-modules are built.** The remaining 9 render as greyed-out roadmap rows in the
+> **18 of the 26 sub-modules are built.** The remaining 8 render as greyed-out roadmap rows in the
 > sidebar, which reflects the truth honestly. `LIVE_LINKS` in `apps/accounts/navigation.py` is the
 > build-state ledger — a sub-module is built if and only if it has an entry there.
 >
@@ -23,16 +23,19 @@ setup, calendar and staff are configured **per location**.
 > | **2 · Agent Setup & Telephony** (`apps/agents`) | 2.1 agent setup · 2.2 Twilio connection · 2.3 transfer settings · 2.4 test call | — |
 > | **3 · Call Runtime** (`apps/runtime`) | — | **the whole module.** The app does not exist. `config/asgi.py`'s `websocket_urlpatterns` is still `[]`, waiting on `apps/runtime/routing.py` |
 > | **4 · Calendar & Bookings** (`apps/scheduling`) | **4.1 contact directory · 4.2 services & resources · 4.3 availability & booking · 4.4 calendar views · 4.5 bookings & callbacks** — the whole module | — |
-> | **5 · Call Logs** (`apps/calls`) | — | the whole module. The app does not exist |
+> | **5 · Call Logs** (`apps/calls`) | **5.1 call log list** — the app and `CallSession`, the one call log | 5.2 call detail & transcript · 5.3 event log & cost · 5.4 recording & transfer outcome — all three are **view** sub-modules over 5.1's JSON columns and add no models |
 >
 > Also built: `config/` (settings, ASGI + Channels, urls), the design system
 > (`static/css/theme.css`, `static/js/layout.js`, `templates/base.html` + partials), and the test suite
-> (`conftest.py` + `apps/scheduling/tests/`, 536 passing).
+> (`conftest.py` + `apps/scheduling/tests/` + `apps/calls/tests/`, **616 passing**).
 >
 > **Build order note.** Module 3 is numbered before 4 and 5 but depends on both — it writes
 > `calls.CallSession` and `scheduling.Appointment`/`CallbackRequest`/`Contact`, and reads `Service` and
 > `Resource`. So Modules 4 and 5 are being built first, then 3. `calls.CallSession.contact` FKs
-> `scheduling.Contact`, which is why 4 precedes 5.
+> `scheduling.Contact`, which is why 4 precedes 5 — and 5.1 is what finally made
+> `scheduling.Appointment.booked_by_session` migratable, since Django refuses a relation to an
+> uninstalled app. That FK had been deliberately absent since 4.3 and landed as an additive
+> migration the moment `apps.calls` entered `INSTALLED_APPS`.
 >
 > A path in the "Project layout" section at the end of this file is a **plan**, not a claim that the
 > code exists. Grep before you rely on one.
@@ -142,6 +145,7 @@ venv\Scripts\python.exe manage.py check; venv\Scripts\python.exe manage.py migra
 venv\Scripts\python.exe manage.py seed_accounts
 venv\Scripts\python.exe manage.py seed_agents
 venv\Scripts\python.exe manage.py seed_scheduling
+venv\Scripts\python.exe manage.py seed_calls
 
 # 6. Run it (Daphne, never runserver)
 venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
@@ -163,6 +167,19 @@ normalisation runs on the seeder's writes too, a catalogue mixing all-location a
 the same room name at two different sites, and 14 appointments spanning every status across all four
 locations. `seed_accounts` stamps working hours on every provider — without them the availability
 engine correctly finds nothing, because unconfigured hours mean unavailable, not available-all-day.
+
+`seed_calls` adds 11 synthetic call sessions across all four locations, covering all five statuses,
+identified and unidentified callers, and every transfer outcome — with hand-authored transcript, event
+log, cost and analysis JSON so the detail surfaces have something real to render. One Downtown call is
+credited with creating an actual booking, so the call → contact → appointment trail is followable end to
+end. **It contacts no provider under any `PROVIDER_MODE`; `apps/calls` has no adapter at all.**
+
+> **Seeder order matters, and reversing it fails silently.** Run them in the order above —
+> `seed_scheduling` before `seed_calls`. `seed_scheduling --flush` deletes and recreates the `Contact`
+> rows, and `CallSession.contact` is `SET_NULL`, so flushing scheduling *after* calls nulls the contact on
+> every session. Nothing errors and the pages still render; the demo just shows every caller as
+> unidentified, which reads as a scoping bug rather than a stale seed. If you flush scheduling, re-run
+> `seed_calls --flush` afterwards.
 
 > **Database version.** This project is pinned to **Django 4.2 LTS** because Django 5.1+ requires
 > MariaDB 10.5 or later, and XAMPP currently ships 10.4. If you see
