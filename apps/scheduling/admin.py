@@ -1,6 +1,7 @@
 from django.contrib import admin
 
-from apps.scheduling.models import Appointment, Contact, Resource, Service
+from apps.scheduling.models import (Appointment, CallbackRequest, Contact,
+                                    Resource, Service)
 
 
 @admin.register(Contact)
@@ -57,3 +58,23 @@ class AppointmentAdmin(admin.ModelAdmin):
     # tool, but the cancellation stamps stay readonly so a cancellation cannot be
     # backdated into looking like something it was not.
     readonly_fields = ('created_at', 'updated_at', 'cancelled_at')
+
+
+@admin.register(CallbackRequest)
+class CallbackRequestAdmin(admin.ModelAdmin):
+    # `caller_name` / `caller_phone` sit next to `contact` rather than behind it:
+    # the unidentified caller is the routine case on an inbound call, so a row
+    # with a blank `contact` is normal and the free text is the only identity
+    # there is. Showing one without the other would make half the queue unusable.
+    list_display = ('status', 'location', 'tenant', 'contact', 'caller_name',
+                    'caller_phone', 'source', 'created_at')
+    list_filter = ('status', 'source', 'tenant', 'location')
+    search_fields = ('caller_name', 'caller_phone', 'reason',
+                     'contact__first_name', 'contact__last_name')
+    list_select_related = ('tenant', 'location', 'contact')
+    ordering = ('-created_at',)
+    # `status` stays editable — it is an operational queue position, not a
+    # historical fact, and the product form already permits any of the three.
+    # `source` is server-stamped provenance and never a product form field, but
+    # is editable here for the same break-glass reason as Contact.source.
+    readonly_fields = ('created_at', 'updated_at')
