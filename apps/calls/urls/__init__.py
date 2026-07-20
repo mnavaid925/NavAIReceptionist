@@ -13,6 +13,9 @@ off the same `<int:pk>` call, that risk is higher here than elsewhere: check any
 new `<str:...>` segment against everything below, not only against its own
 module.
 """
+from apps.calls.urls.CallDetailTranscript.CallSessions import (
+    urlpatterns as transcript_urlpatterns,
+)
 from apps.calls.urls.CallLogList.CallSessions import (
     urlpatterns as call_session_urlpatterns,
 )
@@ -20,7 +23,14 @@ from apps.calls.urls.CallLogList.CallSessions import (
 app_name = 'calls'
 
 # -- 5.1 Call Log List ------------------------------------------------------ #
-# The only patterns in the app: the list at the root and one `<int:pk>` detail.
-# Nothing here can shadow anything, because there is nothing else here yet — but
-# the entity module's own docstring records what a later sub-module must check.
+# The list at the root and one `<int:pk>` detail. Kept FIRST so its literal `''`
+# and its bare `<int:pk>/` are matched before anything a later sub-module hangs
+# off the same pk.
 urlpatterns = list(call_session_urlpatterns)
+
+# -- 5.2 Call Detail & Transcript ------------------------------------------- #
+# `<int:pk>/print/` — a literal `print/` suffix after the pk. It cannot be
+# shadowed by 5.1's `<int:pk>/` (IntConverter ends at the trailing slash), and it
+# shadows nothing above it. A future member route with a greedy `<str:...>` after
+# the pk must be checked against THIS route as well as 5.1's.
+urlpatterns += list(transcript_urlpatterns)
