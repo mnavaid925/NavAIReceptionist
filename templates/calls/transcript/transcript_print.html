@@ -24,6 +24,19 @@
 {% block title %}Transcript — {% if obj.contact %}{{ obj.contact.display_name }}{% elif obj.from_number %}{{ obj.from_number|phone_e164 }}{% else %}unknown caller{% endif %}{% endblock %}
 
 {% block content %}
+{% comment %}
+  A real heading, on purpose, and NOT wrapped in `.page-header`. This page has no
+  `.page-header`/breadcrumb because the print stylesheet does not hide a
+  breadcrumb — but a document with no on-screen heading at all leaves a
+  screen-reader user navigating by headings with nothing to land on. A bare
+  `.page-title` gives both the document (on paper) and assistive tech (on screen)
+  a heading, without dragging in the chrome the print view is meant to shed.
+{% endcomment %}
+<h1 class="page-title" style="margin-block-end: 16px;">
+  Call transcript &mdash;
+  {% if obj.contact %}{{ obj.contact.display_name }}{% elif obj.from_number %}{{ obj.from_number|phone_e164 }}{% else %}unknown caller{% endif %}
+</h1>
+
 <div class="page-actions" style="margin-block-end: 16px;">
   <button type="button" class="btn btn-primary" onclick="window.print()">
     <i data-lucide="printer"></i> Print
