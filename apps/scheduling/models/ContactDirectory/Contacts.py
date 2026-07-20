@@ -176,11 +176,40 @@ class Contact(TenantOwned):  # noqa: F405
         self._scrub_linked_callback_requests()
         return self
 
+    def delete(self, *args, **kwargs):
+        """Scrub the callbacks' copy of this caller's identity, then delete.
+
+        `anonymize()` is the soft path and cascades on its own; this is the hard
+        one, and without this override it erased LESS than the soft one did.
+        `CallbackRequest.contact` is `SET_NULL`, so deleting a contact who has a
+        callback but no appointment succeeds — the FK quietly nulls and the
+        `caller_name` / `caller_phone` duplicated onto that callback row survive,
+        no longer attached to anything that could ever be found and erased again.
+        For a delete whose entire purpose is a GDPR/CCPA erasure request, leaving
+        the identity behind on a sibling table is the exact failure the request
+        was meant to prevent.
+
+        Overriding `delete()` rather than patching `contact_delete_view` covers
+        every instance-delete path at once — the view, the admin, the shell, and
+        whatever calls it next — instead of the one call site that happens to
+        exist today.
+
+        NOT triggered by a queryset `.delete()`, which Django executes in bulk
+        without instantiating rows. The only bulk delete of contacts in this
+        project is `seed_scheduling --flush`, which deletes the callbacks in the
+        same pass, so nothing is stranded there. A future bulk erasure path must
+        scrub explicitly.
+        """
+        self._scrub_linked_callback_requests()
+        return super().delete(*args, **kwargs)
+
     def _scrub_linked_callback_requests(self):
         """Blank the caller identity duplicated onto this contact's callbacks.
 
-        See `anonymize()` for why this exists and why `reason` / `notes` are out
-        of scope; this method only carries out that decision.
+        Called by BOTH erasure paths — `anonymize()` (soft) and `delete()`
+        (hard) — so the two cannot drift into erasing different amounts. See
+        `anonymize()` for why this exists and why `reason` / `notes` are out of
+        scope; this method only carries out that decision.
 
         The import is local because `CallbackRequest` FKs `Contact` — importing
         it at module level would be a circular import through the models
