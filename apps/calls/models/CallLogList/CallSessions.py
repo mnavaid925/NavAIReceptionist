@@ -306,13 +306,17 @@ class CallSession(TenantLocationOwned):  # noqa: F405
         the runtime writes is itself the sum of that turn's `cost_breakdown`;
         this is the sum of those sums.
 
-        Guards each entry: a malformed row — a non-numeric `cost_usd`, or `usage`
-        that is not even a list — contributes 0 rather than raising, because
-        `usage` is JSON the runtime writes and this property must survive a shape
-        it does not fully trust.
+        Guards the shape it does not fully trust: `usage` that is not a list at
+        all (a bare number, a dict, `True`) contributes 0 rather than crashing the
+        detail page — `for turn in 42` raises `TypeError`, and Django re-raises an
+        exception from a property rather than swallowing it, so an unguarded loop
+        here is a 500, not a blank cell. A malformed ROW inside a real list — a
+        non-numeric `cost_usd`, an entry that is not a dict — is skipped the same
+        way.
         """
+        usage = self.usage if isinstance(self.usage, list) else []
         total = 0.0
-        for turn in (self.usage or []):
+        for turn in usage:
             try:
                 total += float(turn.get('cost_usd', 0) or 0)
             except (AttributeError, TypeError, ValueError):
