@@ -21,6 +21,9 @@ from apps.scheduling.urls.Bookings.Appointments import (
 from apps.scheduling.urls.CalendarViews.Calendar import (
     urlpatterns as calendar_urlpatterns,
 )
+from apps.scheduling.urls.CallbackRequests.CallbackRequests import (
+    urlpatterns as callback_request_urlpatterns,
+)
 from apps.scheduling.urls.ServicesResources.Services import (
     urlpatterns as service_urlpatterns,
 )
@@ -46,3 +49,11 @@ urlpatterns += appointment_urlpatterns
 # `calendar/` prefix, distinct from everything above. No pk routes at all — a
 # calendar addresses a date through the query string.
 urlpatterns += calendar_urlpatterns
+
+# -- 4.5 Bookings List & Callback Requests --------------------------------- #
+# `callbacks/` prefix, distinct from every prefix above. Its own module keeps
+# `create/` ahead of `<int:pk>`; nothing above uses a greedy converter that could
+# swallow it. The sub-module's appointment enrichment adds no prefix of its own —
+# `appointments/<int:pk>/mark/<str:new_status>/` is a member route inside 4.3's
+# list, where the `mark/` literal segment already distinguishes it.
+urlpatterns += callback_request_urlpatterns
