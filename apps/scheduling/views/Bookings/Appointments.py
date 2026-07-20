@@ -48,6 +48,7 @@ __all__ = [
     'appointment_detail_view',
     'appointment_edit_view',
     'appointment_delete_view',
+    'appointment_mark_view',
     'appointment_slots_view',
     'appointment_book_view',
     'appointment_reschedule_view',
@@ -132,6 +133,34 @@ def _save_booking_under_lock(form, request):
         return None
 
 
+def _quick_ranges(location):
+    """Today / This week / Upcoming as `?from=&to=` fragments, or None.
+
+    Sugar over the SAME `?from=`/`?to=` machinery the filter bar already posts —
+    nothing here reaches the database, and the values land back in
+    `parse_local_date` + `local_day_bounds_utc` like any hand-typed date.
+
+    "Today" is read off `location.local_now()`, not `timezone.localdate()`: the
+    active Django timezone is the SERVER's, so a site three hours west would get
+    a "Today" button that jumps a day either side of its own midnight — the very
+    drift this module's date handling exists to avoid.
+    """
+    if location is None:
+        return None
+
+    today = location.local_now().date()
+    # Monday-based, matching the week grid 4.4 already draws.
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+    return {
+        'today': f'?from={today:%Y-%m-%d}&to={today:%Y-%m-%d}',
+        'week': f'?from={week_start:%Y-%m-%d}&to={week_end:%Y-%m-%d}',
+        # Deliberately open-ended: no `to=`, so "Upcoming" keeps running forward
+        # rather than silently stopping at some arbitrary horizon.
+        'upcoming': f'?from={today:%Y-%m-%d}',
+    }
+
+
 @login_required  # noqa: F405
 def appointment_list_view(request):
     """Bookings at the active location, with date, status and FK filters."""
@@ -183,6 +212,7 @@ def appointment_list_view(request):
         'page_obj': page_obj,
         'elided_page_range': elided_page_range,
         'total_count': page_obj.paginator.count,
+        'quick_ranges': _quick_ranges(location),
         # Every filter dropdown's data, passed explicitly — a template cannot
         # conjure a queryset it was not given, and a silently empty <select> is
         # the classic broken-filter bug.
@@ -320,6 +350,59 @@ def appointment_delete_view(request, pk):
         'booking that was called off, cancel it instead of deleting it.',
     )
     return redirect('scheduling:appointment_list')  # noqa: F405
+
+
+@login_required  # noqa: F405
+@require_POST  # noqa: F405
+def appointment_mark_view(request, pk, new_status):
+    """Close a booking out in one click — completed, or a no-show.
+
+    No tier gate: marking who turned up is front-desk work, the same posture as
+    `appointment_edit_view`.
+
+    `cancelled` is NOT reachable here even though it is a valid status. A
+    cancellation has to free the slot and record WHY, which is
+    `appointment_cancel_view`'s reasoned flow — routing it through a bare
+    one-click button would leave the calendar holding a slot nobody is coming to
+    and no note explaining it.
+    """
+    obj = get_object_or_404(location_appointments(request), pk=pk)  # noqa: F405
+
+    # `new_status` arrives from the URL path, so it is caller-controlled text —
+    # an allow-list, never a `dict(STATUS_CHOICES)` membership test, which would
+    # happily accept `cancelled` and `scheduled` too.
+    if new_status not in (Appointment.STATUS_COMPLETED, Appointment.STATUS_NO_SHOW):
+        messages.error(  # noqa: F405
+            request, 'That is not an outcome a booking can be marked with.'
+        )
+        return redirect('scheduling:appointment_detail', pk=obj.pk)  # noqa: F405
+
+    # Same closed-out rule `appointment_edit_view` enforces: a booking that has
+    # already been completed, cancelled or no-showed is a record of what
+    # happened, and a second POST must not quietly rewrite it.
+    if not obj.is_open:
+        messages.error(  # noqa: F405
+            request,
+            f'This appointment is already {obj.get_status_display().lower()} and '
+            'its outcome can no longer be changed.',
+        )
+        return redirect('scheduling:appointment_detail', pk=obj.pk)  # noqa: F405
+
+    obj.status = new_status
+    obj.save(update_fields=['status', 'updated_at'])
+
+    logger.info('Appointment marked appointment_id=%s new_status=%s by user_id=%s',
+                obj.pk, new_status, request.user.pk)
+    messages.success(  # noqa: F405
+        request, f'Marked as {obj.get_status_display().lower()}.'
+    )
+    # Both the list row and the detail page offer these buttons, so honour the
+    # posted `next` — a receptionist working down a filtered list must land back
+    # on that list, query string intact, not on the booking they just closed.
+    return redirect(safe_redirect_target(  # noqa: F405
+        request,
+        default=reverse('scheduling:appointment_detail', args=[obj.pk]),  # noqa: F405
+    ))
 
 
 # --------------------------------------------------------------------------- #
