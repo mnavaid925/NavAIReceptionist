@@ -301,8 +301,16 @@ The calendar reads this index; every calendar query carries both `tenant` and `l
 Index `(tenant, location, status)`. Ordering `["-created_at"]`.
 
 Deltas from the reference: `metadata` is **dropped** (nothing writes it here — `CallSession.metadata` already
-carries the call-level detail, and the callback links to that session), `location` is **non-null** (a callback is
-always about one location's calendar), and `source` is harmonized to `ai_phone` / `manual` / `web`.
+carries the call-level detail), `location` is **non-null** (a callback is always about one location's calendar),
+and `source` is harmonized to `ai_phone` / `manual` / `web`.
+
+> **Corrected 5.1.** This paragraph previously read "and the callback links to that session", which contradicted
+> the field list directly above it — that list specifies no session FK, and 4.5 built none. The field list is
+> authoritative and the prose was wrong. `CallbackRequest` has **no** FK to `calls.CallSession`, deliberately,
+> unlike `Appointment.booked_by_session`. Adding one later is a real option (it would be a clean additive
+> migration — `CallSession.callback_requests` does not clash with `Contact.callback_requests`, and a nullable
+> column leaves `idx_callback_tenant_loc_status` untouched), but it is a decision to take on purpose, not a
+> thing to infer from a stray sentence.
 
 ### 3.4 Call logs — `calls`
 
@@ -321,7 +329,7 @@ inside `metadata` — `provider_call_sid` is the webhook idempotency key and nee
 | `contact` | FK Contact, **null** (an unknown or withheld caller ID is normal) |
 | `channel` | Char(32), default `agent_phone` |
 | `mode` | Char(16): `live` / `google` / `gemini` — mirrors `AgentSetting.voice_provider` |
-| `status` | Char(16), default `in_progress`: `in_progress` / `completed` / `abandoned` |
+| `status` | Char(16), default `in_progress`: `in_progress` / `completed` / `abandoned` / `transferred` / `failed` |
 | `from_number`, `to_number` | Char(32), E.164, indexed |
 | `provider_call_sid` | Char(64), **unique** — the Twilio CallSid; the idempotency key for webhook redelivery |
 | `transcript` | JSON list — `[{sequence, role, text, at, offset}]` |
