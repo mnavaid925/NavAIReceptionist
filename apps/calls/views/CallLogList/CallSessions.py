@@ -136,7 +136,14 @@ def _apply_outcome_filter(queryset, outcome):
     return queryset
 
 
+# GET-only, on both views in this module — which the CRUD apps do NOT do, and
+# the difference is the point. Elsewhere a list view sits beside a create view
+# that legitimately answers POST, so the method is carried by the route. Here
+# there is no mutating route at all, and a POST returning 200 quietly implies
+# otherwise: it makes an inert page look like it accepted something. Declaring
+# the method makes "this app only reads" enforced rather than merely true today.
 @login_required  # noqa: F405
+@require_http_methods(['GET'])  # noqa: F405
 def callsession_list_view(request):
     """The call log: newest first, searchable, filtered on four axes."""
     # Newest call first, explicitly. `Meta.ordering` is `-created_at`, which is
@@ -228,6 +235,7 @@ def callsession_list_view(request):
 
 
 @login_required  # noqa: F405
+@require_http_methods(['GET'])  # noqa: F405
 def callsession_detail_view(request, pk):
     """One call. Deliberately thin — the rich panels belong to 5.2-5.4.
 
