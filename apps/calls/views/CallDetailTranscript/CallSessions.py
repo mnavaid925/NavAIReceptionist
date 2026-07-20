@@ -14,6 +14,8 @@ never a guessable public path, never a server-generated durably-stored PDF.
 Printing is the browser's job over the `@media print` rules already in
 `theme.css`; nothing here writes a file.
 """
+from django.views.decorators.cache import never_cache
+
 from apps.calls.views._common import *  # noqa: F401,F403
 # Reused, not redefined. A second tenant+location-scoping helper over the same
 # table would be a second place for a scoping bug to hide — so both this page and
@@ -23,6 +25,10 @@ from apps.calls.views._helpers import location_sessions
 __all__ = ['callsession_transcript_print_view']
 
 
+# `never_cache` for the same reason as the detail page — this is the same
+# transcript, on a page whose whole purpose is to be printed and then left lying
+# around. no-store keeps it out of the back-forward cache after logout.
+@never_cache
 @login_required  # noqa: F405
 @require_http_methods(['GET'])  # noqa: F405
 def callsession_transcript_print_view(request, pk):
