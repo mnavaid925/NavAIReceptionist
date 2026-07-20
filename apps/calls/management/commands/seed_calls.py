@@ -13,6 +13,18 @@ tenant, a location, a contact or an appointment — every one is looked up by th
 slug or name those seeders already use, so a drift between seeders fails loudly
 as an "unresolved" count rather than quietly building a second demo universe.
 
+**Order matters when re-flushing, and getting it backwards fails SILENTLY.**
+The order is::
+
+    seed_tenants → seed_accounts → seed_agents → seed_scheduling → seed_calls
+
+`seed_scheduling --flush` DELETES and recreates the `Contact` rows, and
+`CallSession.contact` is `SET_NULL` — so flushing scheduling AFTER calls nulls
+the contact on every session that was just seeded. Nothing errors: the sessions
+survive, the pages still render, and the demo simply shows every caller as
+unidentified, which looks like a scoping bug rather than a stale seed. If you
+flush scheduling for any reason, re-run `seed_calls --flush` afterwards.
+
 **This command touches no provider, because there is no provider adapter in this
 app at all.** Module 3 owns the telephony/STT/TTS/LLM adapters and has not been
 built; `apps/calls/` contains a model, two read-only views and this seeder. The
