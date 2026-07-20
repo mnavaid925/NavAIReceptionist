@@ -158,12 +158,18 @@ def _appointments_for(contact, request):
 
 
 def _call_sessions_for(contact, request):
-    """This contact's calls at locations this user may see, or None while Module
-    5 is unbuilt.
+    """This contact's calls at locations this user may see.
 
-    Same import guard and same location scoping, for the same reasons — a call
-    session carries a transcript, so leaking one across locations leaks caller
-    PII, not just a timestamp.
+    Same location scoping as `_appointments_for`, and it matters more here — a
+    call session carries a transcript, so leaking one across locations leaks
+    caller PII, not just a timestamp.
+
+    **Module 5.1 has landed, so this now returns a real queryset.** The import
+    guard is kept rather than removed: it costs nothing, and it is what let this
+    function ship in 4.1 against an app that did not exist yet. The `None` return
+    is no longer reachable in a correctly installed project — a caller that still
+    branches on it is reading a state that cannot occur, which is why the two
+    tests asserting `is None` were rewritten to assert the scoping instead.
     """
     try:
         from apps.calls.models import CallSession
