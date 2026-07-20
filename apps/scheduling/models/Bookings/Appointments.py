@@ -10,14 +10,16 @@ cleaning down), so folding it into `end_at` would make every appointment render
 longer than it really is on the calendar. The buffer only ever affects what may
 be booked NEXT, which is `availability.overlapping_appointments`' job.
 
-**`booked_by_session` is deliberately absent.** The ERD specifies an FK to
-`calls.CallSession` recording which call produced an AI booking, but `apps.calls`
-does not exist yet and Django refuses to migrate a relation to an uninstalled app
-("field defines a relation with model 'calls.CallSession', which is either not
-installed, or is abstract"). Module 5 adds it as an additive migration. Until
-then `source` alone carries provenance — a placeholder integer column would be
-worse than nothing, because it would look like a foreign key and enforce none of
-the integrity of one.
+**`booked_by_session` now exists.** It records which call produced an AI booking,
+and 4.3 shipped without it for one reason: `apps.calls` did not exist, and Django
+refuses to migrate a relation to an uninstalled app ("field defines a relation
+with model 'calls.CallSession', which is either not installed, or is abstract").
+A placeholder integer column would have been worse than nothing — it would look
+like a foreign key and enforce none of the integrity of one — so `source` carried
+provenance alone until sub-module 5.1 created `calls.CallSession` and added this
+field as an additive migration. `source` still says HOW a booking came about;
+this FK says WHICH call, and for `ai_phone` the two are now checkable against
+each other rather than taken on trust.
 """
 from datetime import timedelta
 
@@ -110,6 +112,20 @@ class Appointment(TenantLocationOwned):  # noqa: F405
         db_index=True,
         help_text='How this booking came about. Server-stamped, never chosen by '
                   'a user — it is the provenance record.',
+    )
+
+    booked_by_session = models.ForeignKey(  # noqa: F405
+        'calls.CallSession',
+        on_delete=models.SET_NULL,  # noqa: F405
+        null=True,
+        blank=True,
+        related_name='booked_appointments',
+        help_text='The call that produced this booking — the provenance link '
+                  'behind source=ai_phone, server-stamped by the runtime and '
+                  'never chosen by a user. SET_NULL, not CASCADE: call logs are '
+                  'retention-purged and callers are erased, and neither may take '
+                  'the booking down with them. Plural related_name because one '
+                  'call can book more than one appointment.',
     )
 
     cancelled_at = models.DateTimeField(null=True, blank=True)  # noqa: F405
