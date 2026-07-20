@@ -77,6 +77,7 @@ LIVE_LINKS = {
             'Find a slot': 'scheduling:appointment_slots'},
     '4.4': {'Calendar': 'scheduling:calendar_day',
             'Week view': 'scheduling:calendar_week'},
+    '4.5': {'Callback Requests': 'scheduling:callbackrequest_list'},
 }
 
 
