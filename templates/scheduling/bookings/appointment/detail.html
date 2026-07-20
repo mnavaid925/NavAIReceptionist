@@ -250,32 +250,41 @@
         {% if obj.booked_by_session %}
           <div>
             <span class="form-label">Originating call</span>
-            <p>
-              {% comment %}
-                calls:callsession_detail is tenant AND location scoped, so a
-                session recorded at another site would 404 rather than open.
-                That should not arise — the runtime books into the location it
-                answered for — but nothing constrains the pair, so the link is
-                offered only where it will actually resolve. The call is
-                described either way: losing the link must not lose the fact.
-              {% endcomment %}
-              {% if obj.booked_by_session.location_id == obj.location_id %}
+            {% comment %}
+              calls:callsession_detail is tenant AND location scoped, so a
+              session recorded at another site would 404 rather than open. That
+              should not arise — the runtime books into the location it answered
+              for — but nothing constrains the pair.
+
+              Where it DOES arise, the whole description is withheld, not just
+              the link. The caller's number, the outcome and the timing are the
+              call's substance, and rendering them here would hand this site a
+              readable summary of a call belonging to another one — the precise
+              cross-location disclosure the 404 on the link exists to prevent.
+              Saying a call is attached, without saying whose, keeps the fact
+              without leaking the record.
+            {% endcomment %}
+            {% if obj.booked_by_session.location_id == obj.location_id %}
+              <p>
                 <a href="{% url 'calls:callsession_detail' obj.booked_by_session.pk %}">
                   {{ obj.booked_by_session.from_number|default:"Unknown caller" }}
                 </a>
-              {% else %}
-                {{ obj.booked_by_session.from_number|default:"Unknown caller" }}
-              {% endif %}
-              {% include "partials/_call_status_badge.html" with obj=obj.booked_by_session %}
-              <span class="block text-muted text-xs">
-                {% if obj.booked_by_session.started_at %}
-                  <time datetime="{{ obj.booked_by_session.started_at|date:'c' }}">{{ obj.booked_by_session.started_at|date:"j M Y, H:i" }}</time>
-                  · {{ obj.booked_by_session.duration_display }}
-                {% else %}
-                  The call had not started when this session was written.
-                {% endif %}
-              </span>
-            </p>
+                {% include "partials/_call_status_badge.html" with obj=obj.booked_by_session %}
+                <span class="block text-muted text-xs">
+                  {% if obj.booked_by_session.started_at %}
+                    <time datetime="{{ obj.booked_by_session.started_at|date:'c' }}">{{ obj.booked_by_session.started_at|date:"j M Y, H:i" }}</time>
+                    · {{ obj.booked_by_session.duration_display }}
+                  {% else %}
+                    The call had not started when this session was written.
+                  {% endif %}
+                </span>
+              </p>
+            {% else %}
+              <p class="text-muted">
+                Booked on a call recorded at another site, so its details are not
+                shown here. Switch to that location to open the call log.
+              </p>
+            {% endif %}
           </div>
         {% elif obj.source == 'ai_phone' %}
           <p class="text-muted">
