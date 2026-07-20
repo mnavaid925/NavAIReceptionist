@@ -255,7 +255,15 @@
                 <p>{{ evaluation }}</p>
               </div>
             {% endif %}
-            {% if obj.analysis.extracted_data %}
+            {% comment %}
+              `.items` in the condition, not just `extracted_data`, so a value
+              Module 3 might one day write as a list or a string — not a dict —
+              falls through to the fallback message below instead of rendering a
+              table header over an empty tbody. `.items` on a non-dict fails
+              Django's variable resolution to falsy the same safe way an absent
+              key does.
+            {% endcomment %}
+            {% if obj.analysis.extracted_data.items %}
               <div>
                 <span class="form-label">Extracted details</span>
                 <div class="table-wrap" style="margin-block-start: 6px;">
@@ -273,13 +281,15 @@
               </div>
             {% endif %}
             {% comment %}
-              The dict is truthy but every key we know how to render is absent —
-              possible if Module 3 writes an analysis shape this page predates.
-              Say so plainly rather than showing an empty card. Kept inside the
-              `with` block so `summary` and `evaluation` are still in scope — they
-              are undefined outside it.
+              The dict is truthy but every key we know how to render is absent or
+              unrenderable — possible if Module 3 writes an analysis shape this
+              page predates. Say so plainly rather than showing an empty card.
+              Kept inside the `with` block so `summary` and `evaluation` are still
+              in scope — they are undefined outside it. Guards on `.items` too, to
+              match the loop above: a non-dict `extracted_data` is "nothing to
+              show", not "something rendered".
             {% endcomment %}
-            {% if not summary and not evaluation and not obj.analysis.extracted_data %}
+            {% if not summary and not evaluation and not obj.analysis.extracted_data.items %}
               <p class="text-muted">This call was analysed, but none of its details are in a form this page can show yet.</p>
             {% endif %}
           {% endwith %}
