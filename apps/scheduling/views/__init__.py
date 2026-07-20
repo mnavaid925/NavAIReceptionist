@@ -11,6 +11,7 @@ Sub-module folders, in build order:
 * `ServicesResources/`  — 4.2  service CRUD, resource CRUD
 * `Bookings/`           — 4.3  appointment CRUD + slots/book/reschedule/cancel
 * `CalendarViews/`      — 4.4  day and week grids (a VIEW sub-module: no models)
+* `CallbackRequests/`   — 4.5  callback queue CRUD + resolve
 """
 from apps.scheduling.views.CalendarViews.Calendar import (
     calendar_day_view,
@@ -24,8 +25,17 @@ from apps.scheduling.views.Bookings.Appointments import (
     appointment_detail_view,
     appointment_edit_view,
     appointment_list_view,
+    appointment_mark_view,
     appointment_reschedule_view,
     appointment_slots_view,
+)
+from apps.scheduling.views.CallbackRequests.CallbackRequests import (
+    callbackrequest_create_view,
+    callbackrequest_delete_view,
+    callbackrequest_detail_view,
+    callbackrequest_edit_view,
+    callbackrequest_list_view,
+    callbackrequest_resolve_view,
 )
 from apps.scheduling.views.ContactDirectory.Contacts import (
     contact_create_view,
@@ -76,6 +86,13 @@ __all__ = [
     'appointment_book_view',
     'appointment_reschedule_view',
     'appointment_cancel_view',
+    'appointment_mark_view',
     'calendar_day_view',
     'calendar_week_view',
+    'callbackrequest_list_view',
+    'callbackrequest_create_view',
+    'callbackrequest_detail_view',
+    'callbackrequest_edit_view',
+    'callbackrequest_delete_view',
+    'callbackrequest_resolve_view',
 ]
