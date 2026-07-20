@@ -31,4 +31,12 @@ urlpatterns = [
          name='appointment_reschedule'),
     path('appointments/<int:pk>/cancel/', views.appointment_cancel_view,
          name='appointment_cancel'),
+    # `<str:new_status>` is the only non-integer converter in the whole
+    # concatenated scheduling URLconf, and it sits BEHIND the literal `mark/`
+    # segment — so it cannot swallow `edit/`, `delete/`, `reschedule/` or
+    # `cancel/`, all of which are three segments deep where this is four. The
+    # view allow-lists the captured value; matching the route is not authorising
+    # the status.
+    path('appointments/<int:pk>/mark/<str:new_status>/', views.appointment_mark_view,
+         name='appointment_mark'),
 ]
