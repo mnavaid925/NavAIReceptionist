@@ -94,6 +94,52 @@ def test_list_view_never_contains_another_locations_rows(client_a, session_a1, s
 
 
 # --------------------------------------------------------------------------- #
+# The printable-transcript page (5.2) — PII-identical to the detail page, and
+# scoped identically on purpose. Same `location_sessions` helper, so a pk from
+# another tenant or another location must 404 here exactly as it does on the
+# detail page.
+# --------------------------------------------------------------------------- #
+
+def test_print_view_cross_tenant_pk_is_404(client_a, session_b):
+    response = client_a.get(_url('callsession_transcript_print', session_b.pk))
+    assert response.status_code == 404
+
+
+def test_print_view_cross_location_pk_is_404(client_a, session_a2):
+    """`client_a` is active at A1; the session belongs to the SAME tenant's A2."""
+    response = client_a.get(_url('callsession_transcript_print', session_a2.pk))
+    assert response.status_code == 404
+
+
+def test_print_view_anonymous_redirects_to_login(client, tenant_a, location_a1, make_call_session):
+    session = make_call_session(tenant_a, location_a1)
+    response = client.get(_url('callsession_transcript_print', session.pk))
+    assert response.status_code == 302
+    assert response.url.startswith(reverse('accounts:login'))
+
+
+def test_print_view_post_is_405(client_a, tenant_a, location_a1, make_call_session):
+    session = make_call_session(tenant_a, location_a1)
+    response = client_a.post(_url('callsession_transcript_print', session.pk), {})
+    assert response.status_code == 405
+
+
+def test_print_view_with_no_active_location_is_404(admin_user, tenant_a, location_a1, make_call_session):
+    """`admin_user` is assigned to BOTH A1 and A2, so with no explicit switch the
+    middleware activates neither — `location_sessions` returns `.none()` and
+    the session must be unreachable, matching `test_list_view_with_no_active_
+    location_returns_empty` in `test_views.py`.
+    """
+    session = make_call_session(tenant_a, location_a1)
+    client = Client()
+    client.force_login(admin_user)
+
+    response = client.get(_url('callsession_transcript_print', session.pk))
+
+    assert response.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
 # No mutation surface — the CRUD-completeness carve-out, proven rather than
 # merely documented.
 # --------------------------------------------------------------------------- #
