@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% comment %}
+  The call log's detail page (sub-module 5.1) — the SESSION HEADER only.
+
+  What this page answers: who rang, which number they rang, which site that
+  resolved to, which stack handled it, how it ended, how long it ran, and what
+  came out of it. Identity and routing facts, nothing more.
+
+  The rich panels are deliberately absent and their absence is scheduled, not
+  forgotten. 5.2 owns the transcript, 5.3 the event log and cost breakdown, 5.4
+  the recording player and the transfer outcome. `partials/_transcript.html`,
+  `_transfer_outcome.html` and `_audio_player.html` all exist already — including
+  them here would render work that no reviewer has read against a live row and no
+  test covers, and would make the remaining sub-modules look done.
+{% endcomment %}
+
+{% block title %}Call — {% if obj.contact %}{{ obj.contact.display_name }}{% elif obj.from_number %}{{ obj.from_number|phone_e164 }}{% else %}unknown caller{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">
+    {% comment %}
+      The person, when there is one. An unidentified caller falls back to the
+      number they rang from, and a withheld caller ID falls back again to plain
+      words — a page whose whole subject is one call must never be headed by a
+      blank.
+    {% endcomment %}
+    {% if obj.contact %}
+      {{ obj.contact.display_name }}
+    {% elif obj.from_number %}
+      {{ obj.from_number|phone_e164 }}
+    {% else %}
+      Unknown caller
+    {% endif %}
+  </h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li><a href="{% url 'calls:callsession_list' %}">Call logs</a></li>
+        <li>{{ obj.started_at|date:"j M Y, H:i"|default:"Not started" }}</li>
+      </ol>
+    </nav>
+  </div>
+</div>
+
+<div class="grid gap-4 lg:grid-cols-3">
+
+  <div class="lg:col-span-2 grid gap-4">
+
+    <div class="card">
+      <div class="card-header">
+        <span>Call</span>
+        {% comment %}
+          Always the shared partial, never inlined branches. Five statuses share
+          four badge classes and the map lives in exactly one file so a status
+          added later cannot mean one colour here and another on the list.
+        {% endcomment %}
+        {% include "partials/_call_status_badge.html" with obj=obj %}
+      </div>
+      <div class="card-body grid gap-4 sm:grid-cols-2">
+
+        <div>
+          <span class="form-label">From</span>
+          {% comment %}
+            Shown, never wrapped in a `tel:`. This is whatever the carrier put on
+            the leg, which for a withheld number is a literal like "anonymous" or
+            a sentinel that dials nothing — and the caller who is worth ringing
+            back is reachable through their contact record, where the number has
+            actually been normalised. A dead dial link on a staff page is worse
+            than no link.
+          {% endcomment %}
+          {% if obj.from_number %}
+            <p>{{ obj.from_number|phone_e164 }}</p>
+          {% else %}
+            <p class="text-muted">Withheld</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">To</span>
+          {% comment %}
+            The dialled number is not decoration: it is what the webhook resolved
+            this call's tenant and location FROM, so it is the audit trail for
+            why this row sits at this site.
+          {% endcomment %}
+          <p>
+            {{ obj.to_number|phone_e164 }}
+            <span class="block text-muted text-xs">The number they rang</span>
+          </p>
+        </div>
+
+        <div>
+          <span class="form-label">Contact</span>
+          {% comment %}
+            A null contact is routine rather than a gap — a first-time caller is
+            unrecognised by definition — so it reads as an explicit state, the
+            same way the callback page states it.
+          {% endcomment %}
+          {% if obj.contact %}
+            <p><a href="{% url 'scheduling:contact_detail' obj.contact.pk %}">{{ obj.contact.display_name }}</a></p>
+          {% else %}
+            <p class="text-muted">Unidentified caller</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Handled by</span>
+          {% comment %}
+            The stack that actually ran THIS call, kept on the row rather than
+            read off the agent's current setting — a config changed since then
+            must not rewrite history. Plain text, not a badge: a mode is not a
+            state, and colouring it would imply one is better than another.
+
+            `channel` is not rendered beside it. It has a single value in this
+            product, so a row reading "agent_phone" on every call is noise; the
+            column exists for a second channel that does not exist yet.
+          {% endcomment %}
+          <p>{{ obj.get_mode_display }}</p>
+        </div>
+
+        <div>
+          <span class="form-label">Started</span>
+          {% if obj.started_at %}
+            <p><time datetime="{{ obj.started_at|date:'c' }}">{{ obj.started_at|date:"l j F Y, H:i" }}</time></p>
+          {% else %}
+            {% comment %}
+              A session row exists from the moment the webhook lands, which is
+              before the media stream opens. "Never started" is a real outcome —
+              a call that failed at answer — not a missing value.
+            {% endcomment %}
+            <p class="text-muted">The media stream never opened.</p>
+          {% endif %}
+        </div>
+
+        <div>
+          <span class="form-label">Ended</span>
+          {% if obj.ended_at %}
+            <p>
+              <time datetime="{{ obj.ended_at|date:'c' }}">{{ obj.ended_at|date:"H:i" }}</time>
+              {% comment %}
+                `duration_display` is derived on the model, never a stored
+                column, so a corrected timestamp corrects the duration with it.
+                It also refuses to print a negative span from two skewed provider
+                clocks — it returns a dash instead.
+              {% endcomment %}
+              <span class="block text-muted text-xs">{{ obj.duration_display }}</span>
+            </p>
+          {% elif obj.started_at %}
+            <p class="text-muted">Still on the line</p>
+          {% else %}
+            <p class="text-muted">&mdash;</p>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>What this call produced</span></div>
+      <div class="card-body">
+        {% comment %}
+          The reverse side of `Appointment.booked_by_session`, prefetched by the
+          view — this is the one panel that makes a call log worth reading rather
+          than counting, because it is where the agent's work becomes a booking.
+
+          `booked_appointments` is plural on purpose: one call can settle more
+          than one appointment, and a template that assumed a single row would
+          silently hide the second.
+        {% endcomment %}
+        {% if obj.booked_appointments.all %}
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th scope="col">When</th>
+                  <th scope="col">Service</th>
+                  <th scope="col">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for appt in obj.booked_appointments.all %}
+                  <tr>
+                    <td>
+                      <a href="{% url 'scheduling:appointment_detail' appt.pk %}">
+                        <time datetime="{{ appt.start_at|date:'c' }}">{{ appt.start_at|date:"j M Y, H:i" }}</time>
+                      </a>
+                    </td>
+                    {% comment %}
+                      `service` is SET_NULL on the appointment, so a removed
+                      service leaves a live booking with none — say so rather
+                      than printing "None".
+                    {% endcomment %}
+                    <td>{% if appt.service %}{{ appt.service.name }}{% else %}<span class="text-muted">Service removed</span>{% endif %}</td>
+                    <td>{% include "partials/_appointment_status_badge.html" with obj=appt %}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="text-muted">
+            No booking came out of this call. Most calls are questions, not
+            bookings &mdash; this is the ordinary case.
+          </p>
+        {% endif %}
+      </div>
+    </div>
+
+    {% comment %}
+      The remaining panels land here, in this column, in this order:
+
+        5.2  the transcript viewer          (partials/_transcript.html)
+        5.3  the event log and the cost breakdown
+        5.4  the recording player and the transfer outcome
+             (partials/_audio_player.html, partials/_transfer_outcome.html)
+
+      They all read JSON columns that already exist on this same row — Invariant
+      2 means none of them adds a table. Nothing here needs to change to make
+      room for them beyond dropping the cards in.
+    {% endcomment %}
+
+  </div>
+
+  <aside class="grid gap-4">
+
+    <div class="card">
+      <div class="card-header"><span>Actions</span></div>
+      <div class="card-body grid gap-2">
+        {% comment %}
+          No Edit and no Delete, and their absence is the correct state rather
+          than an unbuilt one: a completed call is a record of what happened, and
+          CLAUDE.md names this exact model as the carve-out to the CRUD
+          Completeness Rules. There is no view behind either button to reach —
+          the module ships list and detail only, and Module 3's media-stream
+          consumer is the only writer this table has.
+        {% endcomment %}
+        {% if obj.contact %}
+          <a class="btn btn-primary" href="{% url 'scheduling:contact_detail' obj.contact.pk %}">
+            <i data-lucide="user"></i> View contact
+          </a>
+        {% endif %}
+        <a class="btn btn-outline" href="{% url 'calls:callsession_list' %}">
+          Back to call logs
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>Record</span></div>
+      <div class="card-body grid gap-2">
+        <div>
+          <span class="form-label">Location</span>
+          <p>{{ obj.location.name }}</p>
+        </div>
+        <div>
+          <span class="form-label">Call reference</span>
+          {% comment %}
+            The provider's own CallSid, which is what a support ticket to the
+            telephony provider is opened against — and the unique key that makes
+            webhook redelivery idempotent, so it identifies the call rather than
+            the row.
+          {% endcomment %}
+          <p>{{ obj.provider_call_sid }}</p>
+        </div>
+        <div>
+          <span class="form-label">Logged</span>
+          <p><time datetime="{{ obj.created_at|date:'c' }}">{{ obj.created_at|date:"j M Y, H:i" }}</time></p>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+</div>
+{% endblock %}
