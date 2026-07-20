@@ -26,14 +26,16 @@ blobs inside `logs` are personal data by definition. Nothing here logs a field
 value — and the detail view logs nothing at all, because "who read whose call" is
 an audit question this module has no audit trail to answer honestly.
 """
-import logging
-
 from apps.calls.models import CallSession
 from apps.calls.views._common import *  # noqa: F401,F403
 from apps.scheduling.availability import local_day_bounds_utc
 from apps.scheduling.views._helpers import parse_local_date
 
-logger = logging.getLogger(__name__)
+# No module logger, deliberately. Every other view module in this project keeps
+# one, so its absence here reads as an oversight unless it is stated: these two
+# views only READ, and the only things worth naming in a log line — the caller's
+# number, who they were matched to, what was said — are exactly the PII that must
+# never reach a log at INFO. A logger with nothing safe to say is a loaded gun.
 
 __all__ = [
     'OUTCOME_NO_TRANSFER',
@@ -77,12 +79,19 @@ def _location_sessions(request):
     `select_related('contact', 'location')` because every row on the list renders
     the caller's display name and the site's timezone; without it a 25-row page
     costs 51 queries.
+
+    `prefetch_related('booked_appointments')` for the same reason one level out:
+    both the list and the detail page render what the call booked, and that is a
+    REVERSE FK, which `select_related` cannot follow. Without it the list pays
+    one extra query per row — the N+1 that `select_related` above is there to
+    prevent, reintroduced by a different relation. One query for the whole page
+    either way.
     """
     if request.location is None:
         return CallSession.objects.none()
     return CallSession.objects.filter(
         tenant=request.tenant, location=request.location
-    ).select_related('contact', 'location')
+    ).select_related('contact', 'location').prefetch_related('booked_appointments')
 
 
 def _apply_outcome_filter(queryset, outcome):
@@ -194,15 +203,12 @@ def callsession_detail_view(request, pk):
     site 404s rather than rendering: a bare `get_object_or_404(CallSession,
     pk=pk)` here would be a cross-location IDOR onto a transcript.
 
-    `prefetch_related('booked_appointments')` because the page shows what the
-    call produced, and that reverse FK is the only reason this call log is worth
-    reading rather than just counting. One extra query for the set, versus one
-    per row inside the template loop.
+    The `booked_appointments` prefetch this page needs lives on
+    `_location_sessions` rather than here, because the LIST needs it just as
+    much — it renders the same reverse FK per row, where the cost is per row
+    rather than once.
     """
-    obj = get_object_or_404(  # noqa: F405
-        _location_sessions(request).prefetch_related('booked_appointments'),
-        pk=pk,
-    )
+    obj = get_object_or_404(_location_sessions(request), pk=pk)  # noqa: F405
 
     return render(request, 'calls/calllog/callsession/detail.html', {  # noqa: F405
         'obj': obj,
