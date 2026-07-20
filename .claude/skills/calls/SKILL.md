@@ -16,7 +16,7 @@ anywhere. That absence is the design, not an unfinished edge.
 | Sub-module | Status | Adds |
 |---|---|---|
 | 5.1 Call Log List | **BUILT** | `CallSession` — the only model this module will ever own |
-| 5.2 Call Detail & Transcript | not built | none — a **view** sub-module |
+| 5.2 Call Detail & Transcript | **BUILT** | none — a **view** sub-module |
 | 5.3 Event Log & Cost | not built | none — a **view** sub-module |
 | 5.4 Recording & Transfer Outcome | not built | none — a **view** sub-module |
 
@@ -102,27 +102,52 @@ produced.
 * `calls:callsession_list` — `/calls/`
 * `calls:callsession_detail` — `/calls/<int:pk>/`
 
+* `calls:callsession_transcript_print` — `/calls/<int:pk>/print/` (5.2)
+
 There is deliberately **no `callsession_create` / `_edit` / `_delete`** — no route, no view, no `ModelForm`.
 `apps/calls/tests/test_security.py` asserts `NoReverseMatch` on all three, so the absence is enforced by
-test rather than by convention. Both views are `@login_required` **and**
-`@require_http_methods(['GET'])`: a POST gets 405, not a silent 200. The CRUD apps do not need that guard
-because their list views sit beside a create view that legitimately answers POST; this app has nothing that
-does.
+test rather than by convention. Every view is `@login_required` **and** `@require_http_methods(['GET'])`: a
+POST gets 405, not a silent 200. The CRUD apps do not need that guard because their list views sit beside a
+create view that legitimately answers POST; this app has nothing that does.
+
+**The two transcript-bearing pages — detail and print — also carry `@never_cache`.** A full conversation
+restored from the browser's back-forward cache after a receptionist logs out on a shared workstation is a
+real exposure, and a transcript is the most sensitive PII in the product. `no-store` forces a re-fetch and
+re-authorisation rather than a bfcache restore. The list and the rest of the product carry the same latent
+gap and want a shared fix (a middleware or base decorator), not a per-view half-sweep — see 5.2's review
+notes.
 
 ## Templates
 
-`templates/calls/calllog/callsession/` — `list.html`, `detail.html`, `_filters.html`.
+* `templates/calls/calllog/callsession/` — `list.html`, `detail.html`, `_filters.html`. 5.2 wired the
+  transcript and analysis panels into `detail.html`'s marked slot.
+* `templates/calls/transcript/transcript_print.html` — 5.2's standalone printable page. A STANDALONE page
+  (not an entity list/detail/form), so it sits here rather than in `calllog/callsession/` — Template Folder
+  Structure rule 6, which names this exact path as its example. It extends `base.html` so the `@media print`
+  block already in `theme.css` applies with zero CSS work.
 
-**Shared partials this module owns the contract for** (all pre-existing, none re-authored by 5.1):
+**Shared partials this module owns the contract for** (all pre-existing):
 
 * `partials/_call_status_badge.html` — **the single source of truth for the status map.** Always
   `{% include "partials/_call_status_badge.html" with obj=<session> %}`; never inline the branches.
   `in_progress`→`badge-info`, `completed`→`badge-green`, `abandoned`→`badge-muted`,
   `transferred`→`badge-info`, `failed`→`badge-red`. Five statuses, four classes — `badge-info` twice on
   purpose. There is no `badge-purple`. Always keep the `{% else %}` fallback.
-* `partials/_transcript.html`, `_transfer_outcome.html`, `_audio_player.html` — **exist but are wired by
-  5.2 / 5.4 / 5.4 respectively, not by 5.1.** `detail.html` carries comments marking where each lands.
-  Including one early claims work no reviewer has seen.
+* `partials/_transcript.html` — **wired by 5.2** into both the detail page and the print page. **Its context
+  contract is `session`, not `obj`** — the include line MUST read
+  `{% include "partials/_transcript.html" with session=obj %}`, passing the page's `obj` under the name the
+  partial expects. Get it wrong and it reads `session.transcript` against an undefined variable, which Django
+  resolves to falsy: the empty state renders on every call, silently, never erroring.
+* `partials/_transfer_outcome.html`, `_audio_player.html` — **exist but wired by 5.4, not yet.**
+  `detail.html` carries comments marking where each lands. Including one early claims work no reviewer has
+  seen.
+
+**The analysis panel (5.2, in `detail.html`) renders defensively.** An abandoned/failed/in-progress call has
+`analysis == {}` — five seeded rows are exactly that. Read keys via the `dict_get` filter (a plain
+`dict.get`, purpose-built for this), print each value as-is rather than destructuring a shape Module 3 has
+not fixed, guard the `extracted_data` table on `.items` (so a non-dict shape falls through to a fallback
+rather than rendering a header over an empty tbody), show an explicit "No analysis" empty state for the empty
+dict, and **never print a raw `None`**.
 
 The list Actions column is **View only**. Caller numbers always render through the `phone_e164` filter
 (`{% load ui %}` required) — never raw, so the same number never appears in two shapes. Nothing
@@ -149,10 +174,15 @@ Search `q` (from/to number, contact name + phone), date range `from`/`to`, `stat
 
 ## Query discipline
 
-* `_location_sessions()` carries `.select_related('contact', 'location')` **and**
+* **`location_sessions()` lives in `apps/calls/views/_helpers.py`** — the ONE tenant+location-scoped call
+  queryset, imported by 5.1's list/detail and 5.2's print view. It was entity-local in `CallLogList` while
+  5.1 was its only reader and moved here when 5.2 became the second (Backend Package Structure rule 5). A
+  second filter over `CallSession` is a second place a cross-location leak could hide, and that leak is a
+  transcript — so there is exactly one. It carries `.select_related('contact', 'location')` **and**
   `.prefetch_related('booked_appointments__service')`. `booked_appointments` is a REVERSE FK that
   `select_related` cannot follow, and `service` is a forward FK on the far side of it — miss either and the
-  page pays a query per row.
+  page pays a query per row. The print page never renders bookings, so it carries that prefetch as one cheap,
+  bounded, unused query — a deliberate trade for one audited scoping surface over two.
 * **The LIST defers the JSON columns** (`transcript, logs, analysis, usage, waveform_peaks, metadata`) — it
   renders none of them, and Module 3 will make them large. **Deferred at the list call site, NOT on the
   shared helper**: the detail page and 5.2–5.4 read the whole row on purpose (that is Invariant 2's design),
@@ -199,8 +229,8 @@ rather than a stale seed. If you flush scheduling, re-run `seed_calls --flush` a
 
 ## Conventions & gotchas
 
-* **Tenant AND location on every queryset.** `_location_sessions(request)` returns `.none()` when no
-  location is active. A cross-location IDOR here leaks a full transcript, not a timestamp.
+* **Tenant AND location on every queryset.** `location_sessions(request)` (in `views/_helpers.py`) returns
+  `.none()` when no location is active. A cross-location IDOR here leaks a full transcript, not a timestamp.
 * **This module has no logger, deliberately.** Every other view module keeps one, so its absence reads as an
   oversight unless stated: these views only read, and the only things worth naming in a log line — the
   caller's number, who they were matched to, what was said — are exactly the PII that must never reach INFO.
@@ -213,9 +243,12 @@ rather than a stale seed. If you flush scheduling, re-run `seed_calls --flush` a
 
 * **Add a field** → `models/CallLogList/CallSessions.py`, `makemigrations calls`, commit the migration
   separately. Note that a `help_text` change alone generates a migration — Django tracks it.
-* **Add a view sub-module (5.2/5.3/5.4)** → new `views/<SubModule>/<Entity>.py` + `urls/<SubModule>/…`, add
-  the re-export blocks, templates under `templates/calls/<submodule>/<entity>/`, a `LIVE_LINKS["5.M"]` entry
-  — and **no model, no migration**. Extend `seed_calls` idempotently if the pages need richer JSON.
+* **Add a view sub-module (5.3/5.4)** → new `views/<SubModule>/<Entity>.py` + `urls/<SubModule>/…`, add the
+  re-export blocks, templates under `templates/calls/<submodule>/<entity>/`, a `LIVE_LINKS["5.M"]` entry
+  (empty `{}` if the surface is reached through the existing detail page, as 5.2 is) — and **no model, no
+  migration**. Import `location_sessions` from `views/_helpers` for scoping; do not redefine it. Extend
+  `seed_calls` idempotently only if the pages need richer JSON. 5.2 is the worked example: it added one
+  print view, wired two `detail.html` panels, and touched no model, no migration and no seeder.
 * **Add a filter** → parse in the view BEFORE pagination, validate against a fixed choice set, pass the
   choices in context, and make junk degrade to "no filter".
 * **Extend the seeder** → add a spec with a fresh `provider_call_sid`; the dedupe key is that SID.
@@ -226,13 +259,15 @@ rather than a stale seed. If you flush scheduling, re-run `seed_calls --flush` a
 
 ```python
 '5.1': {'Call Logs': 'calls:callsession_list'},
+'5.2': {},   # built; surfaces reached through the 5.1 detail page, so no link of its own
 ```
 
 ## Tests
 
 `apps/calls/tests/` — `conftest.py` (its own `make_call_session` factory; pytest conftest fixtures do not
 cross sibling app-test packages), `test_models.py`, `test_views.py`, `test_security.py`,
-`test_seed_calls.py`. **80 passing**, 616 across `apps/scheduling apps/calls` together.
+`test_seed_calls.py`, `test_transcript_views.py` (5.2 — transcript/analysis panels + the print view).
+**94 passing**, 630 across `apps/scheduling apps/calls` together.
 
 **Query-count tests measure the VIEW, not the request.** A `Client` request carries a constant overhead of
 session + auth + tenant/location middleware + the navigation context processor, so a literal
