@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Callback requests{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Callback requests</h1>
+  <div class="page-actions">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li>NavAIReceptionist</li>
+        <li>Calendar &amp; Bookings</li>
+        <li>Callback requests</li>
+      </ol>
+    </nav>
+    {% if active_location %}
+      <a class="btn btn-primary" href="{% url 'scheduling:callbackrequest_create' %}">
+        <i data-lucide="phone-outgoing"></i> Log a callback
+      </a>
+    {% endif %}
+  </div>
+</div>
+
+{% include "scheduling/callbacks/callbackrequest/_filters.html" %}
+
+<div class="card" style="margin-block-start: 16px;">
+  <div class="card-header">
+    <span>
+      {{ total_count }} callback{{ total_count|pluralize }}
+      {% if selected_status == default_status %}<span class="text-muted">still to ring back</span>{% endif %}
+    </span>
+    {% comment %}
+      Names the ACTIVE LOCATION, like the bookings list: a callback is worked by
+      the staff at the site that took the call, so the rows change on a location
+      switch and nothing else on screen would explain why.
+    {% endcomment %}
+    <span class="text-muted">
+      {% if active_location %}
+        {{ active_location.name }}
+      {% else %}
+        No location chosen
+      {% endif %}
+    </span>
+  </div>
+  <div class="card-body">
+
+    {% if callback_requests %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">Logged</th>
+              <th scope="col">Caller</th>
+              <th scope="col">Reason</th>
+              <th scope="col">Status</th>
+              <th scope="col">Source</th>
+              <th scope="col" class="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for cb in callback_requests %}
+              <tr>
+                <td>
+                  <time datetime="{{ cb.created_at|date:'c' }}">{{ cb.created_at|date:"j M Y" }}</time>
+                  <span class="block text-muted text-xs">{{ cb.created_at|date:"H:i" }}</span>
+                </td>
+                <td>
+                  {% comment %}
+                    An identified caller links through to their contact record;
+                    an unidentified one falls back to whatever name the agent
+                    captured, then to a placeholder. `display_caller` already
+                    walks that ladder — re-deriving it here would be a second
+                    copy of the rule to keep in step.
+                  {% endcomment %}
+                  {% if cb.contact %}
+                    <a href="{% url 'scheduling:contact_detail' cb.contact.pk %}">{{ cb.contact.display_name }}</a>
+                  {% else %}
+                    {{ cb.display_caller }}
+                  {% endif %}
+                  {% comment %}
+                    The number to RING BACK on, which is often not the number the
+                    caller rang from — so this is `caller_phone`, never the linked
+                    contact's `phone_e164`. Tapping it dials on a mobile or a
+                    softphone, which is the whole job of this page.
+                  {% endcomment %}
+                  {% if cb.caller_phone %}
+                    <span class="block text-xs">
+                      <a href="tel:{{ cb.caller_phone }}">{{ cb.caller_phone|phone_e164 }}</a>
+                    </span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if cb.reason %}
+                    {{ cb.reason|truncatechars:120|linebreaksbr }}
+                  {% else %}
+                    <span class="text-muted">&mdash;</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if cb.status == 'pending' %}
+                    <span class="badge badge-amber">Pending</span>
+                  {% elif cb.status == 'contacted' %}
+                    <span class="badge badge-info">Contacted</span>
+                  {% elif cb.status == 'closed' %}
+                    <span class="badge badge-green">Closed</span>
+                  {% else %}
+                    <span class="badge badge-muted">{{ cb.get_status_display }}</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if cb.source == 'ai_phone' %}
+                    <span class="badge badge-info">AI phone call</span>
+                  {% elif cb.source == 'manual' %}
+                    <span class="badge badge-slate">Added manually</span>
+                  {% elif cb.source == 'web' %}
+                    <span class="badge badge-green">Web</span>
+                  {% else %}
+                    <span class="badge badge-muted">{{ cb.get_source_display }}</span>
+                  {% endif %}
+                </td>
+                <td>
+                  <span class="table-actions">
+                    <a class="btn btn-icon" href="{% url 'scheduling:callbackrequest_detail' cb.pk %}"
+                       aria-label="View callback from {{ cb.display_caller }}" title="View">
+                      <i data-lucide="eye"></i>
+                    </a>
+                    {% comment %}
+                      Edit is unguarded by status, deliberately unlike the
+                      bookings list: a closed-out appointment is a record of what
+                      happened, whereas a closed callback is a working note that
+                      stays correctable — the view permits it at any status.
+                    {% endcomment %}
+                    <a class="btn btn-icon" href="{% url 'scheduling:callbackrequest_edit' cb.pk %}"
+                       aria-label="Edit callback from {{ cb.display_caller }}" title="Edit">
+                      <i data-lucide="pencil"></i>
+                    </a>
+                    {% if request.user.tier == 'owner' or request.user.tier == 'manager' %}
+                      <form method="post" action="{% url 'scheduling:callbackrequest_delete' cb.pk %}"
+                            onclick="return confirm('Delete the callback from {{ cb.display_caller|escapejs }}? To keep a record of a caller you have dealt with, close it instead.');">
+                        {% csrf_token %}
+                        <button type="submit" class="btn btn-icon"
+                                aria-label="Delete callback from {{ cb.display_caller }}" title="Delete">
+                          <i data-lucide="trash-2"></i>
+                        </button>
+                      </form>
+                    {% endif %}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+      {% include "partials/_pagination.html" %}
+
+    {% elif active_location %}
+      {% comment %}
+        Two different nothings, and telling them apart is the point. With a
+        location active the queue really is empty for the filter in force — and
+        because the page defaults to `pending`, "empty" here usually means
+        everything has been rung back, so the message points at the All option
+        rather than implying the data is missing.
+      {% endcomment %}
+      {% url 'scheduling:callbackrequest_create' as create_url %}
+      {% if selected_status == default_status %}
+        {% include "partials/_empty_state.html" with icon="phone-off" title="Nobody is waiting on a call back" message="Every callback at this location has been dealt with. Choose All statuses in the filter bar to see the ones already closed out." action_url=create_url action_label="Log a callback" %}
+      {% else %}
+        {% include "partials/_empty_state.html" with icon="phone-off" title="No callbacks match" message="Try clearing the filters. The agent also logs a callback automatically when it cannot answer or transfer." action_url=create_url action_label="Log a callback" %}
+      {% endif %}
+    {% else %}
+      {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Each site works its own callback queue. Pick the location you are working in and its callbacks appear here." %}
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}
