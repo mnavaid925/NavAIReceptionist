@@ -255,6 +255,14 @@ DEMO_CALL_SESSIONS = {
                 'reason': 'Caller asked for the front desk about an invoice',
                 'offset': 20,
                 'duration_seconds': 118,
+                # The one row that fell through to the secondary number: the
+                # primary rang out, the backup answered. `attempts` is the trail
+                # the shipped `_transfer_outcome.html` renders only when there was
+                # more than one, so this is the row that exercises it.
+                'attempts': [
+                    {'destination': '+13125550101', 'result': 'no_answer'},
+                    {'destination': '+13125550102', 'result': 'connected'},
+                ],
             },
         },
         {
@@ -976,7 +984,7 @@ class Command(BaseCommand):
         if not transfer:
             return {}
 
-        return {
+        built = {
             'result': transfer['result'],
             'reason': transfer['reason'],
             'destination': TRANSFER_DESTINATIONS[location_slug],
@@ -985,6 +993,13 @@ class Command(BaseCommand):
             ).isoformat(),
             'duration_seconds': transfer['duration_seconds'],
         }
+        # The optional per-attempt trail — passed through verbatim when a spec
+        # authors one. It is a record of what happened on THIS call (which numbers
+        # were tried, in order), so unlike `destination` it is not derived from the
+        # configuration; only the one Downtown fell-through row carries it.
+        if transfer.get('attempts'):
+            built['attempts'] = transfer['attempts']
+        return built
 
     def _build_waveform(self, spec):
         """`{caller, bot, bins}` for 5.4's waveform, or NULL.
