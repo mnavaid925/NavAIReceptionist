@@ -12,6 +12,7 @@ public-looking link, so nothing can accidentally route around the signed view.
 import os
 
 from django.conf import settings
+from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.storage import FileSystemStorage
 
 
@@ -60,7 +61,10 @@ def recording_exists(path):
         if os.path.commonpath([full, root]) != root:
             return False
         return recording_storage.exists(path)
-    except (ValueError, OSError):
+    except (ValueError, OSError, SuspiciousFileOperation):
+        # `SuspiciousFileOperation` is NOT an OSError/ValueError — Django raises it
+        # from `safe_join` on an escaping path, and it must be caught here too, or a
+        # traversal payload that somehow reached `.exists()` would propagate.
         return False
 
 
@@ -71,18 +75,30 @@ def open_recording(path):
     (the retention job deletes the file between the check and the open) surfaces
     as a catchable `FileNotFoundError` rather than a 500 — the serve view catches
     it and 404s.
+
+    Its own containment does NOT depend on the caller having gone through
+    `recording_exists`: a traversal path raises `SuspiciousFileOperation` from
+    `safe_join`, converted to `FileNotFoundError` so the guarantee is a property of
+    this function, not of caller ordering.
     """
-    return recording_storage.open(path, 'rb')
+    try:
+        return recording_storage.open(path, 'rb')
+    except SuspiciousFileOperation:
+        raise FileNotFoundError(path)
 
 
 def recording_size(path):
     """The recording's size in bytes, for a Range response's `Content-Range`.
 
-    Raises `FileNotFoundError` on a since-deleted file, caught by the same guard
-    as `open_recording` — so a retention-race between the existence check and this
-    call is a 404, never a 500.
+    Raises `FileNotFoundError` on a since-deleted file OR a traversal path (the
+    same `SuspiciousFileOperation`→`FileNotFoundError` conversion as
+    `open_recording`), caught by the serve view's single guard — so a retention
+    race or a malformed `recording_blob` is a 404, never a 500.
     """
-    return recording_storage.size(path)
+    try:
+        return recording_storage.size(path)
+    except SuspiciousFileOperation:
+        raise FileNotFoundError(path)
 
 
 def save_recording(name, content):
