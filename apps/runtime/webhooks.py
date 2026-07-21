@@ -20,6 +20,16 @@ downstream inherits them. The order below is load-bearing and is the contract in
 **Never** a redirect (Twilio wants TwiML, not POST-redirect-GET). **Never** a
 caller number, a signature, or a request body logged at INFO — a voice webhook's
 POST params are PII.
+
+**WARNING — rate limiting is a tracked follow-up, not shipped in 3.1.** The skill
+(§2 item 7) calls for a rate-limited webhook. It is deferred deliberately rather
+than added naively: a per-number or per-source-IP throttle risks blocking
+*legitimate* traffic — Twilio redelivers, a busy location takes concurrent calls,
+and Twilio's egress IPs are shared — so the limit has to be sized against real
+call-volume telemetry (the 3.5 diagnostics/cost pass) rather than guessed at now.
+Until then the abuse surface is bounded: an unmapped or disabled number writes
+nothing, and a forged signature costs one indexed `AgentSetting` lookup plus a
+constant-time HMAC before a 403. Tracked in `.claude/tasks/todo.md`.
 """
 import logging
 
