@@ -355,6 +355,18 @@ RECORDING_STORAGE_BUCKET = env('RECORDING_STORAGE_BUCKET', 'navai-recordings-dev
 RECORDING_RETENTION_DAYS = env_int('RECORDING_RETENTION_DAYS', 30)
 RECORDING_SIGNED_URL_TTL = env_int('RECORDING_SIGNED_URL_TTL', 300)
 
+# Where call recordings live. DELIBERATELY OUTSIDE `MEDIA_ROOT` — `MEDIA_ROOT` is
+# reachable at `MEDIA_URL`, so a recording under it would be a public, guessable
+# path to caller PII. This directory is served ONLY through the signed,
+# tenant+location-scoped serve view (`calls:callsession_recording`); nothing maps
+# a URL to it. Module 3's recorder writes here; Module 5.4 reads.
+PRIVATE_MEDIA_ROOT = env('PRIVATE_MEDIA_ROOT', str(BASE_DIR / 'private_media'))
+
+# Salt for the short-TTL signed token on a recording URL. A dedicated salt keeps
+# a recording token from being interchangeable with any other `django.core.signing`
+# token in the app (e.g. the email-change link) even though both use SECRET_KEY.
+RECORDING_ACCESS_SALT = 'calls.recording-access'
+
 # Fernet key used to encrypt per-location Twilio credentials at rest (Module 2).
 ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY', '')
 
