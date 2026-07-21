@@ -80,22 +80,34 @@ def _parse_single_range(range_header, size):
             end = int(end_s) if end_s else size - 1
     except ValueError:
         return None
-    if start >= size:
+    # `end < start` is an inverted range (`bytes=10-5`) — RFC 9110 says treat it as
+    # invalid, and letting it through would compute a NEGATIVE length and stamp a
+    # `Content-Length: -4` a proxy could desync on. Rejected the same way an
+    # out-of-bounds range is.
+    if start >= size or end < start:
         return 'unsatisfiable'
     return start, min(end, size - 1)
 
 
 def _stream_range(fh, start, length):
-    """Yield `length` bytes from `fh` starting at `start`, in bounded chunks."""
-    fh.seek(start)
-    remaining = length
-    while remaining > 0:
-        chunk = fh.read(min(_RANGE_CHUNK, remaining))
-        if not chunk:
-            break
-        remaining -= len(chunk)
-        yield chunk
-    fh.close()
+    """Yield `length` bytes from `fh` starting at `start`, in bounded chunks.
+
+    `close()` in a `finally`, not after the loop: `<audio>` scrubbing aborts the
+    previous in-flight range constantly, and an abort raises `GeneratorExit` at the
+    suspended `yield` — which skips a post-loop close and leaks the file handle
+    until GC. Under real scrubbing that is a slow descriptor exhaustion.
+    """
+    try:
+        fh.seek(start)
+        remaining = length
+        while remaining > 0:
+            chunk = fh.read(min(_RANGE_CHUNK, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+    finally:
+        fh.close()
 
 
 def _ranged_response(request, path, content_type):
