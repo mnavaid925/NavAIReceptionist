@@ -18,7 +18,9 @@ anywhere. That absence is the design, not an unfinished edge.
 | 5.1 Call Log List | **BUILT** | `CallSession` — the only model this module will ever own |
 | 5.2 Call Detail & Transcript | **BUILT** | none — a **view** sub-module |
 | 5.3 Event Log & Cost | **BUILT** | none — a **view** sub-module |
-| 5.4 Recording & Transfer Outcome | not built | none — a **view** sub-module |
+| 5.4 Recording & Transfer Outcome | **BUILT** | none — a **view** sub-module (+ a signed-media serve route, no model) |
+
+**Module 5 is COMPLETE.** Every JSON column on `CallSession` now has a reading surface.
 
 > **Update this file, never re-author it.** 5.1 authored it because `apps/calls` was a brand-new app.
 > Every later sub-module APPENDS its routes / templates / seeder rows. Rewriting clobbers the previous
@@ -103,6 +105,8 @@ produced.
 * `calls:callsession_detail` — `/calls/<int:pk>/`
 
 * `calls:callsession_transcript_print` — `/calls/<int:pk>/print/` (5.2)
+* `calls:callsession_recording` — `/calls/<int:pk>/recording/?sig=<token>` (5.4) — the signed-media
+  serve endpoint. Streams bytes, not a page; GET-only, `@never_cache`, no mutation.
 
 There is deliberately **no `callsession_create` / `_edit` / `_delete`** — no route, no view, no `ModelForm`.
 `apps/calls/tests/test_security.py` asserts `NoReverseMatch` on all three, so the absence is enforced by
@@ -174,6 +178,42 @@ rule here** — a tool-call args payload is a full name and a date of birth:
 * The cost table is the four-way `stt/llm/tts/telephony` split per turn + a grand total; empty `usage` shows a
   "No cost recorded" state rather than `$0.0000`.
 
+**The recording player + transfer outcome (5.4, in `detail.html`) are the module's most security-sensitive
+surface — they serve PII AUDIO.**
+
+* **The recording is served ONLY through the signed route `calls:callsession_recording`, never a raw path.**
+  `recording_blob` is a path into `apps/calls/storage.py`'s `PrivateRecordingStorage`, rooted at
+  `PRIVATE_MEDIA_ROOT` which is **outside `MEDIA_ROOT`** (web-servable) on purpose. The storage's `url()`
+  is **overridden to raise** — `base_url=None` is NOT enough, Django falls back to `MEDIA_URL`. The detail
+  view mints a `django.core.signing` token (`_recording_context`) and only when a real file exists
+  (`recording_exists`), so a set-but-fileless recording (every fake-provider seed row) shows "no longer
+  available" rather than a broken `<audio>`.
+* **The serve view (`callsession_recording_view`) has three independent gates, cheapest first:** signature
+  (checked before any DB hit; `BadSignature` covers tampering AND expiry) → tenant+location re-scope via
+  `location_sessions(request).prefetch_related(None)` (**a valid signature is freshness, NOT authorisation** —
+  a fresh token for another site's recording still 404s) → `session_id` bind. Then non-empty `recording_blob`
+  + `recording_exists`, else 404. A fileless or since-deleted file is a **404, never a 500**
+  (`FileNotFoundError` caught; `SuspiciousFileOperation` converted in the storage layer so containment does not
+  depend on caller order). `Cache-Control: no-store`. No logger — a recording fetch is the single most
+  sensitive read in the product.
+* **HTTP Range is implemented here, not inherited.** Django 4.2's `FileResponse` ignores `Range`, so
+  `_ranged_response` parses one byte range, streams the slice as a `206` in bounded 8 KiB chunks (closed in a
+  `finally` so an aborted scrub cannot leak the handle), 416s an inverted or out-of-bounds range, and falls
+  back to a full 200 on a malformed one. Without it, every `<audio>` scrub re-downloads from byte 0.
+* **`RECORDING_SIGNED_URL_TTL` is 1800s** — the URL's clock starts at page render, and a call runs to a 15-min
+  cap, so a shorter TTL 404s a long recording mid-playback. Lengthening it is safe because the signature was
+  never the only gate.
+* **The waveform** reads `waveform_peaks.{caller,bot}` (two lanes), each 0..1 float scaled to a height percent
+  via `widthratio`. `bins` is an integer COUNT — the pre-shipped partial looped it (`for peak in 12` →
+  `TypeError` → 500) until 5.4 fixed it. Both lanes go through `ensure_list` so a non-list a future runtime
+  write produces degrades to an empty waveform, not a crash.
+* **`transfer.destination` is the number that produced the FINAL result** — on a fell-through call that is the
+  secondary that answered (`attempts[-1].destination`), NOT the configured primary that rang out. The seeder
+  and Module 3.4 must both honour that. The `attempts` trail (`[{destination, result}]`) renders only when
+  there was more than one. `destination` is ALWAYS a configured number, never caller-derived (Invariant 3).
+* **`save_recording(name, content)`** is the paved write path for Module 3's recorder — routes through
+  `FileSystemStorage.save`'s `safe_join` so a traversal name raises rather than escaping the private root.
+
 The list Actions column is **View only**. Caller numbers always render through the `phone_e164` filter
 (`{% load ui %}` required) — never raw, so the same number never appears in two shapes. Nothing
 caller-controlled is ever `|safe`. **The list renders none of the JSON columns**; the transcript is 5.2's
@@ -221,6 +261,12 @@ Search `q` (from/to number, contact name + phone), date range `from`/`to`, `stat
 **This module has no realtime surface** — no `consumers/`, no `routing.py`, no `async def`, no websocket
 route, no provider adapter, and it does not touch `config/asgi.py`. It ships the TABLE the realtime layer
 writes to; Module 3 ships the writer. See the contracts section above before implementing that writer.
+
+**5.4 also fixed the recording and transfer WRITE contracts Module 3 will honour** (in addition to the five
+in the contracts section): the recorder writes bytes through `storage.save_recording` (traversal-guarded) and
+sets `metadata.consent_basis`/`retention_days`; the transfer executor writes `transfer.destination` as the
+number that PRODUCED the outcome (the secondary on a fell-through call, not the primary that rang out) and
+`transfer.attempts` as the per-number trail. `destination` is always a configured number, never caller speech.
 
 ## Tools & prompt surface
 
@@ -274,8 +320,10 @@ rather than a stale seed. If you flush scheduling, re-run `seed_calls --flush` a
   from `views/_helpers` for scoping; do not redefine it. Extend `seed_calls` idempotently only if the pages
   need richer JSON. Two worked examples now: **5.2** added a print ROUTE (so a new view/url folder) plus two
   `detail.html` panels; **5.3** added NO backend layer at all — two more `detail.html` cards, three `ui.py`
-  filters and one model `@property`, because its surfaces render on the page that already has a view. Reach for
-  a new view/url folder only when there is a genuinely new route; otherwise it is template + filter + property.
+  filters and one model `@property`, because its surfaces render on the page that already has a view; **5.4**
+  added a serve ROUTE plus a `storage.py` module and settings, because streaming private bytes genuinely needs
+  one. Reach for a new view/url folder only when there is a genuinely new route; otherwise it is template +
+  filter + property. **Module 5 is now complete — all four sub-modules built, still one model.**
 * **Add a filter** → parse in the view BEFORE pagination, validate against a fixed choice set, pass the
   choices in context, and make junk degrade to "no filter".
 * **Extend the seeder** → add a spec with a fresh `provider_call_sid`; the dedupe key is that SID.
@@ -288,6 +336,7 @@ rather than a stale seed. If you flush scheduling, re-run `seed_calls --flush` a
 '5.1': {'Call Logs': 'calls:callsession_list'},
 '5.2': {},   # built; surfaces reached through the 5.1 detail page, so no link of its own
 '5.3': {},   # built; event log + cost cards on the detail page, same as 5.2
+'5.4': {},   # built; recording player + transfer outcome cards + the signed serve route. Module 5 complete.
 ```
 
 ## Tests
@@ -295,8 +344,10 @@ rather than a stale seed. If you flush scheduling, re-run `seed_calls --flush` a
 `apps/calls/tests/` — `conftest.py` (its own `make_call_session` factory; pytest conftest fixtures do not
 cross sibling app-test packages), `test_models.py`, `test_views.py`, `test_security.py`,
 `test_seed_calls.py`, `test_transcript_views.py` (5.2), `test_ui_filters.py` + `test_event_log_cost_views.py`
-(5.3 — the redaction/pretty_json/total_cost_usd filters and the event-log/cost cards). **143 passing**, 679
-across `apps/scheduling apps/calls` together. The `ui.py` filters are tested under `apps/calls/tests/` because
+(5.3 — the redaction/pretty_json/total_cost_usd filters and the event-log/cost cards), `test_storage.py` +
+`test_recording_views.py` (5.4 — the private storage, the signed serve view, the Range parser and the
+cross-tenant/cross-location signature tests). **223 passing**, 759 across `apps/scheduling apps/calls`
+together. The `ui.py` filters are tested under `apps/calls/tests/` because
 `apps/accounts` has no test package — note that if you add `accounts` tests later.
 
 **Query-count tests measure the VIEW, not the request.** A `Client` request carries a constant overhead of
