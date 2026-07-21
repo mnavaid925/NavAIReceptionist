@@ -232,4 +232,54 @@ def callsession_detail_view(request, pk):
 
     return render(request, 'calls/calllog/callsession/detail.html', {  # noqa: F405
         'obj': obj,
+        **_recording_context(obj),
     })
+
+
+def _recording_context(obj):
+    """The recording card's context: a signed URL, the consent basis, retention.
+
+    A signed URL can only be built in Python, not a template — so this is the one
+    place the detail view still does real work. The URL is minted ONLY when bytes
+    actually exist behind `recording_blob`: a set-but-fileless path (every seeded
+    row on a fake-provider database) yields `recording_url=None`, and the player
+    partial renders its "no longer available" message rather than an `<audio>`
+    pointed at a route that would 404.
+
+    `retention_date` is DERIVED from the per-row `metadata.retention_days` — the
+    policy that applied AT THE TIME OF THE CALL — never `settings.RECORDING_-
+    RETENTION_DAYS`, which is a platform default a future write path uses and
+    which would silently disagree with the row the moment the two diverge. Same
+    derive-never-store discipline as `duration_display` / `total_cost_usd`.
+    """
+    from datetime import timedelta
+
+    from django.conf import settings
+    from django.core import signing
+    from django.urls import reverse
+
+    from apps.calls.storage import recording_exists
+
+    metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+
+    recording_url = None
+    if obj.recording_blob and recording_exists(obj.recording_blob):
+        token = signing.dumps(
+            {'session_id': obj.pk}, salt=settings.RECORDING_ACCESS_SALT,
+        )
+        recording_url = (
+            reverse('calls:callsession_recording', kwargs={'pk': obj.pk})
+            + '?sig=' + token
+        )
+
+    retention_date = None
+    retention_days = metadata.get('retention_days')
+    if isinstance(retention_days, int) and retention_days > 0:
+        retention_date = obj.created_at + timedelta(days=retention_days)
+
+    return {
+        'recording_url': recording_url,
+        'consent_basis': metadata.get('consent_basis', ''),
+        'retention_date': retention_date,
+        'can_download': True,
+    }
