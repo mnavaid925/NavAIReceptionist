@@ -286,6 +286,19 @@ def consent_basis_label(value):
     return _CONSENT_BASIS_LABELS.get(text, text)
 
 
+@register.filter(name='ensure_list')
+def ensure_list(value):
+    """The value if it is a list, else an empty list — safe to `{% for %}` over.
+
+    A `{% for x in y %}` over a present-but-non-iterable `y` raises `TypeError` and
+    500s the page. The waveform lanes loop `waveform_peaks.caller`/`.bot`, JSON a
+    future Module 3 writes and does not yet validate on the way in, so a bad write
+    (a bare number where a list belongs) must degrade to an empty waveform, not a
+    crash — the same failure this filter's one caller was created to close.
+    """
+    return value if isinstance(value, list) else []
+
+
 @register.filter(name='error_log_count')
 def error_log_count(logs):
     """How many event-log entries are error- or critical-level.
