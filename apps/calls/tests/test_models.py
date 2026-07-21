@@ -5,6 +5,8 @@ plus the two things that make this row safe to build on: `provider_call_sid`'s
 DB-level uniqueness (Module 3's webhook idempotency key) and the two SET_NULL
 relations that must survive the row they point at being deleted.
 """
+import json
+
 from django.db import IntegrityError, transaction
 from django.utils import timezone as dj_timezone
 
@@ -281,6 +283,78 @@ def test_deleting_call_session_nulls_booked_by_session_but_keeps_the_appointment
     # `source` is untouched — it is the provenance record and survives the FK
     # going null, exactly as the model's own docstring says it must.
     assert appt.source == Appointment.SOURCE_AI_PHONE
+
+
+# --------------------------------------------------------------------------- #
+# total_cost_usd — derived at read time from `usage`, sub-module 5.3
+# --------------------------------------------------------------------------- #
+
+def test_total_cost_usd_sums_across_turns(tenant_a, location_a1):
+    usage = [
+        {'turn_sequence': 1, 'cost_usd': 0.01},
+        {'turn_sequence': 2, 'cost_usd': 0.02},
+        {'turn_sequence': 3, 'cost_usd': 0.005},
+    ]
+    obj = _minimal(tenant_a, location_a1, usage=usage)
+    assert obj.total_cost_usd == 0.035
+
+
+def test_total_cost_usd_is_zero_for_empty_usage_list(tenant_a, location_a1):
+    obj = _minimal(tenant_a, location_a1, usage=[])
+    assert obj.total_cost_usd == 0
+
+
+def test_total_cost_usd_is_zero_for_default_usage(tenant_a, location_a1):
+    obj = _minimal(tenant_a, location_a1)
+    assert obj.usage == []
+    assert obj.total_cost_usd == 0
+
+
+@pytest.mark.parametrize('bad_usage', [42, {'x': 1}, 'not-a-list', True, None])
+def test_total_cost_usd_returns_zero_for_non_list_usage_never_raises(tenant_a, location_a1, bad_usage):
+    """Regression: `usage` that is not a list at all — a bare number, a dict, a
+    bool, `None` — must contribute 0 rather than raise `TypeError` out of the
+    property (`for turn in 42` would otherwise 500 the detail page).
+    """
+    obj = _minimal(tenant_a, location_a1)
+    obj.usage = bad_usage
+    assert obj.total_cost_usd == 0
+
+
+def test_total_cost_usd_skips_a_non_dict_entry(tenant_a, location_a1):
+    obj = _minimal(tenant_a, location_a1)
+    obj.usage = ['not-a-dict', 42, None, {'turn_sequence': 1, 'cost_usd': 0.03}]
+    assert obj.total_cost_usd == 0.03
+
+
+def test_total_cost_usd_skips_a_non_numeric_cost(tenant_a, location_a1):
+    obj = _minimal(tenant_a, location_a1)
+    obj.usage = [
+        {'turn_sequence': 1, 'cost_usd': 'not-a-number'},
+        {'turn_sequence': 2, 'cost_usd': 0.05},
+    ]
+    assert obj.total_cost_usd == 0.05
+
+
+def test_total_cost_usd_skips_nan_and_infinity_but_sums_real_charges(tenant_a, location_a1):
+    """`json.loads` accepts `NaN`/`Infinity`/`-Infinity` as an extension, and
+    both would otherwise propagate through the sum onto a billing figure — a
+    corrupted row, not a real charge, so each is skipped rather than poisoning
+    the total.
+    """
+    usage = json.loads(
+        '[{"cost_usd": NaN}, {"cost_usd": Infinity}, {"cost_usd": -Infinity}, '
+        '{"cost_usd": 0.02}]'
+    )
+    obj = _minimal(tenant_a, location_a1)
+    obj.usage = usage
+    assert obj.total_cost_usd == 0.02
+
+
+def test_total_cost_usd_rounds_to_four_decimal_places(tenant_a, location_a1):
+    obj = _minimal(tenant_a, location_a1)
+    obj.usage = [{'cost_usd': 0.1}, {'cost_usd': 0.2}]
+    assert obj.total_cost_usd == 0.3
 
 
 def test_booked_appointments_reverse_accessor(tenant_a, location_a1):
