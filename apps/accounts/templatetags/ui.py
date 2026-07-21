@@ -262,6 +262,30 @@ def iso_time(value):
         return text
 
 
+_CONSENT_BASIS_LABELS = {
+    'announced_notice': 'Recorded — consent announced',
+    'two_party': 'Recorded — two-party consent',
+    'one_party': 'Recorded — one-party consent',
+    'not_recorded': 'Not recorded',
+}
+
+
+@register.filter(name='consent_basis_label')
+def consent_basis_label(value):
+    """A `metadata.consent_basis` value as a human label for the recording card.
+
+    The recording consent basis is a compliance fact — WHY it was lawful to record
+    this call — so it is shown, not hidden. Falls back to the raw value for an
+    unrecognised basis rather than dropping it: Module 3 may add a
+    jurisdiction-specific one later, and a compliance label must fail visible, not
+    silent. Returns '' for an empty value so the badge simply does not render.
+    """
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    return _CONSENT_BASIS_LABELS.get(text, text)
+
+
 @register.filter(name='error_log_count')
 def error_log_count(logs):
     """How many event-log entries are error- or critical-level.
