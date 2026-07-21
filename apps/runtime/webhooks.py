@@ -48,6 +48,17 @@ SIGNATURE_HEADER = 'HTTP_X_TWILIO_SIGNATURE'
 #: Twilio treat the body as opaque and hang up — the caller hears nothing.
 TWIML_CONTENT_TYPE = 'application/xml'
 
+# Closed set of webhook termination reasons. Logged as a bare code — NEVER with
+# the dialed/caller number, the signature or the body — so the diagnostics page
+# (and 3.5's fuller one) can answer "why was this call not answered?" without a
+# log line ever carrying PII. `provider_call_sid` is a Twilio SID, not PII, but is
+# still left out to keep every one of these lines uniformly number-free.
+REASON_UNMAPPED = 'unmapped'
+REASON_DISABLED = 'disabled'
+REASON_SIGNATURE_INVALID = 'signature_invalid'
+REASON_MISSING_CALLSID = 'missing_callsid'
+REASON_DUPLICATE = 'duplicate_delivery'
+
 
 def _twiml(body, status=200):
     return HttpResponse(body, content_type=TWIML_CONTENT_TYPE, status=status)
@@ -87,6 +98,10 @@ def voice_webhook(request):
     #    deferred — 3.1 keeps the two paths identical and side-effect-free.)
     setting = _resolve_setting(to_number)
     if setting is None or not setting.enabled:
+        logger.info(
+            'Inbound webhook declined (%s).',
+            REASON_UNMAPPED if setting is None else REASON_DISABLED,
+        )
         return _twiml(build_decline_twiml())
 
     # 2. Verify the signature against THIS location's token, before any side
@@ -96,17 +111,18 @@ def voice_webhook(request):
     if not verify_twilio_signature(public_url, params.dict(), signature,
                                    setting.twilio_auth_token):
         # No number, no body — logging either would defeat the point.
-        logger.warning('Rejected an inbound webhook with an invalid signature.')
+        logger.warning('Rejected an inbound webhook (%s).', REASON_SIGNATURE_INVALID)
         return HttpResponseForbidden('Invalid signature.')
 
     # A genuine Twilio voice request always carries a CallSid; without it there is
     # no idempotency key. Malformed → 400, not a 500 and not a silent write.
     if not call_sid:
+        logger.info('Inbound webhook rejected (%s).', REASON_MISSING_CALLSID)
         return HttpResponseBadRequest('Missing CallSid.')
 
     # 3. Idempotent create. get_or_create + the unique provider_call_sid lets a
     #    redelivered webhook lose the race and return the existing row unchanged.
-    session, _created = CallSession.objects.get_or_create(
+    session, created = CallSession.objects.get_or_create(
         provider_call_sid=call_sid,
         defaults={
             'tenant': setting.tenant,
@@ -120,13 +136,19 @@ def voice_webhook(request):
             'started_at': timezone.now(),
         },
     )
+    if not created:
+        # Twilio redelivered; the unique provider_call_sid made get_or_create
+        # return the existing row unchanged. Same stream TwiML goes back.
+        logger.info('Inbound webhook (%s).', REASON_DUPLICATE)
 
     # 4. Connect to the media stream. The signed token is the ONLY identity that
     #    crosses to the (session-less, user-less) stream; the consumer resolves
     #    tenant/location/session from it, never from the URL. session.pk is passed
     #    too, but as an opaque parameter the consumer cross-checks against the
-    #    token — it is not trusted on its own.
-    token = mint_stream_token(session.pk, setting.tenant_id, setting.location_id)
+    #    token — it is not trusted on its own. Bind the token to the PERSISTED
+    #    session's tenant/location (identical to the setting's on a fresh row, and
+    #    authoritative on a redelivery) rather than the just-resolved setting.
+    token = mint_stream_token(session.pk, session.tenant_id, session.location_id)
     twiml = build_stream_twiml(
         media_stream_ws_url(),
         {'streamToken': token, 'sessionId': session.pk},
