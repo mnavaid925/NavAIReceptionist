@@ -70,6 +70,9 @@ LIVE_LINKS = {
     '2.2': {'Twilio Connection': 'agents:twilio_connection'},
     '2.3': {'Transfer Settings': 'agents:transfer_settings'},
     '2.4': {'Test Call': 'agents:test_call'},
+    # Module 3 is the service module — no CRUD. 3.1's one navigable surface is the
+    # runtime diagnostics page (the webhook itself answers a carrier, not a user).
+    '3.1': {'Runtime Diagnostics': 'runtime:diagnostics'},
     '4.1': {'Contacts': 'scheduling:contact_list'},
     '4.2': {'Services': 'scheduling:service_list',
             'Resources': 'scheduling:resource_list'},
