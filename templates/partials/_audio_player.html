@@ -32,11 +32,27 @@
         <p class="text-muted">This recording is no longer available.</p>
       {% endif %}
 
-      {% comment %} Decorative only — never the sole indicator of playback state. {% endcomment %}
+      {% comment %}
+        Decorative only — never the sole indicator of playback state.
+
+        TWO lanes, over the two REAL peak arrays. `waveform_peaks` is
+        `{caller: [0..1 floats], bot: [0..1 floats], bins: <int count>}` — `bins`
+        is the COUNT, not an array, so looping it is `for peak in 12`, which
+        raises TypeError and 500s the page. `widthratio` scales each 0..1 float to
+        a 0..100 integer, because `theme.css`'s `.waveform span` reads `--peak` as
+        a height PERCENTAGE (`height: var(--peak, 20%)`) — a bare `0.12` renders a
+        sub-pixel bar. The `.bot` lane picks up its darker colour from the
+        stylesheet with no extra CSS.
+      {% endcomment %}
       {% if session.waveform_peaks %}
-        <div class="waveform" aria-hidden="true" data-peaks-id="peaks-{{ session.pk }}">
-          {% for peak in session.waveform_peaks.bins %}
-            <span style="--peak: {{ peak }}%"></span>
+        <div class="waveform" aria-hidden="true" data-peaks-id="peaks-{{ session.pk }}-caller">
+          {% for peak in session.waveform_peaks.caller %}
+            <span style="--peak: {% widthratio peak 1 100 %}%"></span>
+          {% endfor %}
+        </div>
+        <div class="waveform" aria-hidden="true" data-peaks-id="peaks-{{ session.pk }}-bot">
+          {% for peak in session.waveform_peaks.bot %}
+            <span class="bot" style="--peak: {% widthratio peak 1 100 %}%"></span>
           {% endfor %}
         </div>
       {% endif %}
