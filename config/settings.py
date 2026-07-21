@@ -103,6 +103,8 @@ INSTALLED_APPS = [
     'apps.tenants',
     # Module 2 — Agent Setup & Telephony
     'apps.agents',
+    # Module 3 — Call Runtime (service module: webhooks, consumers, providers)
+    'apps.runtime',
     # Module 4 — Calendar & Bookings
     'apps.scheduling',
     # Module 5 — Call Logs
