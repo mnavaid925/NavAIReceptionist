@@ -45,3 +45,7 @@ ALLOWED_HOSTS = ['testserver', '127.0.0.1', 'localhost']
 
 # Media and static writes land in a throwaway directory during tests.
 MEDIA_ROOT = BASE_DIR / 'temp' / 'test-media'  # noqa: F405
+# Same isolation for private recordings (5.4) — without this override a test that
+# writes through `recording_storage` would land real files inside the project's
+# `private_media/`, the exact leak the `MEDIA_ROOT` redirect above already prevents.
+PRIVATE_MEDIA_ROOT = BASE_DIR / 'temp' / 'test-private-media'  # noqa: F405
