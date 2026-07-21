@@ -4607,5 +4607,33 @@ silently picking a side while writing code:
   messaging webhooks, multi-channel routing, a DID marketplace inside the app, carrier-agnostic multi-provider
   ingress (Telnyx etc.) — Twilio only, inbound only, per the seven capabilities
 
-## Review notes
-(filled in at the end)
+## Review notes — 3.1 build close-out
+
+**Shipped.** Brand-new `apps/runtime` service app, sub-module 3.1. Zero models, zero migrations
+(`makemigrations runtime` → "No changes detected"). 806 tests pass repo-wide (47 in `apps/runtime/tests/`);
+`manage.py check` clean; `LIVE_LINKS['3.1']` → `runtime:diagnostics` lights the sidebar.
+
+**What landed:** the `/runtime/voice/` webhook (`webhooks.py`) — resolve dialed number → decline (zero writes) for
+unmapped/disabled → verify `X-Twilio-Signature` against the resolved location's token → idempotent
+`CallSession.get_or_create` on `provider_call_sid` → `<Connect><Stream>` TwiML with an opaque signed stream token.
+Pure Twilio helpers + PROVIDER_MODE fail-safe + the signed token in `providers/`. A tenant+location-scoped
+diagnostics page as the observable surface. `routing.py` is an empty stub and `config/asgi.py` is untouched (3.2's
+job).
+
+**Decisions made during the run:**
+- Unmapped and disabled both decline with **zero writes** (the "disabled → minimal failed CallSession" option was
+  considered and dropped for 3.1 — keeps the two paths identical and side-effect-free).
+- `providers/telephony.py` deliberately defines **no `get_backend()`**, so `agents.telephony`'s import-guard keeps
+  Module 2 on its own backend; the handoff is 3.4.
+
+**Review-agent findings applied:** code-reviewer → reason-code logging per termination branch (PII-free) + bind the
+stream token to the persisted session; frontend-reviewer → live-region roles on the mode banners;
+performance-reviewer → folded the two stat counts into one `aggregate()`; realtime-reviewer → documented the
+rate-limiting deferral (naive throttle would block legitimate redelivery/concurrent calls); security-reviewer →
+`runtime.E001` system check fails loud on a missing `TWILIO_WEBHOOK_BASE_URL` outside DEBUG. explorer and
+qa-smoke-tester found nothing to change. Skill authored at `.claude/skills/runtime/SKILL.md`.
+
+**Carried to 3.2+:** the media consumer + `config/asgi.py` wiring + audio chain (3.2, which also must reconcile the
+group-naming disagreement CLAUDE.md `t{tenant}:l{location}:call:{session}` vs skill `t{tenant}:call:{session}`);
+tools/dispatcher (3.3); transfer + the `get_backend()` handoff (3.4); recording/teardown/waveform/cost + the fuller
+diagnostics + webhook rate-limit sizing (3.5).
