@@ -3839,3 +3839,420 @@ redact identically, and proved against the reviewer's exact repro.
 
 **N/A, noted not run.** 5.3 is a filter + property + template — no async, consumer, provider call, tool or
 schema. Recorded so the skipped step is a decision.
+
+---
+# Sub-module 5.4 — Recording & Transfer Outcome (Module 5: Call Logs, `calls`) — plan from research-calls-5.4.md (2026-07-21)
+
+## Shape: VIEW — ZERO new models, ZERO migrations — the FINAL sub-module of Module 5
+
+All four of 5.4's bullets (Waveform Player, Signed Media Access, Transfer Outcome Panel, PII Handling) are
+satisfied by four fields already on `calls.CallSession` — `recording_blob` (`CharField`, private storage path,
+`""` = none), `waveform_peaks` (`JSONField`, null = never computed, `{caller, bot, bins}`), `transfer`
+(`JSONField`, `{}` = none, `{result, reason, destination, initiated_at, duration_seconds, attempts?}`) and
+`metadata` (`JSONField`, `{consent_basis, consent_announced, retention_days, ...}`) — confirmed directly against
+`apps/calls/models/CallLogList/CallSessions.py` and the real seeded rows, not assumed from the ERD.
+`makemigrations calls --check` reporting **"No changes detected"** is an acceptance criterion. A `Recording`,
+`TransferAttempt` or `MediaAsset` table here would be an **Invariant 2** violation — grep confirms exactly one
+model exists in `apps/calls/models/` (`CallSession`), and this pass adds none.
+
+**This IS the third pattern of the three worked examples the skill already names**: 5.2 needed a new route
+(print) + two `detail.html` panels; 5.3 needed no backend layer at all; **5.4 needs a new route too** (the
+signed-recording serve endpoint) because streaming a private file behind a signature check cannot be done from
+inside a template — but unlike 5.2's route, this one is never linked from the page directly; it is the
+`<audio src>`/download target embedded inside a partial the detail view renders. The other genuinely new
+backend work is that `callsession_detail_view` itself gains non-trivial logic (minting the signed token) for the
+first time in this module's history — 5.1–5.3 never touched that view's body.
+
+**A load-bearing bug must be fixed before this pass wires anything in**: `templates/partials/_audio_player.html`
+loops `{% for peak in session.waveform_peaks.bins %}`, but `bins` is an **integer count** (`len(caller)` = 12),
+not a list. `{% for %}` calls `list()` on its target; `list(12)` raises `TypeError: 'int' object is not
+iterable`, uncaught by the template engine. Wiring this partial in as-is 500s the detail page for every one of
+the six seeded "recorded" sessions the moment this sub-module lands. Confirmed empirically per the launch
+instructions.
+
+## Models — NONE. Tables READ: `calls.CallSession` only (`recording_blob`, `waveform_peaks`, `transfer`, `metadata`, `created_at`)
+
+- [ ] Confirmed by direct read of `apps/calls/models/CallLogList/CallSessions.py`, the seeder
+  (`apps/calls/management/commands/seed_calls.py`) and the two pre-authored partials:
+  - `recording_blob` — `CharField(max_length=512, blank=True, default='')`. PRIVATE storage path, e.g.
+    `private/calls/globex/lakeside/FAKE-CALL-lakeside-0001.mp3`. `""` = no recording. Docstring (twice, model +
+    migration help_text): served ONLY through a short-lived signed URL, never rendered as a `src` against a
+    public path, and must not be set without a consent basis in `metadata`.
+  - `waveform_peaks` — `JSONField(null=True, blank=True)`. Real shape confirmed against the seeder's
+    `_build_waveform`: `{'caller': [12 floats, 0..1], 'bot': [12 floats, 0..1], 'bins': 12}` — TWO parallel
+    arrays plus a count. `NULL` (not `{}`) on an unrecorded call — "never computed" is not the same claim as "a
+    genuinely silent recording".
+  - `transfer` — `JSONField(default=dict)`. `{result, reason, destination, initiated_at, duration_seconds,
+    attempts?}`. `attempts` is `[{destination, result}]`, optional, present on **zero** seeded rows today (the
+    gap this pass's seeder edit closes). `destination` is always the location's CONFIGURED number
+    (`TRANSFER_DESTINATIONS` in the seeder / `AgentSetting.transfer_phone_number`/`transfer_secondary_number`),
+    **never** anything a caller or the model produced — already correctly implemented in both the partial and
+    the seeder; this pass changes neither's destination-sourcing logic.
+  - `metadata` — `JSONField(default=dict)`. Confirmed keys in use: `consent_basis`
+    (`'announced_notice'`/`'not_recorded'`), `consent_announced` (bool), `retention_days` (int, `90` recorded /
+    `0` not), plus `direction`/`location_timezone`/`agent_version`/`provider_mode` (not this pass's concern).
+  - No other table is touched. No FK is added anywhere. `location_sessions(request)`
+    (`apps/calls/views/_helpers.py`) is reused unchanged by both the existing detail view and the new serve
+    view — no second scoping helper.
+
+## Backend — one new `views/RecordingTransferOutcome/` + `urls/RecordingTransferOutcome/` pair (the second time this module adds a route, after 5.2)
+
+- [ ] **Fix the partial first**: `templates/partials/_audio_player.html` — replace the single
+  `{% for peak in session.waveform_peaks.bins %}` loop with TWO lanes, one per real array:
+  ```html
+  {% if session.waveform_peaks %}
+    <div class="waveform" aria-hidden="true" data-peaks-id="peaks-{{ session.pk }}-caller">
+      {% for peak in session.waveform_peaks.caller %}
+        <span style="--peak: {% widthratio peak 1 100 %}%"></span>
+      {% endfor %}
+    </div>
+    <div class="waveform" aria-hidden="true" data-peaks-id="peaks-{{ session.pk }}-bot">
+      {% for peak in session.waveform_peaks.bot %}
+        <span class="bot" style="--peak: {% widthratio peak 1 100 %}%"></span>
+      {% endfor %}
+    </div>
+  {% endif %}
+  ```
+  `{% widthratio peak 1 100 %}` scales a 0..1 float to a 0..100 integer percentage — `--peak` is a CSS custom
+  property `theme.css:798` reads as a HEIGHT (`height: var(--peak, 20%)`), so `0.12` must become `12`, not stay
+  `0.12` (which renders an invisible sub-pixel bar). The `.bot`-classed lane picks up `theme.css:805`'s
+  `background: var(--brand-600)` automatically — no new CSS needed, only the two-lane markup and the scaling.
+  This is a genuine bug fix on pre-existing scaffolding, not a re-author of the partial's design or its context
+  contract (`session`, `recording_url`, `consent_basis_label`, `retention_date`, `can_download` — unchanged).
+- [ ] `apps/calls/storage.py` (new, flat — Backend Package Structure rule 8: single-purpose module, promote to
+  a package only if it outgrows one file):
+  - A dedicated `FileSystemStorage(location=settings.PRIVATE_MEDIA_ROOT, base_url=None)` instance —
+    `base_url=None` deliberately disables `.url()` so nothing can accidentally mint a public-looking link from
+    it.
+  - `recording_exists(path)` — `True`/`False`, never raises on an empty or malformed path.
+  - `open_recording(path)` — returns an open file handle in binary mode for `FileResponse`, or raises
+    `FileNotFoundError` the caller catches (or check `recording_exists` first and skip the open entirely on a
+    miss — either is fine, pick the one with fewer branches at the call site).
+  - No logger in this module. It knows nothing about tenant/session/request — it is a pure path→bytes helper —
+    so it has nothing PII-adjacent to say and nothing to guard by omission.
+- [ ] `apps/calls/views/RecordingTransferOutcome/CallSessions.py` (new sub-module folder — mirrors 5.2's
+  `CallDetailTranscript/CallSessions.py` precedent exactly) — `callsession_recording_view(request, pk)`:
+  - Decorators: `@login_required`, `@never_cache`, `@require_http_methods(['GET'])` — same posture as every
+    other view in this module.
+  - **Order of checks, cheapest/safest first** (mirrors `email_change_confirm_view`'s precedent in
+    `apps/accounts/views/Auth.py` exactly):
+    1. Read `token = request.GET.get('sig', '')`. `signing.loads(token, salt=RECORDING_ACCESS_SALT,
+       max_age=settings.RECORDING_SIGNED_URL_TTL)` — catch the single exception `signing.BadSignature` (covers
+       tampering **and** expiry, `SignatureExpired` subclasses it) and 404 on failure, **before any DB hit**.
+    2. `obj = get_object_or_404(location_sessions(request), pk=pk)` — the SAME helper 5.1–5.3 already use, so a
+       cross-tenant or cross-location pk 404s here exactly as it does on the detail page. This is the second
+       independent gate: the Django session (who is logged in) plus this re-check (which site this call
+       belongs to) are orthogonal to the signature's own freshness check above.
+    3. Confirm `payload.get('session_id') == obj.pk` — a signature that is otherwise valid but was minted for a
+       DIFFERENT session (however that could happen) must not serve this one's file.
+    4. `if not obj.recording_blob: raise Http404` — an empty path is "no recording", not an error.
+    5. `if not recording_exists(obj.recording_blob): raise Http404` — the seeded-but-fileless case (6/11 rows
+       today have a path with no bytes behind it). **Must degrade to 404, never 500**, on a `PROVIDER_MODE=fake`
+       demo database where no real audio pipeline has ever written a byte.
+  - On success: `FileResponse(open_recording(obj.recording_blob), content_type=<mimetypes.guess_type(path)[0]
+    or 'application/octet-stream'>)`. `Content-Disposition: inline` by default; `attachment; filename="..."`
+    when the (unsigned, safe-to-leave-unsigned — it only changes a response header, not what is authorized)
+    `?dl=1` query flag is present. `Cache-Control: no-store` unconditionally — this is PII audio, not a
+    cacheable asset. Django 4.2's `FileResponse` supports HTTP Range natively, needed so `<audio>` scrubbing
+    does not force a full download first — no extra work required to get this, just do not wrap the file handle
+    in anything that defeats it.
+  - **No logger, or a logger that names ONLY `pk`/`tenant_id`/`location_id`/`user_id` — never the signature, the
+    token, `from_number`, or the file path, at any level ≥ INFO.** Extends this module's existing "no logger,
+    deliberately" convention (5.1's `CallLogList/CallSessions.py` docstring) to its one new view.
+- [ ] `apps/calls/views/CallLogList/CallSessions.py` — `callsession_detail_view` gains the token-minting logic
+  (the one place in this pass where a "view sub-module" still needs a genuine code change to an EXISTING view,
+  because a signed URL cannot be computed inside a template):
+  - When `obj.recording_blob` is non-empty: `token = signing.dumps({'session_id': obj.pk},
+    salt=RECORDING_ACCESS_SALT)`; `recording_url = reverse('calls:callsession_recording', kwargs={'pk': obj.pk})
+    + '?sig=' + token`. A **query-string** token, not a path segment (unlike `email_change_confirm_view`'s
+    path-embedded one) — a query string never participates in URL *resolution*, so the route itself stays a
+    plain `<int:pk>/recording/` literal with zero of the `<str:token>` route-ordering risk this app's own
+    URLconf docstring warns about.
+  - **Only compute `recording_url` when a file actually exists behind the path** (`recording_exists(
+    obj.recording_blob)`), so a seeded-but-fileless recording (`recording_blob` set, no bytes — true for every
+    seeded row today) degrades to the partial's existing "This recording is no longer available" message rather
+    than a broken `<audio>` tag pointed at a route that will 404. This is the honest demo behaviour: 6/11 seeded
+    sessions have `recording_blob` set; none have real bytes unless the optional fixture below is added.
+  - Compute `consent_basis_label = obj.metadata.get('consent_basis', '')|consent_basis_label` (via the new
+    filter below — call the filter from Python or pass the raw value and let the template filter it; either
+    is acceptable, prefer doing it in the template so the view stays a thin context-builder, matching this
+    module's existing posture).
+  - Compute `retention_date` — derived, never stored, mirroring `duration_display`/`total_cost_usd`'s own
+    discipline: `obj.created_at + timedelta(days=obj.metadata.get('retention_days', 0))` when
+    `metadata.get('retention_days')` is a positive int, else `None`. **Uses the per-row `metadata.retention_days`
+    — the policy that applied at the time of the call — never `settings.RECORDING_RETENTION_DAYS`** (that
+    setting already exists in `config/settings.py` as a platform-wide default for a future write path; reading
+    it here would silently disagree with what the row itself records the moment the two diverge).
+  - `can_download = True` unconditionally for any authorized viewer this pass (research's explicit
+    recommendation — per-tier download gating is deferred, not asked for by any of the four bullets).
+  - Pass all four (`recording_url`, `consent_basis_label`, `retention_date`, `can_download`) into the existing
+    `render(...)` context alongside `obj`.
+- [ ] `apps/calls/urls/RecordingTransferOutcome/CallSessions.py` (new) —
+  `path('<int:pk>/recording/', views.callsession_recording_view, name='callsession_recording')`. Order-safe: a
+  literal `recording/` suffix cannot be swallowed by 5.1's bare `<int:pk>/` (`IntConverter` ends at the trailing
+  slash), same reasoning already documented for 5.2's `<int:pk>/print/`.
+- [ ] `apps/calls/urls/__init__.py` — concatenate the new `RecordingTransferOutcome` urlpatterns AFTER
+  `CallLogList` and `CallDetailTranscript`'s, same append pattern 5.2 used.
+- [ ] Re-export blocks — `apps/calls/views/__init__.py` adds `callsession_recording_view` to its imports and
+  `__all__`; `apps/calls/urls/RecordingTransferOutcome/__init__.py` (new, empty package marker). Required or the
+  URLconf's `views.<name>` lookup `AttributeError`s at import time (Backend Package Structure rule 3).
+- [ ] `apps/calls/views/RecordingTransferOutcome/__init__.py` (new, empty package marker).
+- [ ] `admin.py` — **not touched.** No new field, no new model.
+- [ ] `apps/accounts/templatetags/ui.py` — one new filter, alongside the already-shipped
+  `level_badge`/`dict_get`/`redact_args`/`pretty_json`/`iso_time`/`error_log_count` (reuse the module, do not
+  start a second one):
+  - `consent_basis_label` — maps a known `metadata.consent_basis` value to a human label:
+    `'announced_notice'` → `"Recorded — consent announced"`, `'not_recorded'` → `"Not recorded"`. **Defaults to
+    the raw value for anything unrecognized** rather than crashing or silently omitting it — Module 3 may
+    introduce a new consent-basis value later (e.g. a jurisdiction-specific one-party-consent label) and this
+    filter must not assume today's closed set is final. Never raises on `None`/empty (returns `''`).
+
+## Realtime & agent surface
+
+**N/A.** Pure UI + one local file-serving route over columns and bytes Module 3 will one day write/record. No
+consumer, no provider adapter, no LLM tool, no prompt variable — the transfer outcome panel displays the result
+of `transfer_call`/`transfer_call_spanish`, which Module 3's (unbuilt) dispatcher will one day execute; this
+sub-module defines no tool of its own. 5.4 **appends nothing** to any JSON column — it only fixes the *display*
+contract over `recording_blob`/`waveform_peaks`/`transfer`/`metadata`, and introduces the *serving* contract
+(signed URL, private storage) those future writes must be read back through.
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` → add `'5.4': {}` to `LIVE_LINKS` — same posture as `'5.2'`/`'5.3'`. 5.4's
+  surfaces (the recording player, the transfer outcome panel) are reached **through** the existing
+  `calls:callsession_detail` page `'5.1'` already links to; the new `callsession_recording` route is not a page
+  a user navigates to directly — it is the `<audio>`/download target embedded in the detail page, not a
+  sidebar destination.
+- [ ] `config/settings.py` — new settings (no model/migration impact), added near the existing "Storage,
+  retention and encryption" block that already declares `RECORDING_STORAGE_BUCKET`/`RECORDING_RETENTION_DAYS`/
+  `RECORDING_SIGNED_URL_TTL`:
+  - `PRIVATE_MEDIA_ROOT = BASE_DIR / 'private_media'` — a distinct location from `MEDIA_ROOT`
+    (`BASE_DIR / 'media'`), with **no corresponding URL mapping registered anywhere** — confirm
+    `config/urls.py`'s existing `urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)`
+    line is left completely untouched and nothing analogous is ever added for `PRIVATE_MEDIA_ROOT`. This is the
+    load-bearing security property: the only way to reach a byte under this path is through the signed,
+    scoped, authenticated view above.
+  - `RECORDING_ACCESS_SALT = 'calls.recording-access'` — a plain string constant (like `EMAIL_CHANGE_SALT` in
+    `apps/accounts/views/Auth.py` and `SLOT_TOKEN_SALT` in `apps/scheduling/availability.py`), NOT an
+    `env(...)`-read value — a signing salt is a namespacing string, not a secret, and the three existing salts
+    in this codebase are all plain constants.
+  - **Reuse the EXISTING `RECORDING_SIGNED_URL_TTL` setting (`env_int('RECORDING_SIGNED_URL_TTL', 300)`,
+    already declared in `config/settings.py`) as the signed URL's `max_age` — do NOT invent a second setting
+    (e.g. `RECORDING_URL_MAX_AGE`) for the same concept.** This setting was forward-declared before any view
+    used it; 5.4 is its first consumer. Confirm by grep that nothing under `apps/` currently references it
+    before this pass, so wiring it up here is genuinely new, not a duplicate of dead code.
+  - `RECORDING_RETENTION_DAYS` (existing) and `RECORDING_STORAGE_BUCKET` (existing) — **NOT used by this
+    pass.** The former stays a platform-wide default (the per-row `metadata.retention_days` is what this
+    sub-module displays, per the model's own docstring: "the policy that applies is the policy at the time of
+    the call"); the latter is a future cloud-storage adapter's territory (Module 3 / a `runtime` storage
+    adapter), not this pass's local `FileSystemStorage`. Note both explicitly in a code comment so a later
+    reader does not "helpfully" wire them in and create the exact drift this sub-module's own design avoids.
+- [ ] `config/urls.py` / `config/asgi.py` — **not touched** beyond the confirmation above. Not a brand-new-app
+  run; `apps.calls` is already installed and routed by 5.1.
+- [ ] **First run of all** — N/A, already satisfied by a prior run.
+
+## Templates (`templates/calls/calllog/callsession/detail.html` extended; no new page; one partial bugfixed)
+
+- [ ] `templates/partials/_audio_player.html` — the waveform two-lane fix above. Context contract unchanged
+  (`session`, `recording_url`, `consent_basis_label`, `retention_date`, `can_download`).
+- [ ] `templates/partials/_transfer_outcome.html` — **ZERO changes.** Already carries the `attempts` 2+-guarded
+  `<ol>` trail, the five-value result→badge map with an `{% else %}` fallback, and renders `destination` only
+  through `phone_e164`. Confirmed its context key is `transfer=`, not `session=` — the include line below must
+  read `with transfer=obj.transfer`.
+- [ ] `templates/calls/calllog/callsession/detail.html` — inside the existing marked `{% comment %}` block
+  (currently reading *"Still to land in this column: 5.4 the recording player and the transfer outcome
+  (partials/_audio_player.html, partials/_transfer_outcome.html)"*), add, in order:
+  1. `{% include "partials/_audio_player.html" with session=obj recording_url=recording_url
+     consent_basis_label=obj.metadata.consent_basis|consent_basis_label retention_date=retention_date
+     can_download=can_download %}` — note `session=obj`, matching the same "page context key is `obj`, partial
+     contract key is `session`" pattern 5.2's transcript include already established; get this wrong and the
+     partial silently renders its empty branch rather than erroring (Django resolves an undefined variable to
+     falsy), exactly the gotcha 5.2's own comment already documents in this file.
+  2. `{% include "partials/_transfer_outcome.html" with transfer=obj.transfer %}` — the entire wiring task for
+     this panel; the partial needs no other change.
+  - Update the comment block's own text to remove 5.4 from the "still to land" list — **Module 5 is then
+    COMPLETE**, and the comment should say so plainly (no sub-module left unnamed).
+- [ ] No `form.html` — this is a view sub-module; no create/edit/delete surface exists or is added.
+
+## Verify
+
+- [ ] `makemigrations calls --check` → **"No changes detected"** — the acceptance criterion for this
+  sub-module's shape.
+- [ ] `seed_calls --flush` ×2 (idempotent on the second run with no `--flush`) — the flushed run is required to
+  pick up the seeder's content edit (below) on an already-seeded dev database; confirm the second, non-flushed
+  run creates 0 new rows.
+- [ ] `manage.py check` — no new issues; confirm `PRIVATE_MEDIA_ROOT` exists on disk (create it, or confirm the
+  storage/view create it on first write — a management check should not fail merely because the directory is
+  empty on a fresh checkout).
+- [ ] `PROVIDER_MODE=fake` asserted — trivially true; this pass adds no provider adapter and imports none.
+- [ ] `pytest apps/calls` — new file `apps/calls/tests/test_recording_transfer_views.py` (mirrors
+  `test_transcript_views.py`'s / `test_event_log_cost_views.py`'s naming; reuses `make_call_session`,
+  `session_a1`, `session_a2`, `session_b` from `conftest.py`):
+  - **Waveform regression test (the bug this pass fixes)**: a `make_call_session(..., recording_blob='private/
+    calls/x/y/z.mp3', waveform_peaks={'caller': [...12 floats...], 'bot': [...12 floats...], 'bins': 12})`'s
+    detail page returns **200**, not 500, and the response contains 12+12 `<span style="--peak:` occurrences
+    (proving both lanes render, not one collapsed/absent lane) — the direct regression test for
+    `TypeError: 'int' object is not iterable`.
+  - **Signed-media route**: a valid token (minted the same way the view mints it, via `signing.dumps({'session_id':
+    obj.pk}, salt=RECORDING_ACCESS_SALT)`) for an IN-SCOPE session with a real file at
+    `PRIVATE_MEDIA_ROOT/<path>` (write a tiny fixture file in the test, in a temp dir override of
+    `PRIVATE_MEDIA_ROOT`) returns 200 and streams bytes matching the fixture.
+  - An **expired** token (`signing.dumps(..., salt=RECORDING_ACCESS_SALT)` combined with
+    `max_age=0`/monkeypatched `RECORDING_SIGNED_URL_TTL` or a token timestamp forced into the past) → 404.
+  - A **tampered** token (flip one character) → 404.
+  - A valid token for a session belonging to **another tenant** (`session_b`) → 404, even though the signature
+    itself verifies (proves gate 2, the `location_sessions` re-scope, is independent of gate 1, the signature).
+  - A valid token for a session at **another location of the SAME tenant** (`session_a2`, `client_a` active at
+    A1) → 404.
+  - A valid, correctly-scoped token but **no file at the path** → 404, not 500 (the honest seeded-but-fileless
+    demo case — proves `recording_exists` gates the response before `FileResponse` is ever constructed).
+  - **Anonymous** request to the recording route → 302 to login (never 200, never a bare 404 that would leak
+    "this pk exists" to a logged-out client differently from a real 404 — confirm the redirect, not a 404,
+    fires first for the anonymous case, matching every other view in this module).
+  - The detail page for a session with `recording_blob` set but no file passes `recording_url=None` to the
+    partial and renders "This recording is no longer available" — not a broken `<audio src="">`.
+  - The transfer outcome panel renders (with the correct badge colour and `phone_e164`-formatted destination)
+    for a session with a non-empty `transfer` dict, and is **absent entirely** (no "Transfer outcome" card) for
+    one with `transfer={}` — a positive AND a negative assertion, matching the partial's own `{% if transfer %}`
+    guard.
+  - The `attempts` trail renders as an `<ol>` of 2+ entries, each with its own destination + result badge, for
+    a `transfer` dict carrying an `attempts` list of length ≥2; is **absent** for a single-attempt or
+    no-`attempts` transfer (matching the partial's `{% if transfer.attempts and transfer.attempts|length > 1
+    %}` guard exactly).
+  - `consent_basis_label` unit tests: `'announced_notice'` → the human label; `'not_recorded'` → the human
+    label; an unrecognized value (e.g. `'one_party_consent'`, a value the filter has never seen) → returned
+    unchanged rather than raising or becoming empty; `None`/`''` → `''`.
+  - **Cross-tenant** and **cross-location** pk on the (unchanged) `callsession_detail` route still 404 —
+    regression check, since this pass adds new PII-adjacent context (`recording_url` itself is a capability URL
+    to a private audio file) to a page whose scoping code this pass does not touch, but which now has a higher
+    consequence if that scoping ever regressed.
+- [ ] Twilio signature / idempotency — N/A, 5.4 ships no webhook.
+- [ ] Websocket connect/reject — N/A, 5.4 ships no consumer.
+- [ ] `temp/` smoke sweep as `admin_acme` (password `navai-demo-2026`, confirmed from
+  `apps/accounts/management/commands/seed_accounts.py`): each of the 6 recorded sessions' detail pages render
+  both waveform lanes without error and show the "not currently available" message (no real bytes exist unless
+  the optional fixture below is added) with the correct consent badge and retention date; each of the 5
+  transfer-bearing sessions' detail pages show the correct outcome badge and destination; Downtown's
+  `transferred` call (post-`--flush`) shows the new two-attempt trail (`+13125550101` no-answer →
+  `+13125550102` connected); a non-recorded, non-transferred session (e.g. Riverside's in-progress row) shows
+  neither card; no `{#`/`{% comment` leaks; sidebar shows `5.4` Live under Module 5, contributing no new link
+  row (the empty-dict entry) — **and Module 5's build-state table in the skill is now entirely BUILT.**
+
+## Seeder edits (content only, no schema change)
+
+- [ ] `apps/calls/management/commands/seed_calls.py` — `_build_transfer()` gains an optional pass-through for
+  an `attempts` key on the per-row spec dict (defaulting to omitted, exactly like every other optional key this
+  function already handles):
+  ```python
+  result = {
+      'result': transfer['result'],
+      'reason': transfer['reason'],
+      'destination': TRANSFER_DESTINATIONS[location_slug],
+      'initiated_at': (started_at + timedelta(seconds=transfer['offset'])).isoformat(),
+      'duration_seconds': transfer['duration_seconds'],
+  }
+  if 'attempts' in transfer:
+      result['attempts'] = transfer['attempts']
+  return result
+  ```
+- [ ] Add `'attempts'` to Downtown's SECOND call spec (index 2, the `transferred`-status, `connected`-result
+  row) in `DEMO_CALL_SESSIONS['downtown']` — using Downtown's own REAL seeded primary/secondary transfer
+  numbers, confirmed from `apps/agents/management/commands/seed_agents.py`
+  (`transfer_phone_number='+13125550101'`, `transfer_secondary_number='+13125550102'`):
+  ```python
+  'transfer': {
+      'result': 'connected',
+      'reason': 'Caller asked for the front desk about an invoice',
+      'offset': 20,
+      'duration_seconds': 118,
+      'attempts': [
+          {'destination': '+13125550101', 'result': 'no_answer'},
+          {'destination': '+13125550102', 'result': 'connected'},
+      ],
+  },
+  ```
+  This is precisely the *"primary rang out, secondary answered"* path the model's own docstring names as the
+  reason the `attempts` list exists — the only seeded row where a secondary number is genuinely configured.
+- [ ] `_build_waveform()` and `_build_metadata()` — **no structural change.** Confirmed by direct read: the two
+  12-element `caller`/`bot` arrays are already correct data (the bug was in the partial's consumption, not the
+  seeder's production), and `consent_basis`/`consent_announced`/`retention_days` are already written correctly
+  and differently for recorded vs. unrecorded rows. Nothing here needs editing for the consent badge or the
+  retention date to render correctly.
+- [ ] **Optional, not required this pass**: a shared placeholder audio fixture (a few seconds, a few KB, silent
+  or tone) checked in under a location `seed_calls` points every `recorded: True` row's `recording_blob` at (the
+  SAME file for all six, not a distinct one per row — there is no real audio pipeline to synthesize one). Build
+  only if there is appetite for a fuller demo; the existence-check-and-degrade-gracefully behaviour is the
+  REQUIRED baseline and is correct with or without it. If added: place it under `PRIVATE_MEDIA_ROOT` via a
+  small one-time copy step in the seeder (not committed inside `PRIVATE_MEDIA_ROOT` itself, since that directory
+  should not need to exist in version control), and note in the seeder's own stdout that it did so.
+- [ ] Print, after seeding: which rows now demonstrate the `attempts` trail, matching this module's existing
+  "print login instructions + what to look at" convention.
+
+## Close-out
+
+- [ ] Review agents, in order: `code-reviewer` (confirm the three-gate order in `callsession_recording_view` —
+  signature, then re-scope, then session_id match — is exactly that order, cheapest-and-safest first; confirm
+  `recording_exists` is checked before `FileResponse` is ever constructed; confirm no bare `except Exception`
+  swallows a real bug alongside `signing.BadSignature`) → `explorer` (confirm no stray `views/CostEventLog/`-
+  shaped duplicate folder; confirm `PRIVATE_MEDIA_ROOT` truly has no `static()`/`urls.py` mapping anywhere) →
+  `frontend-reviewer` (confirm the waveform fix actually renders two visually distinct lanes, not one lane
+  drawn twice; confirm `--peak` receives an integer-like percentage, not a bare `0.12`; confirm the
+  `_transfer_outcome.html` include passes `transfer=`, not `session=`) → `performance-reviewer` (confirm the
+  new context computation in `callsession_detail_view` — one `recording_exists()` disk stat at most, no new
+  query) → `realtime-reviewer` (expected to find nothing — no realtime surface; confirm `FileResponse` streaming
+  is not itself doing anything synchronous-on-the-event-loop-adjacent, though this view is a plain sync Django
+  view outside any consumer) → `qa-smoke-tester` → `security-reviewer` (this pass's real center of gravity:
+  confirm the three-gate signed-URL design actually rejects each of tampered/expired/cross-tenant/cross-location
+  independently rather than only in combination; confirm `recording_blob` is never rendered or logged raw
+  anywhere, including in the new view's error paths; confirm `PRIVATE_MEDIA_ROOT` is unreachable by any other
+  route in the whole URLconf, not just the ones this pass added) → `test-writer`.
+- [ ] **UPDATE** `.claude/skills/calls/SKILL.md` in place (5.1 authored it; do NOT re-author) — flip the
+  Build-state table's `5.4` row from "not built" to **BUILT**, and add the closing note that **Module 5 is now
+  fully built** (all 4 sub-modules); document the new route
+  (`calls:callsession_recording` — `/calls/<int:pk>/recording/`) under Routes, explicitly noting it is embedded
+  in the detail page rather than a sidebar destination; document `apps/calls/storage.py` and the three new
+  settings (`PRIVATE_MEDIA_ROOT`, `RECORDING_ACCESS_SALT`, and the now-consumed `RECORDING_SIGNED_URL_TTL`)
+  under a Conventions or Realtime-adjacent subsection; document `consent_basis_label` alongside the other
+  `ui.py` filters; update the "5.2 added a route, 5.3 added none" Common Tasks note to name 5.4 as the SECOND
+  route-adding example and explain why (a private file behind a signature check cannot be served from inside a
+  template); update Sidebar Wiring's code block to include `'5.4': {}`.
+- [ ] README — update only if it already enumerates per-module page status; if it tracks a "sub-modules built"
+  count, this is the 4th of 4 for Module 5 and the point where Module 5 as a whole flips to complete.
+
+## Later passes / deferred
+
+Carried over verbatim from `research-calls-5.4.md`'s own Belongs-to-siblings / Out-of-scope / Deferred sections:
+
+- **Transcript-position sync** (click a transcript line to seek/highlight the active line during playback,
+  Dialpad's "hover to jump" pattern) — a genuine differentiator, buildable with a small scoped `<script>` or
+  `static/calls/recording-sync.js` reading each transcript entry's existing `offset` field against the
+  `<audio>` element's `currentTime`/`timeupdate` event. Not required by any of the four REQUIRED bullets;
+  parked as a follow-up polish pass, not scoped into this sub-module's backend or template work.
+- **A logged, queryable `consent_announced` event inline on the recording card** — the event log (5.3, already
+  built) is where that `logs` entry renders once Module 3 writes one; no duplicate surface on the recording
+  card itself.
+- **A `recording_usd` cost-breakdown key** — a real gap in the current four-key `cost_breakdown` shape
+  (`stt_usd`/`llm_usd`/`tts_usd`/`telephony_usd`, no recording-storage line), but adding a field to `usage`
+  entries is Module 3's/5.3's write-path decision, not this VIEW sub-module's to make.
+- **X-Accel-Redirect / X-Sendfile offload** — revisit only if a production topology puts nginx (or Apache's
+  `mod_xsendfile`) in front of Daphne; not needed for the current dev/XAMPP + Daphne-direct topology, and the
+  `recording_url` contract does not change if it is added later.
+- **Per-caller/per-tier download permission gating** (only `owner`/`manager` may download; `staff` streams
+  inline only) — not named by any of the four bullets; `can_download` is unconditionally `True` this pass,
+  revisit only if a later access-control pass asks for it explicitly.
+- **Cloud storage adapter selection / S3 presigned URLs** (Vapi's custom-storage option) — `apps/runtime/
+  providers/` is Module 3's territory; this pass ships the Django-native signed-serve-view that works today
+  and notes the S3-adapter migration path (a provider-minted presigned URL replacing this view's own signing,
+  with zero template change either way) as a future evolution, not built now.
+- **A human-reviewed call-quality workflow** (Smith.ai/Ruby) — no reviewer role or QA feedback loop among the
+  seven capabilities; a tenant reading their own call's recording is not a vendor QA process.
+- **Warm transfer** (a human pre-screening before connecting) — this product's transfer is an explicit COLD
+  redirect per the runtime skill's §9; the outcome panel narrates that faithfully and must not imply warm-
+  transfer semantics it cannot produce.
+- **Per-component/percentile latency, cross-call analytics dashboards, network-quality (QoS) monitoring** — out
+  of scope for the product entirely (outside the seven capabilities), carried over from 5.3's own deferred list
+  for completeness since this is Module 5's last sub-module.
+
+## Review notes
+
+(filled in at the end)
