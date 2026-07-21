@@ -353,7 +353,16 @@ TTS_SAMPLE_RATE = env_int('TTS_SAMPLE_RATE', 24000)
 
 RECORDING_STORAGE_BUCKET = env('RECORDING_STORAGE_BUCKET', 'navai-recordings-dev')
 RECORDING_RETENTION_DAYS = env_int('RECORDING_RETENTION_DAYS', 30)
-RECORDING_SIGNED_URL_TTL = env_int('RECORDING_SIGNED_URL_TTL', 300)
+# Long enough to outlast the recording it serves. The URL is minted at page load
+# and its clock starts then, not at first play — so a 300s TTL would 404 mid-stream
+# on any recording over ~5 min (calls run to a 15-min hard cap) or one left idle
+# before the user presses play, and the <audio> element would just stop with no
+# visible reason. 30 min covers the longest call plus generous dwell. This lengthens
+# the token's life, not the authorisation: the signature was never the only gate —
+# a leaked URL still needs the recipient to be logged in AND scoped to the same
+# tenant and location — so trading token freshness for playing a real recording to
+# the end is the right balance.
+RECORDING_SIGNED_URL_TTL = env_int('RECORDING_SIGNED_URL_TTL', 1800)
 
 # Where call recordings live. DELIBERATELY OUTSIDE `MEDIA_ROOT` — `MEDIA_ROOT` is
 # reachable at `MEDIA_URL`, so a recording under it would be a public, guessable
