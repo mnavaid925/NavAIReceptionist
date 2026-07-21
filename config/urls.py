@@ -17,6 +17,9 @@ urlpatterns = [
     path('agent/', include('apps.agents.urls')),
     path('schedule/', include('apps.scheduling.urls')),
     path('calls/', include('apps.calls.urls')),
+    # Module 3 — Call Runtime. The Twilio voice webhook lives at /runtime/voice/,
+    # the exact URL Module 2's live test call already targets.
+    path('runtime/', include('apps.runtime.urls')),
     path('', include('apps.accounts.urls')),
 ]
 
