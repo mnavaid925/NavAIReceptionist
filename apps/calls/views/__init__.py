@@ -13,8 +13,9 @@ READING surfaces over the same row — never a writer.
 
 Sub-module folders, in build order:
 
-* `CallLogList/`         — 5.1  call log list + detail
-* `CallDetailTranscript/` — 5.2  the printable transcript view
+* `CallLogList/`            — 5.1  call log list + detail
+* `CallDetailTranscript/`   — 5.2  the printable transcript view
+* `RecordingTransferOutcome/` — 5.4  the signed-media recording serve view
 """
 from apps.calls.views.CallDetailTranscript.CallSessions import (
     callsession_transcript_print_view,
@@ -23,9 +24,13 @@ from apps.calls.views.CallLogList.CallSessions import (
     callsession_detail_view,
     callsession_list_view,
 )
+from apps.calls.views.RecordingTransferOutcome.CallSessions import (
+    callsession_recording_view,
+)
 
 __all__ = [
     'callsession_list_view',
     'callsession_detail_view',
     'callsession_transcript_print_view',
+    'callsession_recording_view',
 ]
