@@ -4253,6 +4253,67 @@ Carried over verbatim from `research-calls-5.4.md`'s own Belongs-to-siblings / O
   of scope for the product entirely (outside the seven capabilities), carried over from 5.3's own deferred list
   for completeness since this is Module 5's last sub-module.
 
-## Review notes
+## Review notes — 5.4 Recording & Transfer Outcome (and Module 5 close-out)
 
-(filled in at the end)
+The most security-sensitive view sub-module, and the one with real new backend — a signed-media serve route,
+a private storage module, HTTP Range. Still ZERO models (`makemigrations --check` clean). ~40 commits. Final:
+**759 tests passing** (679 before, 80 new), all serve-view gates and IDOR classes proven, Module 5 complete.
+
+### The recurring lesson, at its sharpest
+
+Reviewers caught a false claim in a comment of mine in **every** sub-module this run; 5.4 had TWO, both from
+me, both about the framework behaving how I *assumed* rather than how it does:
+
+* My serve-view docstring said `FileResponse` "answers HTTP Range natively." Django 4.2's does not (a `Range`
+  request gets the full 200 body). The "waveform synced to transcript position" bullet needs seeking, so the
+  fix was to implement Range, not soften the claim.
+* My storage comment said `base_url=None` "disables `url()`." Django falls back to `MEDIA_URL`, so `.url()`
+  would have handed back a public-looking `/media/…` link — the exact exposure the storage exists to prevent.
+  Fixed by overriding `url()` to raise, making the guarantee real.
+
+The pattern is consistent enough to name: **my confident explanatory comments are where the bugs hide, because
+I write down what I intended and don't re-verify the framework actually does it.** The reviewers are what close
+that gap, every time — and the fix each time was to make the code true, not the comment quieter.
+
+### Review findings applied
+
+* **`code-reviewer`** — the check-then-open TOCTOU (`open_recording` uncaught → 500 on a retention-race
+  delete, now caught → 404); no `PRIVATE_MEDIA_ROOT` test override (tests would write into the real tree); a
+  non-list `waveform_peaks.caller` would 500 the same crash class the `.bins` fix closed (added `ensure_list`);
+  a dead `?dl=1` branch (wired the download link); and local imports lifted to module scope.
+* **`performance-reviewer`** — `FileResponse` has no Range (see above); the serve view carried
+  `location_sessions`'s `booked_appointments` prefetch it never reads — dropped via `.prefetch_related(None)`,
+  2 queries → 1, without forking the one audited scoping surface.
+* **`realtime-reviewer`** — `transfer.destination` was the configured PRIMARY, but on the fell-through row that
+  is the number that rang out, so the demo said "Connected · <the-number-that-didn't-answer>"; now the number
+  that produced the result. Also: the 300s TTL was shorter than a 15-min call could run, 404ing mid-playback
+  (raised to 1800s); and `storage.py` promised Module 3 a write path but exported only readers (`save_recording`
+  added, traversal-guarded).
+* **`security-reviewer`** — three reproducible Range/containment issues on my own code: an inverted range
+  (`bytes=10-5`) produced a 206 with a negative `Content-Length` a proxy could desync on (now 416); the 206
+  generator leaked its file handle on an aborted scrub (`GeneratorExit` skipped the post-loop close → moved to
+  a `finally`); and `SuspiciousFileOperation` (not an `OSError`/`ValueError`) wasn't caught in the storage
+  helpers, so containment held only by caller order (now a property of the functions).
+* **`frontend-reviewer`** (no findings) and **`qa-smoke-tester`** (58/58): clean.
+
+### Deliberately declined
+
+* **No fake audio bytes in the seeder.** The waveform (now fixed) and consent/retention render, but the audio
+  shows "recording unavailable" — because on a fake-provider database no real call was recorded. Manufacturing
+  placeholder bytes would fake provider output, which the whole product refuses to do; a recording is the one
+  artifact a real call produces. The signed-serve path is proven by tests with a temp file instead.
+
+### Carried forward to Module 3
+
+The recording and transfer WRITE contracts are now correct for the runtime to copy: `save_recording` for the
+recorder, `metadata.consent_basis`/`retention_days` (a non-empty `recording_blob` requires a consent basis —
+enforce in the write path), and `transfer.{destination, attempts}` with `destination` = the number that
+connected. All identity server-owned (Invariant 3): the transfer destination is always a configured number,
+never caller speech.
+
+### Module 5 is complete
+
+Four sub-modules, one model, `CallSession`, with every JSON column now surfaced: transcript + analysis (5.2),
+event log + tool-call trace + cost (5.3), recording + transfer outcome (5.4), over the list + detail 5.1
+shipped. Invariant 2 held the whole way — no second table, and each view sub-module's `makemigrations --check`
+came back clean. Only Module 3, the service module that WRITES all of this, remains.
