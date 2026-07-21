@@ -219,3 +219,8 @@ __marimo__/
 
 # Local scratch / reference material — not part of the product
 temp/
+
+# Private call recordings (5.4). PII audio, served only through the signed view;
+# never committed. Module 3's recorder writes here at runtime.
+private_media/
+media/
