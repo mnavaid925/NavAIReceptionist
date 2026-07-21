@@ -12,22 +12,22 @@ setup, calendar and staff are configured **per location**.
 
 > **Build state — read this before trusting any path below.**
 >
-> **21 of the 26 sub-modules are built.** The remaining 5 (all of Module 3) render as greyed-out roadmap rows in the
-> sidebar, which reflects the truth honestly. `LIVE_LINKS` in `apps/accounts/navigation.py` is the
-> build-state ledger — a sub-module is built if and only if it has an entry there.
+> **22 of the 26 sub-modules are built.** The remaining 4 (3.2–3.5, the rest of Module 3) render as greyed-out
+> roadmap rows in the sidebar, which reflects the truth honestly. `LIVE_LINKS` in `apps/accounts/navigation.py` is
+> the build-state ledger — a sub-module is built if and only if it has an entry there.
 >
 > | Module | Built | Not built |
 > |---|---|---|
 > | **0 · Accounts & Access** (`apps/accounts`) | 0.1 auth & session · 0.2 change password/email · 0.3 user directory & profile · 0.4 location switcher | — |
 > | **1 · Business & Locations** (`apps/tenants`) | 1.1 business settings · 1.2 location directory · 1.3 staff assignment · 1.4 provider working hours | — |
 > | **2 · Agent Setup & Telephony** (`apps/agents`) | 2.1 agent setup · 2.2 Twilio connection · 2.3 transfer settings · 2.4 test call | — |
-> | **3 · Call Runtime** (`apps/runtime`) | — | **the whole module.** The app does not exist. `config/asgi.py`'s `websocket_urlpatterns` is still `[]`, waiting on `apps/runtime/routing.py` |
+> | **3 · Call Runtime** (`apps/runtime`) | **3.1 inbound webhook & call resolution** — the `/runtime/voice/` webhook (signature-verified per-location, dialed-number → tenant+location, idempotent `CallSession` on `provider_call_sid`, unmapped/disabled spoken decline) issuing `<Connect><Stream>` TwiML with an opaque signed stream token, plus a runtime diagnostics page | 3.2 media stream & turn loop · 3.3 tools & dispatcher · 3.4 transfer execution · 3.5 recording, teardown & diagnostics. `config/asgi.py`'s `websocket_urlpatterns` is still `[]`, waiting on `apps/runtime/routing.py` (3.2) |
 > | **4 · Calendar & Bookings** (`apps/scheduling`) | **4.1 contact directory · 4.2 services & resources · 4.3 availability & booking · 4.4 calendar views · 4.5 bookings & callbacks** — the whole module | — |
 > | **5 · Call Logs** (`apps/calls`) | **5.1 call log list · 5.2 call detail & transcript · 5.3 event log & cost · 5.4 recording & transfer outcome** — the whole module: `CallSession` and every reading surface over its JSON columns, plus a signed-media serve route for private recordings | — |
 >
 > Also built: `config/` (settings, ASGI + Channels, urls), the design system
 > (`static/css/theme.css`, `static/js/layout.js`, `templates/base.html` + partials), and the test suite
-> (`conftest.py` + `apps/scheduling/tests/` + `apps/calls/tests/`, **759 passing**).
+> (`conftest.py` + `apps/scheduling/tests/` + `apps/calls/tests/` + `apps/runtime/tests/`, **806 passing**).
 >
 > **Build order note.** Module 3 is numbered before 4 and 5 but depends on both — it writes
 > `calls.CallSession` and `scheduling.Appointment`/`CallbackRequest`/`Contact`, and reads `Service` and
