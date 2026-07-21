@@ -4317,3 +4317,295 @@ Four sub-modules, one model, `CallSession`, with every JSON column now surfaced:
 event log + tool-call trace + cost (5.3), recording + transfer outcome (5.4), over the list + detail 5.1
 shipped. Invariant 2 held the whole way — no second table, and each view sub-module's `makemigrations --check`
 came back clean. Only Module 3, the service module that WRITES all of this, remains.
+
+---
+# Sub-module 3.1 — Inbound Webhook & Call Resolution (Module 3: Call Runtime, `runtime`) — plan from research-runtime-3.1.md (2026-07-22)
+
+## Shape: SERVICE — brand-new app `apps/runtime`, ZERO new models, ZERO migrations
+
+Module 3 has no app yet (`Glob("apps/runtime/**")` returns nothing) — this is the first sub-module of the last
+unbuilt module and the **only** run in this catalog that both scaffolds a brand-new app and builds its first
+sub-module in one pass. 3.1 is the HTTP half of the live-call path: answer Twilio's inbound POST, resolve
+tenant + location from the dialed number, verify the per-location signature, idempotently create the
+`calls.CallSession` row, mint a signed stream token, and hand back `<Connect><Stream>` TwiML — before any audio,
+any tool, any LLM turn exists. It writes exactly one already-existing row and reads exactly one other; it invents
+neither. `makemigrations runtime` reporting **"No changes detected"** is the acceptance criterion for this shape,
+identical in spirit to Module 5's view sub-modules, even though this one also ships new Python packages.
+
+Binding inputs, read and not to be contradicted: the approved plan
+`C:\Users\user\.claude\plans\groovy-wandering-pillow.md`, and `.claude/skills/voice-agent-runtime/SKILL.md` §2
+(webhook ingress), §12 (providers/`PROVIDER_MODE`), §14 (what the runtime writes), §15 (observability).
+
+## Models — NONE (service sub-module). Tables touched, both grep-verified against the real code:
+
+- **READ** `agents.AgentSetting` (`apps/agents/models/AgentConfiguration/AgentSettings.py`) —
+  `inbound_phone_number` (`CharField`, `null=True, blank=True, unique=True`, globally unique, normalised to
+  `None` in `clean()`/`save()`), `enabled` (bool), `twilio_account_sid`, `twilio_auth_token` (`EncryptedCharField`,
+  decrypts in Python via `from_db_value`), `voice_provider` (`VOICE_PROVIDER_CHOICES`: `live`/`google`/`gemini`),
+  `readiness_issues()` / `is_ready`. Resolved with `AgentSetting.objects.filter(inbound_phone_number=<To>).first()`
+  — `.filter().first()`, not `.get()`, so an unmapped number is a clean `None` rather than a caught
+  `DoesNotExist`.
+- **WRITE (get_or_create only)** `calls.CallSession` (`apps/calls/models/CallLogList/CallSessions.py`) —
+  `provider_call_sid` (`unique=True`, confirmed — the idempotency key), `tenant`, `location` (via
+  `TenantLocationOwned`), `from_number`, `to_number` (both `db_index=True`), `mode` (mirrors
+  `AgentSetting.voice_provider` value-for-value: `live`/`google`/`gemini`), `status` (default
+  `STATUS_IN_PROGRESS`), `started_at`. No `ModelForm` exists for this model by design (5.1 shipped list+detail
+  only) — 3.1 is the model's first writer, and it writes through `get_or_create`, never a form.
+- No twelfth model invented. `scheduling.Contact` is untouched — no caller is identified before the stream opens.
+
+## Open decision — disabled-but-mapped number: write a minimal `failed` CallSession, or zero writes?
+
+Research flagged a genuine fork the approved plan does not resolve either way. State it explicitly rather than
+silently picking a side while writing code:
+
+- [ ] **Default for this pass (ship this unless a review agent requires the nuance): treat "unmapped" and
+  "disabled" identically — decline TwiML, **zero writes**, structured log line only.** Simpler, matches the
+  approved plan's stated order (`resolve → decline (TwiML, no side effect) if unmapped/disabled → verify
+  signature → get_or_create`), and defers "was this call missed because the agent was off" reporting to a later
+  pass rather than half-building it now.
+  - Tradeoff being accepted: a tenant who disabled their agent gets no `CallSession` row for the missed call, so
+    that location's call history under-reports "we were paused when someone called." Research's alternative
+    (write one minimal `status='failed'` `CallSession`, no transcript, for the disabled-but-known case only,
+    verifying the signature first since a tenant/location IS resolvable there) is the documented fallback if
+    `code-reviewer` or `qa-smoke-tester` calls the gap out — implement it only then, and only for the
+    disabled case (the truly-unmapped case still has no tenant/location to satisfy the model's non-nullable FKs,
+    so it can never get a row).
+  - Whichever branch ships, note it in `webhooks.py`'s module docstring so a later sub-module does not "fix" the
+    other one by accident.
+
+## Backend (apps/runtime/ — brand-new app, mirrors apps/calls' package conventions)
+
+- [ ] `apps/runtime/__init__.py`
+- [ ] `apps/runtime/apps.py` — `class RuntimeConfig(AppConfig): default_auto_field = 'django.db.models.BigAutoField'; name = 'apps.runtime'; label = 'runtime'; verbose_name = 'Call Runtime'`
+- [ ] `apps/runtime/migrations/__init__.py` — empty; no models means `makemigrations runtime` must report
+  "No changes detected"
+- [ ] `apps/runtime/admin.py` — stub with a docstring explaining why (no models this app owns to register;
+  `AgentSetting`/`CallSession` admins already live in `apps.agents`/`apps.calls`)
+- [ ] `apps/runtime/providers/__init__.py`
+- [ ] `apps/runtime/providers/base.py` — `PROVIDER_MODE` resolution helpers: `is_live()`, a `LiveModeError`
+  exception, and the fail-safe rule that anything not exactly `'live'` resolves to fake/sandbox. Docstring notes
+  that 3.1 itself never dials out (it only answers), so `PROVIDER_MODE` gates nothing about the webhook's own
+  control flow — its role here is the safety assertion, not a live/fake branch in this sub-module's own code
+  (Module 2's `telephony.py` test-call and Module 3.4's transfer redirect are the actual dial-out paths this
+  guards)
+- [ ] `apps/runtime/providers/telephony.py` — pure, provider-agnostic helpers, deterministic and networkless
+  regardless of `PROVIDER_MODE` (confirmed testable under `fake` with a test secret per research):
+  - `webhook_public_url(request)` → `settings.TWILIO_WEBHOOK_BASE_URL + request.path` — the exact string both
+    the view and the tests sign over; a tunnel URL drifting from this is the single most common Twilio
+    signature-verification failure per the research
+  - `verify_twilio_signature(url, params, signature, auth_token)` → wraps `twilio.request_validator.RequestValidator`
+    (HMAC-SHA1 over the exact URL + sorted POST params, base64), `hmac.compare_digest` semantics inherited from
+    the SDK
+  - `build_stream_twiml(ws_url, params)` → `VoiceResponse()` + `Connect()` + `Stream()`, opaque `<Parameter>`
+    children carrying only the signed stream token — never `tenant_id`/`location_id`/`session_id` in cleartext
+  - `build_decline_twiml(message)` → `VoiceResponse()` + `Say(message)` + `Hangup()`, one platform-level constant
+    decline string reused for both the unmapped and the disabled case (a configurable per-location message is
+    explicitly deferred — see Later passes)
+  - **Deliberately NO `get_backend()` in this module** — `apps/agents/telephony.py:get_backend()` already
+    import-guards `from apps.runtime.providers.telephony import get_backend` inside a
+    `try/except (ImportError, ModuleNotFoundError)`; omitting the name here keeps that import failing exactly as
+    it does today, so Module 2's `FakeTelephonyBackend`/`LiveTelephonyBackend` and its test-call/connection-check
+    views are completely unchanged by this pass. The full backend handoff (`redirect_call`/`hangup`) is 3.4's.
+    Document this omission in the module docstring — it is intentional, not an oversight a reviewer should "fix"
+- [ ] `apps/runtime/providers/tokens.py` — `mint_stream_token(session_id, tenant_id, location_id)` /
+  `verify_stream_token(token)` via `django.core.signing` (`dumps`/`loads`, a dedicated salt, short `max_age`).
+  Minted here; redeemed by 3.2's consumer in `connect()`, never by this sub-module — 3.1 mints and never verifies
+  its own token in this pass (the round-trip test below verifies `mint`→`verify` directly, not through a live
+  consumer, since 3.2 does not exist yet)
+- [ ] `apps/runtime/webhooks.py` — `voice_webhook(request)`: `@csrf_exempt` (paired with mandatory signature
+  verification — never one without the other), `POST`-only (`require_http_methods(['POST'])`), returns
+  `application/xml`, never a redirect. Order, exactly as the approved plan states:
+  1. Resolve `request.POST.get('To')` (fallback `Called`) → `AgentSetting.objects.filter(inbound_phone_number=...).first()`
+  2. No row, **or** row with `enabled=False` → `build_decline_twiml(...)`, **200**, **zero writes** (see the Open
+     decision above for the disabled branch's default)
+  3. `verify_twilio_signature(webhook_public_url(request), request.POST.dict(), request.headers.get('X-Twilio-Signature', ''), setting.twilio_auth_token)`
+     → invalid or missing → **403**, zero writes, before the `CallSession` table is touched at all
+  4. `CallSession.objects.get_or_create(provider_call_sid=request.POST.get('CallSid'), defaults={'tenant': setting.tenant, 'location': setting.location, 'from_number': request.POST.get('From', ''), 'to_number': request.POST.get('To', ''), 'mode': setting.voice_provider, 'status': CallSession.STATUS_IN_PROGRESS, 'started_at': timezone.now()})`
+     — race-safe: a losing concurrent writer catches `IntegrityError` on the unique `provider_call_sid` and
+     re-fetches rather than trusting a bare `.exists()` check first
+  5. `mint_stream_token(session.id, setting.tenant_id, setting.location_id)` → `build_stream_twiml(...)`, **200**
+  6. A **redelivery** of the same `CallSid` (get_or_create returns `created=False`) returns the **same** TwiML
+     rather than minting a second stream token — confirms "session already exists" is a valid, expected outcome,
+     not an error path
+  - A closed reason-code constant list — `unmapped`, `disabled`, `signature_invalid`, `duplicate_delivery`,
+    `provider_error` — used **only** in structured `logging` calls at each termination point in this function
+    (never surfaced as a new UI list this pass — there is no model to query it from without inventing one; the
+    *full* per-attempt diagnostics list belongs to 3.5)
+  - Logs **no** caller number, no raw POST body, no signature value at INFO — a `From`/`To` pair is PII by the
+    same rule that governs `CallSession.from_number`/`to_number`
+- [ ] `apps/runtime/routing.py` — `websocket_urlpatterns = []`, a documented stub: "3.2 appends the media-stream
+  route here." `config/asgi.py` is **NOT touched in this pass** — there is no websocket route to wire in yet
+- [ ] `apps/runtime/views/_common.py` — `from apps.accounts.views._common import *` (re-exports `paginate`, the
+  decorators, the shared imports — mirrors `apps/calls/views/_common.py` exactly)
+- [ ] `apps/runtime/views/_helpers.py` — `recent_location_sessions(request)`: `CallSession.objects.filter(tenant=request.tenant, location=request.location).order_by('-started_at')[:N]`
+  when `request.location` is set, `.none()` otherwise — mirrors `apps/calls/views/_helpers.py:location_sessions`'s
+  "no active location → empty, never another site's rows" contract exactly; promoted to `_helpers.py` immediately
+  even though only one view uses it today, since it is a scoping surface and Rule 5 puts scoping helpers used by
+  more than a single call site in one audited place
+- [ ] `apps/runtime/views/InboundWebhook/__init__.py` — empty package marker
+- [ ] `apps/runtime/views/InboundWebhook/Diagnostics.py` — `runtime_diagnostics_view(request)`: `@login_required`,
+  `GET`-only. Renders, for the active tenant + location: `recent_location_sessions(request)`, the location's
+  `AgentSetting` row (`is_ready`, `readiness_issues()`, `enabled`, `inbound_phone_number`, `twilio_connected`),
+  the exact webhook URL this location's Twilio number should target (`webhook_public_url`-shaped, built from
+  `settings.TWILIO_WEBHOOK_BASE_URL` + `reverse('runtime:voice_webhook')`), and a `settings.PROVIDER_MODE` banner.
+  No active location → a guidance state (matches `scheduling`/`calls` precedent), never a 500 or an unscoped query
+- [ ] `apps/runtime/views/__init__.py` — re-exports `runtime_diagnostics_view`; `__all__ = ['runtime_diagnostics_view']`
+- [ ] `apps/runtime/urls/InboundWebhook/__init__.py` — empty package marker
+- [ ] `apps/runtime/urls/InboundWebhook/Webhook.py` — `urlpatterns = [path('voice/', webhooks.voice_webhook, name='voice_webhook')]`
+- [ ] `apps/runtime/urls/InboundWebhook/Diagnostics.py` — `urlpatterns = [path('diagnostics/', views.runtime_diagnostics_view, name='diagnostics')]`
+- [ ] `apps/runtime/urls/__init__.py` — `app_name = 'runtime'`; concatenates the two lists above. Both routes are
+  literal (`voice/`, `diagnostics/`) with no `<int:pk>` or greedy `<str:...>` segment in this app yet, so there is
+  no first-match-wins ordering risk to resolve this pass — noted for whichever sub-module adds the first dynamic
+  segment
+- [ ] No `apps/runtime/forms/` package this pass — a service sub-module with no CRUD model has nothing to bind a
+  `ModelForm` to; do not create an empty placeholder package
+- [ ] No seeder (`seed_runtime`) — 3.1 adds no data of its own; the diagnostics page reads `calls.CallSession`
+  rows that `seed_calls` already creates under `PROVIDER_MODE=fake`. If the seeded rows have no `provider_call_sid`
+  matching the webhook's shape, that is fine — the diagnostics page only reads, it never re-validates seeded rows
+  against the webhook's own idempotency rule
+
+## Realtime & agent surface
+
+- [ ] `routing.py` ships as an empty, documented stub only — **no consumer, no group name, no `asgi.py` change
+  this pass.** The stream token minted in `voice_webhook` is the sub-module's entire realtime contribution; it is
+  never redeemed here.
+- [ ] Heads-up for 3.2 (not this pass's work, recorded so it isn't lost): CLAUDE.md's Realtime rule 3 names the
+  group scheme `t{tenant_id}:l{location_id}:call:{session_id}`, while `voice-agent-runtime` SKILL §3 states
+  `t{tenant_id}:call:{session_id}` (tenant-namespaced only). 3.1 mints no group and joins none, so it does not
+  need to resolve this — but 3.2, which does join a group in `connect()`, should reconcile the two before writing
+  the group-name literal, not pick one silently.
+- [ ] Tool surface — **N/A this pass.** 3.1 runs entirely before any model turn exists; no LLM tool is declared,
+  dispatched or touched. The first tool arrives in 3.3.
+- [ ] Prompt / variables — **N/A this pass.** No prompt or greeting is rendered before the stream connects;
+  `AgentSetting.greeting`/`prompt_text`/`variables` are read by 3.2's consumer, not by this webhook.
+- [ ] Provider adapter — the "adapter" surface this pass is the pure helper set in
+  `apps/runtime/providers/telephony.py` above; there is no live/fake **backend swap** to build here because this
+  sub-module never originates a provider call (it only answers one Twilio already placed). `verify_twilio_signature`
+  is the same deterministic function in every `PROVIDER_MODE` — what differs by mode is only whether the resolved
+  `AgentSetting` row's stored credentials are real or test values, which is Module 2's concern, not this pass's.
+- [ ] `CallSession.usage` cost lines — **NONE appended by this sub-module.** No LLM/STT/TTS turn has happened
+  before the stream connects, so there is nothing to cost yet (confirmed by the research's own cost-implication
+  note). Twilio itself begins metering the voice-minute the moment it answers — including the unmapped/disabled
+  decline path — but this product tracks no `minutes_used`/carrier-cost counter anywhere (per the ERD's "derived,
+  never stored" rule), so that provider-side cost is expected and intentionally untracked here, not a gap.
+
+## Wire-up
+
+- [ ] `config/settings.py` — `INSTALLED_APPS`: add `'apps.runtime'` under a new `# Module 3 — Call Runtime`
+  heading, placed after `# Module 2 — Agent Setup & Telephony` / `'apps.agents'` and before
+  `# Module 4 — Calendar & Bookings` / `'apps.scheduling'` — matches both the module numbering and the approved
+  plan's explicit ordering
+- [ ] `config/urls.py` — `path('runtime/', include('apps.runtime.urls'))`, inserted after `path('agent/', include('apps.agents.urls'))`
+  and before `path('schedule/', include('apps.scheduling.urls'))` — same module-number ordering as above;
+  `apps.accounts.urls` stays last (its catch-all dashboard route must not shadow anything)
+- [ ] `apps/accounts/navigation.py` — `LIVE_LINKS['3.1'] = {'Runtime Diagnostics': 'runtime:diagnostics'}`, added
+  between the `'2.4'` and `'4.1'` entries (numeric module order matches the dict's existing convention). Touch no
+  other entry — this is the ONE new key this pass adds
+- [ ] `config/asgi.py` — explicitly **NOT touched this pass** (no websocket route exists yet; listed here so the
+  main agent does not "helpfully" pre-wire it)
+- [ ] `AUTH_USER_MODEL` — already declared from Module 0; nothing to do here, this app has no user-model FK
+
+## Templates (templates/runtime/ — standalone page, no submodule/entity folders per structure rule 6)
+
+- [ ] `templates/runtime/diagnostics.html` — `{% extends "base.html" %}`; `.page-header`/breadcrumb; a
+  `PROVIDER_MODE` alert banner (`fake`/`sandbox` = informational, `live` = a louder warning-styled badge per
+  CLAUDE.md's live-mode-in-dev posture); `.stat-card`s for active-location number-mapping status (bound number,
+  `enabled`/disabled, `twilio_connected`) and the location's `is_ready`/`readiness_issues()` list; a `.card` table
+  of `recent_location_sessions` using the canonical call-status badge map
+  (`in_progress`→`badge-info`, `completed`→`badge-green`, `abandoned`→`badge-muted`, `transferred`→`badge-info`,
+  `failed`→`badge-red`) with an `{% else %}` fallback to `{{ s.get_status_display }}` — there is no `badge-purple`;
+  the exact webhook URL this location's Twilio number should target, rendered as plain text (never as a live
+  link a staff user could accidentally click-trigger); `.empty-state` when the location has no sessions yet; no
+  active location → the guidance state, not an empty table. No caller-controlled text is ever rendered `|safe`
+  (this page renders no caller input at all — it is entirely operator-facing config + `CallSession` metadata)
+- [ ] No `form.html` — a service sub-module's diagnostics page has no create/edit form; its absence is correct
+
+## Verify
+
+- [ ] Assert `settings.PROVIDER_MODE == 'fake'` first — this pass never triggers a real Twilio call regardless,
+  but every subsequent verify step is run under that assumption
+- [ ] `venv\Scripts\python.exe manage.py makemigrations runtime` → **"No changes detected"**
+- [ ] `venv\Scripts\python.exe manage.py check` → clean
+- [ ] `venv\Scripts\python.exe -m pytest -q apps/runtime` — new tests, at minimum:
+  - valid signature (computed with `RequestValidator(setting.twilio_auth_token)` over `webhook_public_url`) +
+    mapped + `enabled=True` → `200` + TwiML containing `<Connect><Stream`; exactly **one** `CallSession` afterward
+  - invalid signature, and **absent** signature header → `403`; `CallSession.objects.count()` unchanged
+    (zero writes) in both cases
+  - the **same** `CallSid` posted twice → still exactly **one** `CallSession` (idempotency); second response is
+    the same TwiML shape as the first, not a new stream token minted
+  - unmapped `To` → decline TwiML (`<Say>`+`<Hangup>`), zero `CallSession` rows
+  - `enabled=False` on a resolved row → decline TwiML; `CallSession` count matches whichever branch the Open
+    decision above resolved to (zero, or exactly one `status='failed'` row) — the test encodes that decision
+    explicitly so a later change to it fails loudly
+  - signature verified against **the resolved location's own** `twilio_auth_token` — a valid signature computed
+    with a *different* location's token still `403`s (this is the multi-location differentiator the research
+    calls out, not covered by a single-tenant test)
+  - malformed/missing POST fields (`CallSid` absent, `To` absent) → a clean `4xx`, never an uncaught `500`
+- [ ] Diagnostics view: `200` for a logged-in tenant admin with an active location; only that location's
+  `CallSession` rows appear (a second location's or a second tenant's rows seeded via `seed_calls` never render
+  on this page — the cross-tenant-and-cross-location scoping check for a page with no `<int:pk>` detail route is
+  "never appears in the list", not a 404); no active location → the guidance state renders, not a 500
+- [ ] Tokens: `mint_stream_token(...)` → `verify_stream_token(...)` round-trips to the same `session_id`/
+  `tenant_id`/`location_id`; a tampered token (flipped byte) and an expired token (mocked clock past `max_age`)
+  both fail verification cleanly (no exception escaping to a 500)
+- [ ] Regression: `venv\Scripts\python.exe -m pytest -q apps/agents` still green — specifically the test-call and
+  connection-check tests, confirming `apps/agents/telephony.py:get_backend()`'s `try/except ImportError` around
+  `from apps.runtime.providers.telephony import get_backend` still falls through to Module 2's own
+  `FakeTelephonyBackend`/`LiveTelephonyBackend` now that `apps/runtime/providers/telephony.py` exists but exports
+  no `get_backend` name
+- [ ] Full suite: `venv\Scripts\python.exe -m pytest -q` stays green end to end
+- [ ] `temp/` smoke as `admin_acme` (password printed at the end of `seed_accounts` — read
+  `apps/accounts/management/commands/seed_accounts.py` rather than assuming it): `GET /runtime/diagnostics/` →
+  200, page title present, a seeded `CallSession` row from `seed_calls` visible, no `{#`/`{% comment` leaks; a
+  second tenant's admin never sees the first tenant's sessions on this page
+- [ ] Sidebar shows **3.1 Live** (the `LIVE_LINKS['3.1']` entry resolves and the module-3 row is no longer
+  greyed-out roadmap text)
+
+## Close-out
+
+- [ ] `code-reviewer`
+- [ ] `explorer`
+- [ ] `frontend-reviewer`
+- [ ] `performance-reviewer`
+- [ ] `realtime-reviewer` — the natural place to re-litigate the group-naming heads-up above and confirm nothing
+  in this pass pre-empts 3.2's decision
+- [ ] `qa-smoke-tester`
+- [ ] `security-reviewer` — signature verification and idempotency are this sub-module's whole security surface;
+  expect the sharpest findings here
+- [ ] `test-writer`
+- [ ] Author (**not** update — brand-new app) `.claude/skills/runtime/SKILL.md`: overview ("no models — reads
+  `agents.AgentSetting`, writes `calls.CallSession`"), the webhook + diagnostics routes, the
+  `providers/{base,telephony,tokens}.py` helpers, the realtime-surface note ("routing stub only; the consumer
+  arrives in 3.2"), conventions (tenant+location resolved from the dialed number, never from a URL/body param),
+  common tasks ("add a diagnostics stat", "extend the webhook's decline path"), and the `LIVE_LINKS['3.1']` wiring
+- [ ] `README.md` — mark 3.1 built, Module 3 started (22 of 26 sub-modules)
+
+## Later passes / deferred (carried over from research-runtime-3.1.md so nothing is lost)
+
+- ASGI media-stream consumer, audio codec chain, VAD/barge-in, the `start`-frame re-check that redeems the
+  stream token and re-validates the number is still served → **3.2**
+- Tool declarations, the `apply_tool_call` dispatcher, the `{ok, data, error}` envelope, the full tool surface →
+  **3.3**
+- Deferred transfer signal, working-hours gating, the actual REST redirect to a human, the `get_backend` handoff
+  that finally gives `apps/agents/telephony.py` a real Module 3 backend to delegate to → **3.4**
+- Consent-gated recording, the two-party-consent announcement + its `logs` proof, waveform peaks, per-turn cost
+  capture, the *full* runtime diagnostics page (per-stage latency, ended-reason codes across the whole call,
+  active-session count, worker health) → **3.5**
+- A per-location custom unmapped/disabled decline message (needs a new field on `agents.AgentSetting`) →
+  **2.1/2.2**'s call to make, not this sub-module's to add unasked
+- Live/active-call count and worker health on a dashboard → mostly **3.5** (needs consumer state that does not
+  exist until 3.2 ships); 3.1 only supplies the `in_progress` `CallSession` row such a page will later count
+- A queryable per-attempt webhook-health log (today: structured `logging` output only, not a UI list) → folds
+  into 3.5's full diagnostics page once there is a model-worthy reason to query it
+- Rate-limiting tuning for the webhook endpoint — a bounded limiter is expected per the realtime skill, but the
+  exact threshold is an operational tuning decision for once real traffic patterns exist, not a research finding
+  to hard-code now
+- Live-mode signature verification proven byte-for-byte against a real Twilio-delivered request — the algorithm
+  is buildable and fully testable now against a fixed fake secret; the real-carrier proof needs a real number +
+  ngrok tunnel, an integration exercise rather than a code gap
+- Out of scope for the product entirely (not deferred, just not this product): outbound call origination, SMS/
+  messaging webhooks, multi-channel routing, a DID marketplace inside the app, carrier-agnostic multi-provider
+  ingress (Telnyx etc.) — Twilio only, inbound only, per the seven capabilities
+
+## Review notes
+(filled in at the end)
