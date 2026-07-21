@@ -20,18 +20,21 @@ own order:
   3. the token is bound to THIS session id — a valid token minted for a different
      call does not serve this one.
 
-`FileResponse` streams the bytes and answers HTTP Range natively, so `<audio>`
-scrubbing does not force a full download. `no-store` unconditionally — this is PII
-audio, not a cacheable asset.
+**HTTP Range is implemented here, not inherited.** Django 4.2's `FileResponse`
+does NOT answer Range — a `Range:` request gets the whole 200 body, so seeking in
+`<audio>` (which the transcript-synced waveform depends on) would re-download from
+byte 0 on every scrub. `_ranged_response` parses a single byte range, streams just
+that slice as a `206`, and advertises `Accept-Ranges`. `no-store` unconditionally —
+this is PII audio, not a cacheable asset.
 """
 import mimetypes
 
 from django.conf import settings
 from django.core import signing
-from django.http import FileResponse
+from django.http import FileResponse, HttpResponse, StreamingHttpResponse
 from django.views.decorators.cache import never_cache
 
-from apps.calls.storage import open_recording, recording_exists
+from apps.calls.storage import open_recording, recording_exists, recording_size
 from apps.calls.views._common import *  # noqa: F401,F403
 from apps.calls.views._helpers import location_sessions
 
@@ -42,6 +45,92 @@ from apps.calls.views._helpers import location_sessions
 # request log does not already carry, so there is no logger to misuse.
 
 __all__ = ['callsession_recording_view']
+
+# How much of a range slice to read per chunk when streaming a 206 — the same
+# 8 KiB `FileResponse` uses, so a partial fetch stays as memory-frugal as a full one.
+_RANGE_CHUNK = 8192
+
+
+def _parse_single_range(range_header, size):
+    """Parse one `bytes=start-end` range against a known file size.
+
+    Returns `(start, end)` inclusive, `None` for no/invalid/unsupported range (the
+    caller then serves the whole file 200), or the string `'unsatisfiable'` for a
+    syntactically valid range that falls outside the file (416). Only a SINGLE
+    range is honoured — a multi-range request (`bytes=0-9,20-29`) falls back to the
+    full body, which is a legal response and all an `<audio>` element ever needs.
+    """
+    if not range_header:
+        return None
+    units, _, spec = range_header.partition('=')
+    if units.strip().lower() != 'bytes' or ',' in spec:
+        return None
+    start_s, sep, end_s = spec.strip().partition('-')
+    if not sep:
+        return None
+    try:
+        if not start_s:
+            # `bytes=-N` — the trailing N bytes.
+            length = int(end_s)
+            if length <= 0:
+                return 'unsatisfiable'
+            start, end = max(0, size - length), size - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s else size - 1
+    except ValueError:
+        return None
+    if start >= size:
+        return 'unsatisfiable'
+    return start, min(end, size - 1)
+
+
+def _stream_range(fh, start, length):
+    """Yield `length` bytes from `fh` starting at `start`, in bounded chunks."""
+    fh.seek(start)
+    remaining = length
+    while remaining > 0:
+        chunk = fh.read(min(_RANGE_CHUNK, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        yield chunk
+    fh.close()
+
+
+def _ranged_response(request, path, content_type):
+    """A `FileResponse` (200) or a `StreamingHttpResponse` (206) honouring Range.
+
+    Django 4.2's `FileResponse` ignores `Range` entirely, so this implements it:
+    without it, every `<audio>` scrub re-downloads from byte 0. A `416` carries the
+    `Content-Range: bytes */<size>` an unsatisfiable range requires. `Accept-Ranges`
+    is advertised on every path so a client knows seeking is available.
+    """
+    size = recording_size(path)
+    parsed = _parse_single_range(request.headers.get('Range', ''), size)
+
+    if parsed == 'unsatisfiable':
+        response = HttpResponse(status=416)
+        response['Content-Range'] = f'bytes */{size}'
+        response['Accept-Ranges'] = 'bytes'
+        return response
+
+    if parsed is None:
+        response = FileResponse(open_recording(path), content_type=content_type)
+        response['Accept-Ranges'] = 'bytes'
+        return response
+
+    start, end = parsed
+    length = end - start + 1
+    response = StreamingHttpResponse(
+        _stream_range(open_recording(path), start, length),
+        status=206,
+        content_type=content_type,
+    )
+    response['Content-Range'] = f'bytes {start}-{end}/{size}'
+    response['Content-Length'] = str(length)
+    response['Accept-Ranges'] = 'bytes'
+    return response
 
 
 @login_required  # noqa: F405
@@ -60,10 +149,16 @@ def callsession_recording_view(request, pk):
     except signing.BadSignature:
         raise Http404  # noqa: F405
 
-    # 2. Scope — the SAME queryset the detail page resolves through, so a foreign
+    # 2. Scope — the SAME helper the detail page resolves through, so a foreign
     #    tenant or foreign location 404s here identically. A fresh signature is not
-    #    authorisation.
-    obj = get_object_or_404(location_sessions(request), pk=pk)  # noqa: F405
+    #    authorisation. `.prefetch_related(None)` drops the `booked_appointments`
+    #    prefetch that helper carries for the PAGE — this endpoint renders no
+    #    template and reads only `recording_blob`, so the prefetch would be a wasted
+    #    query on every byte-range request. The tenant+location filter — the part
+    #    that matters — is untouched, so there is still exactly one audited scope.
+    obj = get_object_or_404(  # noqa: F405
+        location_sessions(request).prefetch_related(None), pk=pk,
+    )
 
     # 3. The token must have been minted for THIS call.
     if payload.get('session_id') != obj.pk:
@@ -75,7 +170,15 @@ def callsession_recording_view(request, pk):
         raise Http404  # noqa: F405
 
     content_type = mimetypes.guess_type(obj.recording_blob)[0] or 'application/octet-stream'
-    response = FileResponse(open_recording(obj.recording_blob), content_type=content_type)
+    try:
+        response = _ranged_response(request, obj.recording_blob, content_type)
+    except FileNotFoundError:
+        # The retention job (or a manual purge) deleted the file between the
+        # existence check above and the open here. A gone recording is a 404, and
+        # the check-then-open race is exactly why `open_recording`'s docstring
+        # promises this is catchable rather than a 500.
+        raise Http404  # noqa: F405
+
     # `?dl=1` only flips the disposition header — it changes nothing about what is
     # authorised, so it is safe to leave off the signed payload.
     if request.GET.get('dl') == '1':
