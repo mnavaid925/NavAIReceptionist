@@ -314,11 +314,20 @@ class CallSession(TenantLocationOwned):  # noqa: F405
         non-numeric `cost_usd`, an entry that is not a dict — is skipped the same
         way.
         """
+        import math
+
         usage = self.usage if isinstance(self.usage, list) else []
         total = 0.0
         for turn in usage:
             try:
-                total += float(turn.get('cost_usd', 0) or 0)
+                value = float(turn.get('cost_usd', 0) or 0)
             except (AttributeError, TypeError, ValueError):
                 continue
+            # `json.loads` accepts `NaN`/`Infinity`, and both propagate through the
+            # sum and out to `floatformat`, printing `$nan`/`$inf` on a billing
+            # figure. A non-finite cost is a corrupted row, not a real charge —
+            # skip it. (Not reachable until Module 3 writes this column; the
+            # right long-term guard is a validator on the write path.)
+            if math.isfinite(value):
+                total += value
         return round(total, 4)
