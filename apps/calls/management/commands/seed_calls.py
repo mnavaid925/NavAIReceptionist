@@ -984,21 +984,33 @@ class Command(BaseCommand):
         if not transfer:
             return {}
 
+        # The optional per-attempt trail — a record of which numbers were tried,
+        # in order, on THIS call. Only the one Downtown fell-through row carries it.
+        attempts = transfer.get('attempts')
+
+        # `destination` is the number that produced the FINAL result — the model
+        # docstring's contract. Where there was a fallback, that is the LAST
+        # attempt's destination (the secondary that answered), NOT the configured
+        # primary: on the fell-through row the primary is precisely the number that
+        # rang out, so writing it here would render "Connected · destination
+        # <the-number-that-did-not-answer>". Where nothing fell through, the single
+        # attempt (or the configured number) is the destination.
+        if attempts:
+            destination = attempts[-1]['destination']
+        else:
+            destination = TRANSFER_DESTINATIONS[location_slug]
+
         built = {
             'result': transfer['result'],
             'reason': transfer['reason'],
-            'destination': TRANSFER_DESTINATIONS[location_slug],
+            'destination': destination,
             'initiated_at': (
                 started_at + timedelta(seconds=transfer['offset'])
             ).isoformat(),
             'duration_seconds': transfer['duration_seconds'],
         }
-        # The optional per-attempt trail — passed through verbatim when a spec
-        # authors one. It is a record of what happened on THIS call (which numbers
-        # were tried, in order), so unlike `destination` it is not derived from the
-        # configuration; only the one Downtown fell-through row carries it.
-        if transfer.get('attempts'):
-            built['attempts'] = transfer['attempts']
+        if attempts:
+            built['attempts'] = attempts
         return built
 
     def _build_waveform(self, spec):
