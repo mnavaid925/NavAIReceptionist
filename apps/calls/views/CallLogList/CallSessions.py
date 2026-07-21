@@ -26,9 +26,15 @@ blobs inside `logs` are personal data by definition. Nothing here logs a field
 value — and the detail view logs nothing at all, because "who read whose call" is
 an audit question this module has no audit trail to answer honestly.
 """
+from datetime import timedelta
+
+from django.conf import settings
+from django.core import signing
+from django.urls import reverse
 from django.views.decorators.cache import never_cache
 
 from apps.calls.models import CallSession
+from apps.calls.storage import recording_exists
 from apps.calls.views._common import *  # noqa: F401,F403
 from apps.calls.views._helpers import location_sessions
 from apps.scheduling.availability import local_day_bounds_utc
@@ -252,14 +258,6 @@ def _recording_context(obj):
     which would silently disagree with the row the moment the two diverge. Same
     derive-never-store discipline as `duration_display` / `total_cost_usd`.
     """
-    from datetime import timedelta
-
-    from django.conf import settings
-    from django.core import signing
-    from django.urls import reverse
-
-    from apps.calls.storage import recording_exists
-
     metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
 
     recording_url = None
