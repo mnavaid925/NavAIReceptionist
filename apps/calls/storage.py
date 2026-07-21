@@ -83,3 +83,17 @@ def recording_size(path):
     call is a 404, never a 500.
     """
     return recording_storage.size(path)
+
+
+def save_recording(name, content):
+    """Write a recording through the storage, and return its stored path.
+
+    The paved write path for Module 3's recorder (unbuilt), here now so that
+    module does not reinvent file placement with a raw `open(join(ROOT, name))` and
+    bypass the one thing that makes writing safe: `FileSystemStorage.save` routes
+    through `safe_join`, which raises `SuspiciousFileOperation` on a `..`-escape or
+    an absolute path — the write-side mirror of the read-side containment guard in
+    `recording_exists`. 5.4 reads; this is the symmetric write it says Module 3
+    owns, given a call site rather than left to be improvised.
+    """
+    return recording_storage.save(name, content)
