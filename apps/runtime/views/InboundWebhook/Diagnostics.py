@@ -13,6 +13,8 @@ the session rows come through the single audited scoping helper.
 """
 from apps.agents.models import AgentSetting
 from apps.calls.models import CallSession
+from django.db.models import Count, Q
+
 from apps.runtime.providers.telephony import media_stream_ws_url
 from apps.runtime.views._common import *  # noqa: F401,F403
 from apps.runtime.views._helpers import location_sessions, recent_location_sessions
@@ -38,12 +40,14 @@ def runtime_diagnostics_view(request):
         )
 
     # location_sessions returns .none() when no location is active, so the counts
-    # are 0 and the list is empty without a special case here.
+    # are 0 and the list is empty without a special case here. Both totals in one
+    # aggregate — one round trip, not two (and none() short-circuits to 0/0 with
+    # no query at all when there is no active location).
     scoped = location_sessions(request)
-    stats = {
-        'active': scoped.filter(status=CallSession.STATUS_IN_PROGRESS).count(),
-        'total': scoped.count(),
-    }
+    stats = scoped.aggregate(
+        active=Count('pk', filter=Q(status=CallSession.STATUS_IN_PROGRESS)),
+        total=Count('pk'),
+    )
     sessions = list(recent_location_sessions(request))
 
     # The URL Twilio must POST the inbound call to. Built from the public tunnel
