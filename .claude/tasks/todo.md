@@ -3777,6 +3777,65 @@ sections:
 - **Network-quality (QoS) monitoring** (Dialpad) — Twilio's own console's job, not an application-level call
   log; none of the seven capabilities calls for a telephony-quality diagnostics surface.
 
-## Review notes
+## Review notes — 5.3 Event Log & Cost
 
-(filled in at the end)
+A VIEW sub-module with the smallest backend footprint yet — **no new view, no new url, no model, no
+migration**. Three `ui.py` filters, one `CallSession` @property, two `detail.html` cards, and a `duration_ms`
+content edit to the seeder. `makemigrations --check` clean. ~20 commits. Final: **679 tests passing** (630
+before, 49 new), and no seeder count change.
+
+### The bug that mattered, and why the demo data hid it
+
+The load-bearing feature is **redaction** of tool-call arguments (a `create_contact` payload is a name and a
+DOB). I built `redact_args` as a display-time backstop to Module 3's unbuilt write-path redaction — the log
+must never be where a DOB leaks even if the write path forgets. I proved it with a leak canary rather than
+trusting it, because the seeded demo data models the write-path redaction (args come pre-redacted), so a
+no-op filter would pass every test that only renders seed data.
+
+`code-reviewer` then found the canary I *didn't* think to inject: `redact_args` recursed exactly **one level**,
+but the two call sites invoke it at different depths — the trace on `.arguments`, the raw-payload disclosure
+on the whole `.raw_json` one level shallower. So a doubly-nested `arguments.contact.first_name` was redacted
+in the trace and **leaked in the disclosure right below it** — and the disclosure's own comment claimed it
+"cannot become a hole around the trace." Same failure mode as every prior sub-module: a confident comment
+defending the wrong thing. Fixed by recursing to a bounded depth 6 through dicts AND lists, so both call sites
+redact identically, and proved against the reviewer's exact repro.
+
+### Review findings applied
+
+* **`code-reviewer`** — the depth-mismatch leak (above), and `total_cost_usd` crashing the page on a truthy
+  non-list `usage` (`for turn in 42` → uncaught `TypeError`, which Django re-raises from a property → 500).
+  Both fixed and regression-tested.
+* **`frontend-reviewer`** — the event log had no scroll bound (a 200-turn call = unbounded DOM); reused
+  `.transcript-scroll` + `role="log"`. The level-badge text defaulted to "info" while `level_badge` defaulted
+  to muted — a grey badge reading "info"; aligned to a dash. Raw ISO timestamps → an `iso_time` filter. And
+  the `error.message` raw render, documented as system-authored per the envelope contract.
+* **`performance-reviewer`** — zero new queries (the cards read already-loaded JSON columns); no change.
+* **`security-reviewer`** — no Critical/High, but two Medium coverage gaps I closed: the denylist missed real
+  PII key names (`first`, `last`, `contact`, `mobile`, `account`, `mrn`, `passport`, …) and collection stems
+  (`attendee`/`participant`/`recipient`) that redact an identity-bearing list wholesale via its key; and
+  `total_cost_usd` could render `$nan` from a `json.loads('NaN')` cost, now skipped. It also confirmed the
+  depth-fix is genuinely complete.
+* **`qa-smoke-tester`** — 47/47, no code bugs.
+
+### Deliberately declined
+
+* **A genuinely-empty seed row.** QA noted every seeded session has ≥1 log and ≥1 usage turn, so the empty
+  states ("No event log"/"No cost recorded") aren't shown by demo data. I declined to add or hollow one: an
+  abandoned call realistically still incurs the greeting's TTS cost and two call-level logs, so making one
+  empty would be *less* truthful, and a genuinely-empty session (webhook fired, media stream produced nothing)
+  is a transient in-flight state that shouldn't be frozen in a fixture. The empty branches are proven and
+  unit-tested with constructed fixtures — the correct home for edge-case data.
+
+### Known limits, documented not fixed
+
+* **`redact_args` decides on key NAMES**, so a bare PII string in a list (protected only if the *list's* key is
+  a denylist stem) and PII used as a dict *key* both slip through. Content-based PII detection is out of scope
+  for a substring filter; the real fix is a Module 3 tool-schema rule (identity travels as a keyed dict value),
+  with this filter as the display backstop. Written into the docstring.
+* **`error.message` renders raw** — system-authored per the tool-result envelope; if Module 3 ever interpolates
+  an argument into it, the redaction belongs on the write side.
+
+### Realtime step
+
+**N/A, noted not run.** 5.3 is a filter + property + template — no async, consumer, provider call, tool or
+schema. Recorded so the skipped step is a decision.
