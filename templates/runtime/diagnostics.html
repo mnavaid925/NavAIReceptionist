@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% load ui %}
+
+{% block title %}Runtime diagnostics{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">Runtime diagnostics</h1>
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li>NavAIReceptionist</li>
+      <li>Call Runtime</li>
+      <li>Diagnostics</li>
+    </ol>
+  </nav>
+</div>
+
+{% comment %}
+  PROVIDER_MODE banner. In anything but `live` the whole call path runs against
+  fake providers, so no inbound call is answered on a carrier and nothing is
+  billed — the diagnostics below describe the simulated path.
+{% endcomment %}
+{% if is_simulated %}
+  <div class="alert alert-info">
+    <i data-lucide="info"></i>
+    <span>
+      <strong>Simulated.</strong> <code>PROVIDER_MODE</code> is
+      <code>{{ provider_mode }}</code> — the whole call path runs against fake
+      providers. No inbound call is answered on a real carrier and nothing is
+      billed. Only <code>live</code> reaches Twilio.
+    </span>
+  </div>
+{% else %}
+  <div class="alert alert-red">
+    <i data-lucide="alert-triangle"></i>
+    <span>
+      <strong>Live mode.</strong> Inbound calls to this location's number are
+      answered on your real Twilio account.
+    </span>
+  </div>
+{% endif %}
+
+{% if not active_location %}
+  {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Runtime diagnostics are scoped to one location. Pick an active location to see how its inbound calls are being resolved." %}
+{% else %}
+
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <div class="stat-card">
+      <span class="stat-icon blue" aria-hidden="true"><i data-lucide="radio"></i></span>
+      <div class="stat-value">{{ stats.active }}</div>
+      <div class="stat-label">Calls in progress</div>
+      <div class="stat-meta">Live right now at {{ active_location.name }}</div>
+    </div>
+    <div class="stat-card">
+      <span class="stat-icon slate" aria-hidden="true"><i data-lucide="phone-call"></i></span>
+      <div class="stat-value">{{ stats.total }}</div>
+      <div class="stat-label">Calls logged</div>
+      <div class="stat-meta">All time at this location</div>
+    </div>
+    <div class="stat-card">
+      <span class="stat-icon {% if setting and setting.is_ready %}green{% else %}orange{% endif %}" aria-hidden="true">
+        <i data-lucide="{% if setting and setting.is_ready %}check-circle{% else %}alert-triangle{% endif %}"></i>
+      </span>
+      <div class="stat-value">{% if setting and setting.is_ready %}Ready{% else %}Not ready{% endif %}</div>
+      <div class="stat-label">Agent status</div>
+      <div class="stat-meta">{% if setting.enabled %}Answering enabled{% else %}Answering disabled{% endif %}</div>
+    </div>
+  </div>
+
+  <div class="grid gap-4 lg:grid-cols-3" style="margin-top: 16px;">
+
+    <div class="lg:col-span-2 space-y-4">
+      <div class="card">
+        <div class="card-header"><span>Recently resolved calls</span></div>
+        <div class="card-body">
+          {% if sessions %}
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Call</th>
+                    <th>From</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th>Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for session in sessions %}
+                    <tr>
+                      <td><a href="{% url 'calls:callsession_detail' session.pk %}">{{ session.provider_call_sid }}</a></td>
+                      <td>
+                        {% if session.from_number %}
+                          {{ session.from_number|phone_e164 }}
+                        {% else %}
+                          <span class="text-muted">Unknown</span>
+                        {% endif %}
+                      </td>
+                      <td>{% include "partials/_call_status_badge.html" with obj=session %}</td>
+                      <td>{{ session.started_at|date:"M j, H:i"|default:"—" }}</td>
+                      <td>{{ session.duration_display }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            {% include "partials/_empty_state.html" with icon="phone-off" title="No calls resolved yet" message="When a call reaches this location's inbound number, the webhook creates its record and it appears here." %}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <aside class="space-y-4">
+      <div class="card">
+        <div class="card-header">
+          <span>Inbound routing</span>
+          {% if setting.inbound_phone_number %}
+            <span class="badge badge-green">Mapped</span>
+          {% else %}
+            <span class="badge badge-amber">No number</span>
+          {% endif %}
+        </div>
+        <div class="card-body">
+          <dl class="grid gap-3">
+            <div>
+              <dt class="form-label">Inbound number</dt>
+              <dd class="m-0">
+                {% if setting.inbound_phone_number %}
+                  {{ setting.inbound_phone_number|phone_e164 }}
+                {% else %}
+                  <span class="text-muted">Not set</span>
+                {% endif %}
+              </dd>
+            </div>
+            <div>
+              <dt class="form-label">Twilio Voice webhook (POST)</dt>
+              <dd class="m-0"><code class="break-all">{{ webhook_url }}</code></dd>
+            </div>
+            <div>
+              <dt class="form-label">Media stream</dt>
+              <dd class="m-0"><code class="break-all">{{ stream_ws_url }}</code></dd>
+            </div>
+          </dl>
+        </div>
+      </div>
+
+      {% if readiness_issues %}
+        <div class="card">
+          <div class="card-header">
+            <span>Before this location can answer</span>
+            <span class="badge badge-amber">{{ readiness_issues|length }}</span>
+          </div>
+          <div class="card-body">
+            <ul class="grid gap-2" style="margin: 0; padding-inline-start: 18px;">
+              {% for issue in readiness_issues %}
+                <li class="text-sm">{{ issue }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        </div>
+      {% endif %}
+    </aside>
+
+  </div>
+{% endif %}
+{% endblock %}
