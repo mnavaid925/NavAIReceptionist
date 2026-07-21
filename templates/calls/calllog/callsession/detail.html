@@ -210,13 +210,10 @@
     </div>
 
     {% comment %}
-      5.2 lands the transcript and analysis panels here; 5.3 the event log and
-      cost breakdown below them. All read JSON columns already on this row —
-      Invariant 2, no new table.
-
-      Still to land in this column:
-        5.4  the recording player and the transfer outcome
-             (partials/_audio_player.html, partials/_transfer_outcome.html)
+      The full column, in order: 5.2's transcript and analysis, 5.3's event log
+      and cost breakdown, 5.4's recording player and transfer outcome. Every one
+      reads a JSON column already on this row — Invariant 2, no new table across
+      the whole of Module 5. Nothing left to land: Module 5 is complete.
     {% endcomment %}
 
     {% comment %}
@@ -478,6 +475,24 @@
         {% endif %}
       </div>
     </div>
+
+    {% comment %}
+      5.4 — the recording player and the transfer outcome, the last two cards.
+      With these, Module 5 is complete: every JSON column on the row now has a
+      surface.
+
+      `consent_basis_label=consent_basis|consent_basis_label` filters the raw
+      basis to a human label in the include, keeping the view a thin
+      context-builder. The player self-gates on `session.recording_blob`, and the
+      `<audio>` inside it only shows when `recording_url` is set — which the view
+      does only when real bytes exist, so a set-but-fileless recording degrades to
+      "no longer available" rather than a broken player. `_transfer_outcome`
+      self-gates on a non-empty `transfer` dict, so a call that never asked for a
+      human renders nothing.
+    {% endcomment %}
+    {% include "partials/_audio_player.html" with session=obj recording_url=recording_url consent_basis_label=consent_basis|consent_basis_label retention_date=retention_date can_download=can_download %}
+
+    {% include "partials/_transfer_outcome.html" with transfer=obj.transfer %}
 
   </div>
 
