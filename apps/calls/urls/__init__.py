@@ -19,6 +19,9 @@ from apps.calls.urls.CallDetailTranscript.CallSessions import (
 from apps.calls.urls.CallLogList.CallSessions import (
     urlpatterns as call_session_urlpatterns,
 )
+from apps.calls.urls.RecordingTransferOutcome.CallSessions import (
+    urlpatterns as recording_urlpatterns,
+)
 
 app_name = 'calls'
 
@@ -34,3 +37,9 @@ urlpatterns = list(call_session_urlpatterns)
 # shadows nothing above it. A future member route with a greedy `<str:...>` after
 # the pk must be checked against THIS route as well as 5.1's.
 urlpatterns += list(transcript_urlpatterns)
+
+# -- 5.4 Recording & Transfer Outcome --------------------------------------- #
+# `<int:pk>/recording/` — same literal-suffix-after-the-pk shape as 5.2's print
+# route, and safe for the same reason. The freshness token rides the query string
+# (`?sig=…`), so it never touches URL resolution.
+urlpatterns += list(recording_urlpatterns)
