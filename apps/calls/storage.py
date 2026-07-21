@@ -69,6 +69,17 @@ def open_recording(path):
 
     Callers check `recording_exists` first; this is the second line, so a race
     (the retention job deletes the file between the check and the open) surfaces
-    as a catchable `FileNotFoundError` rather than a 500.
+    as a catchable `FileNotFoundError` rather than a 500 — the serve view catches
+    it and 404s.
     """
     return recording_storage.open(path, 'rb')
+
+
+def recording_size(path):
+    """The recording's size in bytes, for a Range response's `Content-Range`.
+
+    Raises `FileNotFoundError` on a since-deleted file, caught by the same guard
+    as `open_recording` — so a retention-race between the existence check and this
+    call is a 404, never a 500.
+    """
+    return recording_storage.size(path)
