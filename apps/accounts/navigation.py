@@ -90,6 +90,11 @@ LIVE_LINKS = {
     # are two more cards on the call detail page that 5.1's 'Call Logs' link
     # already reaches. No page of its own to point at.
     '5.3': {},
+    # BUILT, empty like 5.2/5.3: the recording player and transfer outcome are the
+    # last two cards on the call detail page 5.1's 'Call Logs' link already reaches.
+    # With this, Module 5 is complete. The signed-media SERVE route is not a
+    # navigable page — it streams bytes — so it has nothing to contribute here.
+    '5.4': {},
 }
 
 
