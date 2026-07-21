@@ -125,11 +125,23 @@ def peaks_dom_id(prefix, pk):
 # hidden at DISPLAY, because a log surface must never be the place a caller's DOB
 # leaks. Substrings, not exact keys — one entry catches every spelling
 # (`name` → first_name/last_name/full_name; `phone` → phone_e164/caller_phone;
-# `dob`/`birth` → date_of_birth). Over-redaction is the safe direction here.
+# `dob`/`birth` → date_of_birth). Over-redaction is the safe direction here, which
+# is why broad-but-collision-prone stems are still avoided: `cell` is out because
+# it lives inside `canCELLation`, and there is no bare `dl` because it is inside
+# hanDLe/midDLe/moDeL. `first`/`last`/`account`/`contact` are in despite catching
+# the odd benign key (`first_available`, `account_id`), because hiding a boolean
+# or an integer is a harmless cost and missing a name is not. Collection stems
+# (`attendee`/`participant`/`recipient`) redact an identity-bearing LIST wholesale
+# via its key, which is the only lever there is over a list of bare strings.
 _REDACT_KEY_SUBSTRINGS = (
-    'name', 'dob', 'birth', 'ssn', 'social', 'phone', 'email', 'address',
-    'zip', 'postal', 'card', 'cvv', 'credit', 'insurance', 'medical',
-    'diagnosis', 'symptom', 'password', 'secret', 'token', 'auth',
+    'name', 'first', 'last', 'contact', 'patient', 'caller',
+    'dob', 'birth', 'ssn', 'social', 'phone', 'mobile',
+    'email', 'address', 'zip', 'postal',
+    'card', 'cvv', 'credit', 'account', 'iban', 'sortcode', 'nino',
+    'passport', 'license', 'mrn',
+    'insurance', 'medical', 'diagnosis', 'symptom',
+    'attendee', 'participant', 'recipient',
+    'password', 'secret', 'token', 'auth',
 )
 REDACTION_MARKER = '[redacted]'
 
@@ -186,6 +198,15 @@ def redact_args(value):
     depths, and a one-level filter would redact `arguments.contact.first_name` in
     the trace but leak it in the disclosure one level below. A doubly-nested value
     or a `[{full_name: …}]` list is caught too.
+
+    **What it cannot catch, by construction:** it decides on KEY NAMES, so a
+    sensitive value with no key hiding it slips through — a bare string inside a
+    list (`{'attendees': ['Jane Roe']}`) is only protected if the LIST's key is on
+    the denylist (then the whole list is redacted wholesale), and a name used as a
+    dict KEY rather than a value is never inspected. Content-based PII detection is
+    deliberately out of scope. The real fix for both is a Module 3 tool-schema
+    rule — identity travels as a keyed dict value, never a bare list item or a
+    key — with this filter as the display-time backstop.
 
     Never raises: anything that is not a dict returns `{}`, so a template can chain
     it unconditionally. It returns a plain structure and touches no HTML — escaping
