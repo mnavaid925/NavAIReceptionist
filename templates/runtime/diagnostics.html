@@ -21,7 +21,7 @@
   billed — the diagnostics below describe the simulated path.
 {% endcomment %}
 {% if is_simulated %}
-  <div class="alert alert-info">
+  <div class="alert alert-info" role="status">
     <i data-lucide="info"></i>
     <span>
       <strong>Simulated.</strong> <code>PROVIDER_MODE</code> is
@@ -31,7 +31,7 @@
     </span>
   </div>
 {% else %}
-  <div class="alert alert-red">
+  <div class="alert alert-red" role="alert">
     <i data-lucide="alert-triangle"></i>
     <span>
       <strong>Live mode.</strong> Inbound calls to this location's number are
