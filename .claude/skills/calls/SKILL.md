@@ -17,7 +17,7 @@ anywhere. That absence is the design, not an unfinished edge.
 |---|---|---|
 | 5.1 Call Log List | **BUILT** | `CallSession` — the only model this module will ever own |
 | 5.2 Call Detail & Transcript | **BUILT** | none — a **view** sub-module |
-| 5.3 Event Log & Cost | not built | none — a **view** sub-module |
+| 5.3 Event Log & Cost | **BUILT** | none — a **view** sub-module |
 | 5.4 Recording & Transfer Outcome | not built | none — a **view** sub-module |
 
 > **Update this file, never re-author it.** 5.1 authored it because `apps/calls` was a brand-new app.
@@ -149,6 +149,31 @@ not fixed, guard the `extracted_data` table on `.items` (so a non-dict shape fal
 rather than rendering a header over an empty tbody), show an explicit "No analysis" empty state for the empty
 dict, and **never print a raw `None`**.
 
+**The event log + cost cards (5.3, in `detail.html`) are the PII-heaviest surface in the product.** The event
+log timelines `obj.logs` (level badge via `level_badge`, category, title, `occurred_at` via `iso_time`,
+`raw_json` in a `<details>` disclosure OFF by default), and a `category == 'tool'` entry adds the tool name,
+ok/failed, `duration_ms`, the `error.code`+`message`, and its `arguments`. **Redaction is the load-bearing
+rule here** — a tool-call args payload is a full name and a date of birth:
+
+* **`redact_args`** (`ui.py`) is the DISPLAY-time backstop to Module 3's (unbuilt) write-path redaction — even
+  a value the write path forgets is hidden at render. It walks dicts AND lists to depth 6, replacing the value
+  of any key whose name contains a sensitive substring with `[redacted]`. **Both call sites must redact to the
+  same depth**: the trace passes `arguments`, the disclosure passes the whole `raw_json` one level shallower —
+  a one-level filter leaked a doubly-nested value in the disclosure (the bug that was fixed). What it CANNOT
+  catch, by construction: a bare string in a list (only protected if the list's KEY is a denylist stem like
+  `attendee`/`participant`), and PII used as a dict key. Those are Module-3 tool-schema rules, not display fixes.
+* **`pretty_json`** returns a **plain str, never `SafeString`**, so autoescape still escapes the raw payload —
+  the stock `pprint` marks its output safe and would not. The `<details>` dumps `raw_json|redact_args|pretty_json`,
+  redacted BEFORE the dump so it cannot become a hole around the trace.
+* **Nothing in these cards is `|safe`.** `error.message` is the one value rendered raw, documented in-template
+  as system-authored per the tool-result envelope contract (`redact_args` works on dict values by key, and a
+  free string has no key) — the redaction for it belongs on the write side.
+* **`total_cost_usd`** (a `CallSession` @property) sums `usage[].cost_usd` at read time — never a stored column
+  (ERD rule). Guarded: a non-list `usage` coerces to `[]` (so it cannot 500 the page), a non-numeric or
+  non-finite `cost_usd` is skipped (so a corrupted row cannot render `$nan` on a billing figure).
+* The cost table is the four-way `stt/llm/tts/telephony` split per turn + a grand total; empty `usage` shows a
+  "No cost recorded" state rather than `$0.0000`.
+
 The list Actions column is **View only**. Caller numbers always render through the `phone_e164` filter
 (`{% load ui %}` required) — never raw, so the same number never appears in two shapes. Nothing
 caller-controlled is ever `|safe`. **The list renders none of the JSON columns**; the transcript is 5.2's
@@ -243,12 +268,14 @@ rather than a stale seed. If you flush scheduling, re-run `seed_calls --flush` a
 
 * **Add a field** → `models/CallLogList/CallSessions.py`, `makemigrations calls`, commit the migration
   separately. Note that a `help_text` change alone generates a migration — Django tracks it.
-* **Add a view sub-module (5.3/5.4)** → new `views/<SubModule>/<Entity>.py` + `urls/<SubModule>/…`, add the
-  re-export blocks, templates under `templates/calls/<submodule>/<entity>/`, a `LIVE_LINKS["5.M"]` entry
-  (empty `{}` if the surface is reached through the existing detail page, as 5.2 is) — and **no model, no
-  migration**. Import `location_sessions` from `views/_helpers` for scoping; do not redefine it. Extend
-  `seed_calls` idempotently only if the pages need richer JSON. 5.2 is the worked example: it added one
-  print view, wired two `detail.html` panels, and touched no model, no migration and no seeder.
+* **Add a view sub-module (5.4)** → templates + (only if genuinely a new page) a `views/<SubModule>/` +
+  `urls/<SubModule>/` folder with the re-export blocks, a `LIVE_LINKS["5.M"]` entry (empty `{}` if the surface
+  is reached through the existing detail page) — and **no model, no migration**. Import `location_sessions`
+  from `views/_helpers` for scoping; do not redefine it. Extend `seed_calls` idempotently only if the pages
+  need richer JSON. Two worked examples now: **5.2** added a print ROUTE (so a new view/url folder) plus two
+  `detail.html` panels; **5.3** added NO backend layer at all — two more `detail.html` cards, three `ui.py`
+  filters and one model `@property`, because its surfaces render on the page that already has a view. Reach for
+  a new view/url folder only when there is a genuinely new route; otherwise it is template + filter + property.
 * **Add a filter** → parse in the view BEFORE pagination, validate against a fixed choice set, pass the
   choices in context, and make junk degrade to "no filter".
 * **Extend the seeder** → add a spec with a fresh `provider_call_sid`; the dedupe key is that SID.
@@ -260,14 +287,17 @@ rather than a stale seed. If you flush scheduling, re-run `seed_calls --flush` a
 ```python
 '5.1': {'Call Logs': 'calls:callsession_list'},
 '5.2': {},   # built; surfaces reached through the 5.1 detail page, so no link of its own
+'5.3': {},   # built; event log + cost cards on the detail page, same as 5.2
 ```
 
 ## Tests
 
 `apps/calls/tests/` — `conftest.py` (its own `make_call_session` factory; pytest conftest fixtures do not
 cross sibling app-test packages), `test_models.py`, `test_views.py`, `test_security.py`,
-`test_seed_calls.py`, `test_transcript_views.py` (5.2 — transcript/analysis panels + the print view).
-**94 passing**, 630 across `apps/scheduling apps/calls` together.
+`test_seed_calls.py`, `test_transcript_views.py` (5.2), `test_ui_filters.py` + `test_event_log_cost_views.py`
+(5.3 — the redaction/pretty_json/total_cost_usd filters and the event-log/cost cards). **143 passing**, 679
+across `apps/scheduling apps/calls` together. The `ui.py` filters are tested under `apps/calls/tests/` because
+`apps/accounts` has no test package — note that if you add `accounts` tests later.
 
 **Query-count tests measure the VIEW, not the request.** A `Client` request carries a constant overhead of
 session + auth + tenant/location middleware + the navigation context processor, so a literal
