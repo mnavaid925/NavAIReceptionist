@@ -1,14 +1,17 @@
 """Unit tests for the shared display-time filters `apps.accounts.templatetags.ui`
 added for sub-module 5.3 (Event Log & Cost): `redact_args`, `pretty_json`,
-`error_log_count` and `iso_time`.
+`error_log_count` and `iso_time` — plus `ensure_list` and `consent_basis_label`,
+added for sub-module 5.4 (Recording & Transfer Outcome).
 
 These are `apps.accounts` filters, but `apps/accounts/tests/` does not exist yet
 in this repo (no `__init__.py`, no `conftest.py`, no prior suite) — the task
 brief is explicit that in that case the tests belong with the CONSUMER that
 exercises them end to end, which is `apps.calls`'s call-detail page. Rendered
 end-to-end proof of the same redaction lives alongside the call-detail view
-tests in `test_event_log_cost_views.py`; this file is the filters in isolation,
-pure-function style, needing no `django_db` at all.
+tests in `test_event_log_cost_views.py`; `ensure_list`'s and
+`consent_basis_label`'s own end-to-end proof lives in `test_recording_views.py`
+(the waveform-lane and consent-badge rendering tests). This file is the filters
+in isolation, pure-function style, needing no `django_db` at all.
 """
 import copy
 import json
@@ -20,6 +23,8 @@ from django.utils.safestring import SafeString
 
 from apps.accounts.templatetags.ui import (
     REDACTION_MARKER,
+    consent_basis_label,
+    ensure_list,
     error_log_count,
     iso_time,
     pretty_json,
@@ -257,3 +262,54 @@ def test_iso_time_returns_garbage_unchanged():
 @pytest.mark.parametrize('value', ['', None])
 def test_iso_time_returns_empty_string_for_empty_input(value):
     assert iso_time(value) == ''
+
+
+# --------------------------------------------------------------------------- #
+# ensure_list — sub-module 5.4, the waveform-lane crash guard
+# --------------------------------------------------------------------------- #
+
+def test_ensure_list_returns_a_real_list_unchanged():
+    assert ensure_list([1, 2]) == [1, 2]
+
+
+def test_ensure_list_returns_an_empty_list_unchanged():
+    assert ensure_list([]) == []
+
+
+@pytest.mark.parametrize('value', [42, None, 'x', {}, True, 3.14])
+def test_ensure_list_returns_empty_list_for_anything_that_is_not_a_list(value):
+    """The regression case this filter exists for: `waveform_peaks.bins` is an
+    INT COUNT, not an array — `{% for x in 42 %}` raises `TypeError` and 500s
+    the call-detail page. Every non-list shape degrades to `[]` instead.
+    """
+    assert ensure_list(value) == []
+
+
+# --------------------------------------------------------------------------- #
+# consent_basis_label — sub-module 5.4, the recording card's compliance badge
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize('value, expected', [
+    ('announced_notice', 'Recorded — consent announced'),
+    ('two_party', 'Recorded — two-party consent'),
+    ('one_party', 'Recorded — one-party consent'),
+    ('not_recorded', 'Not recorded'),
+])
+def test_consent_basis_label_maps_known_values(value, expected):
+    assert consent_basis_label(value) == expected
+
+
+def test_consent_basis_label_falls_back_to_the_raw_value_for_an_unknown_basis():
+    """Fails VISIBLE, not silent: a jurisdiction-specific basis Module 3 has not
+    added a label for yet must still show something, not disappear.
+    """
+    assert consent_basis_label('some_future_basis') == 'some_future_basis'
+
+
+@pytest.mark.parametrize('value', ['', None])
+def test_consent_basis_label_returns_empty_string_for_empty_input(value):
+    assert consent_basis_label(value) == ''
+
+
+def test_consent_basis_label_strips_whitespace():
+    assert consent_basis_label('  two_party  ') == 'Recorded — two-party consent'
