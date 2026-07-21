@@ -1,3 +1,4 @@
+{% load ui %}
 {% comment %}
   Recording playback.
 
@@ -46,12 +47,12 @@
       {% endcomment %}
       {% if session.waveform_peaks %}
         <div class="waveform" aria-hidden="true" data-peaks-id="peaks-{{ session.pk }}-caller">
-          {% for peak in session.waveform_peaks.caller %}
+          {% for peak in session.waveform_peaks.caller|ensure_list %}
             <span style="--peak: {% widthratio peak 1 100 %}%"></span>
           {% endfor %}
         </div>
         <div class="waveform" aria-hidden="true" data-peaks-id="peaks-{{ session.pk }}-bot">
-          {% for peak in session.waveform_peaks.bot %}
+          {% for peak in session.waveform_peaks.bot|ensure_list %}
             <span class="bot" style="--peak: {% widthratio peak 1 100 %}%"></span>
           {% endfor %}
         </div>
@@ -65,7 +66,13 @@
       </p>
 
       {% if can_download and recording_url %}
-        <a class="btn btn-outline" href="{{ recording_url }}" download>
+        {% comment %}
+          `&dl=1` makes the serve view send `Content-Disposition: attachment`, so
+          the browser saves rather than streams even where the HTML5 `download`
+          attribute is ignored. `recording_url` already carries `?sig=…`, so this
+          is an extra query param on an existing query string.
+        {% endcomment %}
+        <a class="btn btn-outline" href="{{ recording_url }}&amp;dl=1" download>
           <i data-lucide="download"></i> Download
         </a>
       {% endif %}
