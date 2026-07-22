@@ -73,6 +73,14 @@ LIVE_LINKS = {
     # Module 3 is the service module — no CRUD. 3.1's one navigable surface is the
     # runtime diagnostics page (the webhook itself answers a carrier, not a user).
     '3.1': {'Runtime Diagnostics': 'runtime:diagnostics'},
+    # BUILT, and deliberately contributes no sidebar link (same posture as 0.1 /
+    # 5.2-5.4). 3.2's surfaces — the media-stream consumer and the `simulate_call`
+    # management command — are not pages a signed-in user navigates to. What 3.2
+    # makes real is 3.1's existing "active calls" stat on the diagnostics page: it
+    # reads zero until 3.2's disconnect() is the first code to move a session out
+    # of `in_progress`. Pointing this at runtime:diagnostics would just duplicate
+    # 3.1's row.
+    '3.2': {},
     '4.1': {'Contacts': 'scheduling:contact_list'},
     '4.2': {'Services': 'scheduling:service_list',
             'Resources': 'scheduling:resource_list'},
