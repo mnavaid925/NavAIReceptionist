@@ -6,9 +6,10 @@
 websocket routes simply do not exist under it. Anything touching the Twilio media
 stream or a live-call surface must go through this module.
 
-`websocket_urlpatterns` is empty until Module 3 (Call Runtime) adds
-`apps/runtime/routing.py`. The Channels URLRouter is first-match-wins, so when
-routes are added here a greedy `<str:token>` pattern must be checked against the
+The `"websocket"` protocol is routed to `apps/runtime/routing.py` — Module 3.2's
+media stream is the first (and, for now, only) websocket route. The Channels
+URLRouter is first-match-wins, so when a later sub-module adds a route (the staff
+live-call surface) a greedy `<str:token>` pattern must be checked against the
 whole concatenated list, not just its own file.
 """
 import os
@@ -42,7 +43,9 @@ http_application = (
     else django_asgi_application
 )
 
-websocket_urlpatterns = []
+# Imported after get_asgi_application() above so the app registry is populated
+# before the consumer module (and the models it imports) load.
+from apps.runtime.routing import websocket_urlpatterns  # noqa: E402
 
 application = ProtocolTypeRouter(
     {
