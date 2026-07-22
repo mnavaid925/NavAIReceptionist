@@ -6,15 +6,26 @@ tools call the adapter interface, never a vendor SDK directly, so the whole call
 path can run against fakes under ``PROVIDER_MODE=fake`` with no credentials and
 no network.
 
-Sub-module 3.1 (Inbound Webhook & Call Resolution) needs only the telephony seam:
+Flat modules — import each directly (``from apps.runtime.providers.audio import
+mulaw_to_pcm16``); this package is a namespace, not a re-export surface.
 
-* ``base``      — ``PROVIDER_MODE`` resolution and the fail-safe rule.
-* ``telephony`` — pure, provider-agnostic Twilio helpers: the exact public URL to
-  verify a signature against, signature verification, and the TwiML builders for
-  the media-stream connect and the spoken decline. **No network, no socket.**
-* ``tokens``    — the signed, short-TTL, opaque stream token minted into the
-  connect TwiML and verified by the 3.2 media consumer.
+* ``base``        — ``PROVIDER_MODE`` resolution and the fail-safe rule.
+* ``telephony``   — pure, provider-agnostic Twilio helpers: the exact public URL
+  to verify a signature against, signature verification, and the TwiML builders
+  for the media-stream connect and the spoken decline (3.1). **No network.**
+* ``tokens``      — the signed, short-TTL, opaque stream token minted into the
+  connect TwiML (3.1) and verified by the 3.2 media consumer in the ``start`` frame.
+* ``audio``       — μ-law ⇄ PCM codec, the stateful inbound ``Resampler``, 20 ms
+  frame slicing and playback tracking (3.2). Pure DSP, ``audioop``-based.
+* ``vad``         — energy VAD, endpointing, sustained-speech barge-in and the
+  echo guard, as named constants + a state machine (3.2). Pure heuristics.
+* ``reliability`` — the bounded-call seam: timeout + retry, with a ``RateLimited``
+  vs. transient distinction, shared by the three adapters below (3.2).
+* ``stt`` / ``tts`` / ``llm`` — the narrow async STT / TTS / LLM adapter
+  interfaces, their **fakes** (real contract implementations, not mocks) and the
+  ``get_*_backend()`` resolvers (3.2). Non-live modes resolve to the fake; live
+  refuses to initialize without a real integration.
 
-STT / TTS / LLM adapters and their fakes arrive with 3.2 / 3.3; the media redirect
-+ hangup live implementation and the ``get_backend()`` handoff arrive with 3.4.
+The media redirect + hangup live implementation and the ``get_backend()`` handoff
+arrive with 3.4; the 12-tool dispatcher with 3.3.
 """
