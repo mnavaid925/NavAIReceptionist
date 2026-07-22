@@ -4637,3 +4637,339 @@ qa-smoke-tester found nothing to change. Skill authored at `.claude/skills/runti
 group-naming disagreement CLAUDE.md `t{tenant}:l{location}:call:{session}` vs skill `t{tenant}:call:{session}`);
 tools/dispatcher (3.3); transfer + the `get_backend()` handoff (3.4); recording/teardown/waveform/cost + the fuller
 diagnostics + webhook rate-limit sizing (3.5).
+
+---
+# Sub-module 3.2 — Media Stream & Turn Loop (Module 3: Call Runtime, `runtime`) — plan from research-runtime-3.2.md (2026-07-23)
+
+## Shape: SERVICE — zero models, zero migrations attributable to 3.2
+
+Confirmed by grep: `apps/runtime/models/` does not exist (no `models` package at all in `apps/runtime`), and
+`makemigrations runtime` must keep reporting "No changes detected" throughout this pass. 3.2 touches two
+already-built models it does not own: `agents.AgentSetting` (read-only — `voice_provider`, `greeting`,
+`prompt_text`, `variables`, `enabled`, `transfer_*` fields read but not written) and `calls.CallSession`
+(read/write). **Correction to the research framing**: `started_at` is already written by 3.1's webhook
+(`webhooks.py` line ~146, `CallSession.objects.get_or_create(..., defaults={'started_at': timezone.now(), ...})`)
+— 3.2 is NOT the first writer of `started_at`. 3.2 IS the first writer of `transcript`, `logs`, `usage`, and the
+first to write `ended_at` and transition `status` out of `in_progress` (to `completed`/`abandoned`/`failed`;
+`transferred` is 3.4's to set). No new model is invented to hit a count target — this sub-module's job is the
+consumer, the audio/VAD machinery, the provider adapters + fakes, and the turn loop.
+
+## Services/consumers (no CRUD models — the build surface for this pass)
+
+- [ ] **Consumer** — `apps/runtime/consumers/MediaStreamTurnLoop/MediaStream.py`: `MediaStreamConsumer`
+  (`AsyncWebsocketConsumer` or `AsyncJsonWebsocketConsumer`), one instance per call, owning a `CallState`
+  dataclass (below) as its only mutable state. Not tenant/location scoped by a Django queryset filter in the
+  usual CRUD sense — scoped instead by resolving tenant/location from the verified token and re-asserting them
+  on every subsequent `CallSession`/`AgentSetting` touch (`database_sync_to_async` queries always include
+  `tenant=`/`location=` filters, never a bare `.get(pk=...)`).
+- [ ] **State** — `apps/runtime/agent/state.py`: `CallState` dataclass — `tenant_id`, `location_id`, `session_id`,
+  `agent_setting_id`, `voice_provider` (from `AgentSetting.voice_provider`/`CallSession.mode`), `contact_id:
+  int | None = None` (3.3 fills this in; 3.2 only carries the slot), `history: list` (turn-role dicts resent to
+  the LLM each turn, trimmed per §7), `transcript_buffer` / `logs_buffer` / `usage_buffer` (appended in-process,
+  flushed onto `CallSession` at defined checkpoints — start, per-turn, disconnect — never held only in memory
+  until the very end per the model's own docstring on worker-restart risk), `turn_sequence: int = 0`,
+  `turn_busy: bool = False`, `pending_utterance: bytes | None = None` (the single-slot pending queue),
+  `pending_transfer: str | None = None` (the seam 3.4 sets/reads — 3.2 declares the field, sets it never),
+  `call_started_at`, `last_audio_at` (idle-timeout clock), `ended_reason: str | None = None`. Never carries a
+  raw `tenant_id`/`location_id` sourced from the connect URL — only from `verify_stream_token()`'s payload.
+- [ ] **Prompt rendering** — `apps/runtime/agent/prompt.py`: `render_template(text, variables) -> str` implementing
+  the `{{key}}` / `{{ key }}` regex from skill §10 (`\{\{\s*([\w.\-]+)\s*\}\}`), missing key → `''`; `build_variables
+  (agent_setting, call_session, now)` computing the **full runtime var set** for the first time in code —
+  `from_e164`, `to_e164`, `tenant_name`, `location_id`, `location_name`, `location_address`, `is_open_now`
+  (server-computed `"yes"`/`"no"` literal from the location's hours — never left for the model to derive),
+  `current_date`, `current_time` (both in the **location's** timezone, portable strftime — no `%-d`/`%-I`),
+  `caller_display_name`, `agent_name` — merged as `{**agent_setting.variables, **runtime_vars}` (runtime wins);
+  `render_greeting(agent_setting, variables) -> str` — falls back to a short built-in line when
+  `AgentSetting.greeting` is blank, zero LLM tokens, called once at call start.
+- [ ] **Turn loop** — `apps/runtime/agent/turn.py`: `run_turn(state, utterance_pcm) -> None` implementing
+  utterance → `stt.transcribe` → `history.append(user)` → `llm.generate(history, system, tools=[])` → (no tool
+  calls possible yet, so the loop always falls straight through — the tool-dispatch branch and the
+  deferred-transport check are written as explicit no-op seams, not omitted, so 3.3/3.4 plug in without
+  reshaping the function) → `tts.synthesize` → paced outbound frames. Wired to `settings.MAX_TOOL_ITERATIONS`,
+  `settings.IDLE_TIMEOUT_SECONDS`, `settings.MAX_CALL_SECONDS`, `settings.PROVIDER_TIMEOUT_SECONDS` — read from
+  Django settings, never re-declared as separate literals. Refreshes `current_date`/`current_time`/`is_open_now`
+  every turn (§10). Appends one `{turn_sequence, cost_breakdown, cost_usd}` to `state.usage_buffer` as the turn
+  completes (§ below). History trimmed/summarized once it exceeds a named turn-count constant.
+
+## Backend (apps/runtime/{consumers,agent,providers}/ — service module, no models/forms/views/urls CRUD layers)
+
+- [ ] `apps/runtime/consumers/__init__.py` — re-exports `MediaStreamConsumer` (Backend Package Structure rule 3 —
+  a consumer not re-exported here fails at `routing.py` import time, not at connect time).
+- [ ] `apps/runtime/consumers/MediaStreamTurnLoop/__init__.py` — empty package marker.
+- [ ] `apps/runtime/consumers/MediaStreamTurnLoop/MediaStream.py` — the consumer (full lifecycle below).
+- [ ] `apps/runtime/agent/__init__.py` — re-exports `CallState`, `render_template`, `build_variables`,
+  `render_greeting`, `run_turn`.
+- [ ] `apps/runtime/agent/state.py`, `apps/runtime/agent/prompt.py`, `apps/runtime/agent/turn.py`.
+- [ ] `apps/runtime/providers/audio.py` (new, flat — joins `base.py`/`telephony.py`/`tokens.py`):
+  `mulaw_to_pcm16(mulaw_bytes) -> bytes` / `pcm16_to_mulaw(pcm16_bytes) -> bytes` via stdlib `audioop` (Python
+  3.10, no numpy dependency to add); `class Resampler` wrapping `audioop.ratecv`, **threading its state tuple
+  across inbound frames** (one `Resampler` instance lives on `CallState` for the inbound leg, mutated frame to
+  frame) and **constructing a fresh instance per outbound synthesis** (skill §4 — a shared state across
+  independent synth blobs is the audible-click bug); `pace_frames(pcm_or_mulaw_bytes, frame_ms=20)` an async
+  generator yielding 20 ms slices with `await asyncio.sleep(0.020)` between them; `PlaybackTracker` recording
+  frames actually sent so a barge-in mid-blob can report the played prefix (tracking only — 3.5 persists it into
+  `recording_blob`).
+- [ ] `apps/runtime/providers/vad.py` (new, flat): named constants — `VAD_ENERGY_THRESHOLD`,
+  `VAD_MIN_SPEECH_MS`, `VAD_END_SILENCE_MS`, `VAD_MAX_UTTERANCE_MS`, `VAD_ECHO_COOLDOWN_MS`,
+  `VAD_BARGE_IN_GRACE_MS`, `VAD_BARGE_IN_SUSTAIN_MS`, `VAD_PRE_ROLL_MS` — a first, conservative, documented set
+  (tuning against real audio is out of scope, per research); `class VadState` — `feed(pcm16_frame, is_playing)
+  -> VadEvent | None` (`utterance_start`/`utterance_end`/`barge_in`/`none`), pre-roll ring buffer, the
+  echo-guard window, the sustained-speech-only barge-in gate.
+- [ ] `apps/runtime/providers/stt.py` (new, flat): `class SttBackend(Protocol): async def transcribe(self, pcm,
+  rate) -> str`; `class FakeSttBackend` (deterministic canned transcript, optionally scripted per-call via a
+  fixture list for `simulate_call`); `get_stt_backend()` — non-live → `FakeSttBackend()`; live → refuses to
+  construct unless `providers.base.is_live()` and `settings.STT_PROVIDER` names a real vendor with credentials
+  present (this pass stubs the live branch to raise, matching the "live implementations are integration-later"
+  scope call).
+- [ ] `apps/runtime/providers/tts.py` (new, flat): `class TtsBackend(Protocol): async def synthesize(self, text)
+  -> tuple[bytes, int]` (pcm16, sample_rate); `class FakeTtsBackend` (deterministic synthetic tone/silence sized
+  to text length, sample rate = `settings.TTS_SAMPLE_RATE` for `voice_provider='live'`, 16000 for
+  `google`/`gemini` per skill §4's table); `get_tts_backend()` mirroring `get_stt_backend()`'s resolution.
+- [ ] `apps/runtime/providers/llm.py` (new, flat): `class LlmBackend(Protocol): async def generate(self, history,
+  system, tools) -> tuple[str, list, dict]` (text, tool_calls, usage) — **`tools` accepts `[]` cleanly today**;
+  `class FakeLlmBackend` (scripted no-tool-calls replies, deterministic per fixture); `get_llm_backend()` mirrors
+  the other two. All three `get_*_backend()` functions live beside their `Backend`/`Fake*Backend` pair, not in
+  `base.py` — `base.py` stays the shared `active_mode()`/`is_live()`/`require_live()` seam only.
+- [ ] Every one of `stt.transcribe` / `tts.synthesize` / `llm.generate` wraps its call in
+  `asyncio.wait_for(..., timeout=settings.PROVIDER_TIMEOUT_SECONDS)` plus a bounded retry loop that inspects the
+  failure: a `RateLimited` exception backs off (does not hammer); a timeout/`5xx`-shaped transient error retries
+  within the bound; exhaustion degrades to a spoken fallback line (a short canned TTS line), never an exception
+  into the frame loop. The fake backends must be tell-able to simulate both failure shapes for tests.
+- [ ] `apps/runtime/management/__init__.py`, `apps/runtime/management/commands/__init__.py` (new — this app has
+  no `management/` package yet), `apps/runtime/management/commands/simulate_call.py` — the observable surface
+  (below).
+- [ ] `apps/runtime/routing.py` — replace the empty stub with
+  `path('ws/media-stream/', consumers.MediaStreamConsumer.as_asgi())`, checked against the whole concatenated
+  websocket list (currently the only entry — still document the check, since a second route lands in a later
+  sub-module and must be checked against this one).
+- [ ] `apps/runtime/admin.py` — **not touched.** No new model.
+- [ ] No re-export additions needed in `apps/runtime/providers/__init__.py`'s body beyond its existing docstring
+  (flat modules import directly, e.g. `from apps.runtime.providers.audio import mulaw_to_pcm16`) — update the
+  docstring's "arrive with 3.2/3.3" line to reflect that audio/vad/stt/tts/llm now exist.
+
+## Consumer lifecycle (the load-bearing detail — `voice-agent-runtime` §3)
+
+- [ ] `connect()` — **authorize, then accept, never the reverse**:
+  1. Read the stream-token custom parameter Twilio's `start` frame (or, per Twilio's Media Streams handshake,
+     the connect query — confirm against the real handshake shape during build) carries; call
+     `providers.tokens.verify_stream_token(token)`. `None` → close **`4401`** before ever calling `self.accept()`.
+  2. Cross-check the `sessionId` custom parameter against the verified token's `sid` — a mismatch (however it
+     could arise) closes **`4403`**, never silently trusts the higher-value one.
+  3. Resolve `tenant_id`/`location_id`/`session_id` **only** from the verified token payload — never from
+     `self.scope["url_route"]` or any connect-time query string (Invariant 3 applied to the one websocket surface
+     with no Django session at all).
+  4. `database_sync_to_async` re-fetch `AgentSetting` (by `tenant_id`+`location_id`) and `CallSession` (by
+     `session_id`, `tenant=`, `location=`) — a miss on either closes **`4404`**.
+  5. Re-check `AgentSetting.enabled` is still `True` — a number disabled between webhook-answer and
+     stream-connect must not get served; the TOCTOU window 3.1's research flagged as belonging here.
+  6. Only after all of the above: join the group and `self.accept()`.
+- [ ] **Group name — reconcile the CLAUDE.md/skill disagreement to CLAUDE.md's location-namespaced form**:
+  `t{tenant_id}:l{location_id}:call:{session_id}`. This is the exact discrepancy 3.1's close-out flagged
+  (`.claude/tasks/todo.md`'s own 3.1 review notes) and CLAUDE.md's realtime rule 3 states the location-namespaced
+  form explicitly — the skill's §3 currently under-specifies it. Fix both the code AND
+  `.claude/skills/voice-agent-runtime/SKILL.md` §3 in this pass (see Close-out).
+- [ ] `receive()` — the frame loop, wrapped so **one bad frame cannot kill the call** (`try`/`except` around the
+  per-frame body, logged by exception type only, loop continues):
+  - `connected` — Twilio's opening handshake frame, acknowledged, no state change.
+  - `start` — carries `streamSid`/`callSid` + custom params; re-run the enabled-check from step 5 above one more
+    time (belt-and-suspenders against a race between `connect()` and `start`); play the deterministic greeting
+    (`agent.prompt.render_greeting`) **non-interruptible**, zero LLM calls, first audio immediate.
+  - `media` — base64 μ-law decode → `audio.mulaw_to_pcm16` → `Resampler` (inbound, threaded state) → 16 kHz PCM
+    fed to `VadState.feed()`. A `VadEvent.barge_in` cancels the current playback task, drops queued frames, skips
+    the echo cooldown. A `VadEvent.utterance_end` dispatches `run_turn` as `asyncio.create_task(...)` **only if**
+    `not state.turn_busy`; otherwise the captured utterance is written into the **single-slot**
+    `state.pending_utterance` (overwriting, never queueing more than one), replayed when the in-flight turn ends.
+  - `stop` — finalizes; triggers the same teardown `disconnect()` performs (idempotent — both paths call one
+    `_finalize()` helper).
+  - `mark` — acknowledgement bookkeeping only (confirms a previously sent audio mark played out — used to refine
+    `PlaybackTracker`, not required to gate any other logic).
+  - Frame handling stays cheap: **no ORM/provider work inline** — decode/resample/VAD-feed only; `run_turn` is
+    always a background task.
+- [ ] `disconnect()` — **guaranteed teardown, best-effort, never raises**:
+  - Cancel the outbound playback task and the in-flight turn task (`task.cancel()`, swallow `CancelledError`).
+  - `database_sync_to_async` flush `state.transcript_buffer`/`logs_buffer`/`usage_buffer` onto the `CallSession`
+    row (`F()`-free read-modify-write is acceptable here — one writer per call per the model's own docstring;
+    note the concurrent-append caveat that docstring already calls out, and keep flush single-path through
+    `_finalize()` so `stop` and an abnormal socket close cannot double-append).
+  - Stamp `ended_at = timezone.now()` and a terminal `status` — `completed` on a clean `stop`/hangup,
+    `abandoned` on the idle-timeout path, `failed` on an unrecoverable provider/consumer error. (`transferred` is
+    3.4's to set; 3.2 never writes it.)
+  - Runs on abnormal termination too — wrap the whole body in `try/except Exception: logger.exception(...)` so a
+    bug in teardown itself cannot leave the row stuck at `in_progress` with no `ended_at`.
+- [ ] **Async discipline, everywhere in this file**: no sync ORM call, no `requests`/`httpx.Client`, no
+  `time.sleep`, no file I/O inside `async def` — every DB touch goes through `database_sync_to_async`; a
+  `SynchronousOnlyOperation` raised in any test is a build-blocking failure, never waved through.
+- [ ] **Idle handling**: track `state.last_audio_at`; a background watchdog (or a check on each frame) speaks a
+  configured idle prompt after a period of silence, then ends the call with `status='abandoned'` and
+  `ended_reason='idle_timeout'` once `settings.IDLE_TIMEOUT_SECONDS` (45s default) elapses with no further
+  speech. `settings.MAX_CALL_SECONDS` (900s default) is the hard ceiling regardless of activity —
+  `status='completed'`, `ended_reason='max_duration'`.
+
+## Provider adapters + fakes (apps/runtime/providers/)
+
+- [ ] `stt.transcribe(pcm, rate)`, `tts.synthesize(text) -> (pcm, rate)`, `llm.generate(history, system, tools)
+  -> (text, tool_calls, usage)` — narrow async interfaces, each with its `Fake*Backend` implementation **shipped
+  in the same pass**, never a mock (skill §12 — the adapter *contract* is what tests exercise). `get_*_backend()`
+  resolve via `providers.base.active_mode()`: non-live → fake; live → `require_live(...)` + credential check,
+  raising `LiveModeError`/`NotImplementedError` for now (a real vendor SDK integration is explicitly Deferred).
+- [ ] Cascade vs. native-audio shape: `voice_provider='live'` → ONE combined timeout/retry envelope per turn (the
+  fake still models it as three logical calls internally for cost-breakdown purposes, but the retry/timeout
+  wrapping is one envelope); `google`/`gemini` → THREE independently-bounded legs (STT, LLM, TTS), each its own
+  `asyncio.wait_for` + retry, each able to degrade to fallback independently.
+
+## Prompt / variables
+
+- [ ] Runtime var set (implemented here for the first time, per skill §10 — no new vars beyond what the skill
+  already documents): `from_e164`, `to_e164`, `tenant_name`, `location_id`, `location_name`, `location_address`,
+  `is_open_now`, `current_date`, `current_time`, `caller_display_name`, `agent_name`. Merge order:
+  `AgentSetting.variables` first, runtime vars win on a clash. `is_open_now` computed server-side as the literal
+  `"yes"`/`"no"` string — the model never derives it from raw hours. `current_date`/`current_time` computed in
+  the **location's** timezone (never the server's) and **recomputed every turn**. Portable strftime — no
+  `%-d`/`%-I` (unsupported on the Windows dev host).
+  - [ ] The prompt names no tool and no tool parameter — trivially true right now (the tool table is empty until
+    3.3), but the rendering code itself must not special-case tool names either, so 3.3 needs no change here.
+
+## Provider adapter (per §above; consolidated pointer for the output-format checklist)
+
+- [ ] `apps/runtime/providers/{stt,tts,llm}.py` — adapter method + fake, added together, as detailed above.
+
+## CallSession.usage cost lines
+
+- [ ] Appended once per completed assistant turn, in `agent/turn.py`, immediately after `tts.synthesize` returns
+  (before/independent of the outbound frame-pacing loop — the DB append itself runs through
+  `database_sync_to_async` and must never block audio pacing; fire it without awaiting the frame generator's
+  completion). Shape: `{turn_sequence, cost_breakdown, cost_usd}`.
+  - `voice_provider='live'` (native-audio): `cost_breakdown = {model, input_audio_tokens, output_audio_tokens,
+    input_text_tokens?, output_text_tokens?}`.
+  - `voice_provider in ('google', 'gemini')` (cascaded): `cost_breakdown = {model, llm_input_tokens,
+    llm_output_tokens, llm_cost_usd, stt_seconds, stt_cost_usd, tts_characters, tts_cost_usd}` — STT priced per
+    audio-second, TTS priced per character synthesized, as separate line items alongside the LLM's token cost.
+  - **Appended as a delta, never re-aggregated** — the call's total is `sum(entry['cost_usd'] for entry in
+    usage)`, computed at read time (Module 5's job), not stored as a running total anywhere on the row.
+
+## Wire-up
+
+- [ ] `config/asgi.py` — import `apps.runtime.routing.websocket_urlpatterns` and pass it into
+  `URLRouter([...])` for the `"websocket"` key of `ProtocolTypeRouter`, replacing the module-level empty
+  `websocket_urlpatterns = []` placeholder — **the first time this file is wired to a real app**, per its own
+  docstring's forward note.
+- [ ] `apps/accounts/navigation.py` — add `'3.2': {}` to `LIVE_LINKS`, same posture as `'0.1'`/`'5.2'`–`'5.4'`:
+  presence in the ledger means built; the consumer and the `simulate_call` command are not navigable pages, and
+  pointing this at 3.1's `runtime:diagnostics` would duplicate that row rather than add one. Include a one-line
+  comment matching the existing entries' style, referencing that 3.1's active-call stat becomes meaningful once
+  this sub-module lands.
+- [ ] No `config/settings.py` change required for this pass — `PROVIDER_TIMEOUT_SECONDS`, `IDLE_TIMEOUT_SECONDS`,
+  `MAX_CALL_SECONDS`, `MAX_TOOL_ITERATIONS`, `TTS_SAMPLE_RATE`, `STT_PROVIDER`/`TTS_PROVIDER`/`LLM_PROVIDER`,
+  `CHANNEL_LAYERS`, `ASGI_APPLICATION` are all already declared (confirmed by grep) — this pass **consumes** them,
+  it does not add new ones. `MAX_CONCURRENT_CALLS` also already exists but a capacity guard on `connect()` is
+  parked (see Later passes).
+- [ ] `config/urls.py` — **not touched.** This sub-module adds no HTTP route, only a websocket one via
+  `routing.py`/`asgi.py`.
+
+## Templates
+
+**None — service sub-module, no CRUD templates.** `templates/runtime/diagnostics.html` (3.1) needs **zero edits**:
+its existing `CallSession.objects.filter(..., status='in_progress').count()` query becomes meaningful the moment
+`disconnect()` starts writing a terminal status; the template already renders whatever that query returns.
+
+## Observable surface — `manage.py simulate_call`
+
+- [ ] `apps/runtime/management/commands/simulate_call.py` — drives one full fake call end-to-end through the real
+  path: opens a `channels.testing.WebsocketCommunicator` against `config.asgi.application`, sends
+  Twilio-shaped `connected`/`start`/`media` (a short scripted synthetic utterance)/`stop` frames under
+  `PROVIDER_MODE=fake`, then prints the resulting `CallSession.transcript` / `.logs` / `.usage` /
+  `.status`/`.started_at`/`.ended_at`. Accepts `--tenant`/`--location` (or defaults to the first seeded
+  demo tenant/location with an enabled `AgentSetting`) so it is runnable against `seed_agents`'s existing data
+  with **zero new seeder work** — 3.2 adds no data of its own. Exits non-zero on any exception surfaced past the
+  consumer (a `simulate_call` that silently "succeeds" while the consumer swallowed an error defeats the point of
+  an observable surface).
+- [ ] Confirms in its own docstring/output that it places **no real call** — it never touches
+  `providers.telephony`'s TwiML/redirect helpers, only the websocket path.
+
+## Verify
+
+- [ ] `manage.py makemigrations runtime --check` → "No changes detected" (acceptance criterion, not a formality).
+- [ ] `manage.py migrate` — no-op for `runtime`, confirms the rest of the DB is unaffected.
+- [ ] `manage.py check` clean, including `runtime.E001` still inert under `DEBUG=True`.
+- [ ] Assert `PROVIDER_MODE=fake` in `config/settings_test.py` (already pinned) and re-assert it in
+  `apps/runtime/tests/conftest.py`'s existing `_pin_webhook_base` fixture (or a sibling one) for the 3.2 suite.
+- [ ] `pytest -q apps/runtime` — new tests, `pytest-asyncio`/`WebsocketCommunicator` against
+  `config.asgi.application`, `@pytest.mark.django_db(transaction=True)` on DB-touching async tests:
+  - [ ] Consumer **accepted** with a valid stream token; group name equals
+    `t{tenant_id}:l{location_id}:call:{session_id}` exactly.
+  - [ ] Consumer **rejected**: no token (`4401`); a token whose `sid` doesn't match the `sessionId` custom param
+    (`4403`); another tenant's session id; another **location's** session id; an unknown session id (`4404`).
+  - [ ] Number disabled between webhook-answer and stream-connect (`AgentSetting.enabled` flipped False before
+    `start`) → the stream declines rather than serving audio.
+  - [ ] Codec round-trip: a synthetic PCM16 frame survives `pcm16_to_mulaw` → `mulaw_to_pcm16` within tolerance.
+  - [ ] `Resampler` state threads across two consecutive inbound frames without a discontinuity at the boundary
+    (assert continuity, not just correctness of each frame in isolation).
+  - [ ] VAD: a scripted speech+silence fixture yields exactly one utterance with intact pre-roll; a sustained
+    speech fixture during playback triggers barge-in (`PlaybackTracker` reports a played prefix shorter than the
+    full synthesized blob); a brief-noise/cough fixture during playback does NOT trigger barge-in.
+  - [ ] Echo guard: agent-playing audio fed back through `media` frames is never accumulated into an utterance.
+  - [ ] `disconnect()` finalizes the `CallSession` (terminal `status`, `ended_at` set, non-empty `transcript`/
+    `logs`/`usage`) both on a clean `stop` and on an abnormal communicator disconnect.
+  - [ ] Idle timeout: no further speech for `IDLE_TIMEOUT_SECONDS` ends the call `status='abandoned'`.
+  - [ ] A `SynchronousOnlyOperation` anywhere in the suite is a hard failure, never a flake/retry.
+  - [ ] Provider timeout: `FakeLlmBackend` (or STT/TTS) configured to exceed `PROVIDER_TIMEOUT_SECONDS` → the turn
+    degrades to a spoken fallback line, never raises into the frame loop.
+  - [ ] Provider rate-limited (429-shaped fake failure) → backs off rather than hammering; a transient
+    (5xx/timeout-shaped) failure retries within the bound — assert the two paths are distinguishable in the
+    fake's call log.
+  - [ ] Greeting: rendered from `AgentSetting.greeting` with `{{variable}}` substitution; `FakeLlmBackend.generate`
+    call count is 0 during the greeting; a VAD event during greeting playback does not cut it off
+    (non-interruptible).
+  - [ ] `is_open_now` renders the literal `"yes"`/`"no"`; a missing `{{key}}` renders empty, never leaks the
+    placeholder; `current_date`/`current_time` are in the **location's** timezone.
+  - [ ] Cost: a simulated multi-turn call appends exactly one `usage` entry per completed turn, and
+    `sum(cost_usd)` equals the total a reader would compute.
+  - [ ] `manage.py simulate_call` runs to completion under `PROVIDER_MODE=fake` (invoked via `call_command` in a
+    test, not just manually), exits 0, and the resulting `CallSession.status` is terminal (not `in_progress`).
+- [ ] Manual/administrative check: `venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000
+  config.asgi:application` starts clean with the new websocket route mounted (confirms `asgi.py`'s wiring, not
+  just the route list in isolation).
+- [ ] Sidebar: Module 3 still shows Live via `'3.1'`; `'3.2'` present in `LIVE_LINKS` (empty dict, no new row).
+
+## Close-out
+
+- [ ] Review agents in order: code-reviewer → explorer → frontend-reviewer → performance-reviewer →
+  realtime-reviewer (the load-bearing one for this pass — async discipline, group namespacing, barge-in
+  correctness) → qa-smoke-tester → security-reviewer (token verification, PII discipline in `logs`/`transcript`,
+  never logging raw audio/transcript/caller number at INFO) → test-writer.
+- [ ] **Update** (not re-author) `.claude/skills/runtime/SKILL.md`: flip 3.2's row from "not built" to
+  **BUILT**, add the `consumers/`, `agent/`, and the five new `providers/*.py` files to the "Backend package
+  layout" tree, add a **Tools & prompt surface** update (runtime var set now implemented, tool table still empty
+  — 3.3's job), add a **Realtime surfaces** update (the consumer, the resolved group-name form, the
+  `/ws/media-stream/` route, `config/asgi.py` now wired), add `manage.py simulate_call` under **Common tasks**,
+  and correct the "no `management/` package" gap (there wasn't one before this pass).
+- [ ] **Update** `.claude/skills/voice-agent-runtime/SKILL.md` §3 to state the group name as
+  `t{tenant_id}:l{location_id}:call:{session_id}` (matching CLAUDE.md, resolving the discrepancy 3.1's close-out
+  flagged) — this is a correction to the binding contract, made in the same change that implements it, per the
+  skill's own §17 instruction ("update this skill in the same change").
+- [ ] README — note Module 3's second sub-module shipped; call-runtime is now a phone call with a heartbeat (no
+  tools, no transfer, no recording yet) rather than webhook-only.
+
+## Later passes / deferred
+
+- 12-tool declarations + `apply_tool_call` dispatcher + `{ok,data,error}` envelope → **3.3** (this pass ships the
+  turn loop with `tools=[]` so the LLM adapter interface shape never changes when 3.3 lands).
+- Deferred-transfer signal **execution** (hours/target gating, the actual Twilio REST redirect, single-fire
+  guard, outcome capture) → **3.4** (this pass only declares `state.pending_transfer` as a field it never sets).
+- Consent-gated recording, `waveform_peaks` computation/persistence, `recording_blob` writing, the *full*
+  diagnostics page (per-stage latency, ended-reason codes, worker health) → **3.5**.
+- `MAX_CONCURRENT_CALLS` capacity enforcement on `connect()` (the setting exists; a soft-reject-beyond-capacity
+  guard is not this pass's job) → parked to 3.5's worker-health diagnostics pass.
+- Live STT/TTS/LLM vendor implementations against real credentials → integration exercise once real API keys
+  exist, not a code gap in this pass.
+- Production tuning of the VAD/barge-in named constants against real call audio → needs real traffic, not
+  buildable from synthetic fixtures alone.
+- Backchannel filler during active caller speech, cross-vendor STT/TTS/LLM fallback chaining, a per-location
+  configurable turn-eagerness/interruption-sensitivity field → all explicitly deferred by the research (the last
+  two need a new `AgentSetting` field, a 2.1 decision not this sub-module's to make unasked).
+- A richer `simulate_call` fixture library (barge-in scenarios, idle-timeout scenarios, provider-failure
+  scenarios) → a natural test-writer follow-up once the base command exists.
+- Webhook rate-limiting (carried over from 3.1, still unsized).
+
+## Review notes
+(filled in at the end)
