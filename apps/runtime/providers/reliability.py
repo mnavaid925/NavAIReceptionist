@@ -12,8 +12,12 @@ treatment (the research file's "provider rate limits" note):
   telling us to slow down. Hammering it compounds the outage across every
   concurrent call on the tenant. So we **back off** (a longer, escalating sleep)
   before the one bounded retry.
-* **Transient (``TransientProviderError`` / a timeout)** — a blip. Retry quickly
+* **Transient (``TransientProviderError``, a 5xx-shaped blip)** — retry quickly
   within the bound.
+* **A timeout is terminal — it is NOT retried.** A hung provider will not un-hang
+  on an immediate retry, and a second full timeout wait doubles the caller's
+  dead-air (the ≤3 s p95 turn budget, skill §11, is already blown by one). Fail
+  fast to the spoken fallback instead.
 
 A non-provider exception (a bug in our own code) is **not** retried — it
 propagates, because retrying a logic error just runs it again.
@@ -65,8 +69,10 @@ async def call_bounded(factory, *, timeout, retries=1,
         try:
             return await asyncio.wait_for(factory(), timeout)
         except asyncio.TimeoutError:
-            last_error = ProviderTimeout(f'provider call exceeded {timeout}s')
-            backoff = transient_backoff
+            # Terminal: a hung provider will not recover on an immediate retry, and
+            # a second full timeout wait doubles the caller's dead-air. Fail fast to
+            # the spoken fallback (skill §11 budget).
+            raise ProviderTimeout(f'provider call exceeded {timeout}s')
         except RateLimited as exc:
             last_error = exc
             backoff = rate_limit_backoff * (attempt + 1)
