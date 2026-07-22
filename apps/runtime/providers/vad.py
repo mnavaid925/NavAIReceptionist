@@ -105,9 +105,11 @@ class VadState:
     returns ``(event, utterance_pcm_or_None)``:
 
     * ``(UTTERANCE_END, pcm)`` — a complete caller utterance (pre-roll included);
-    * ``(BARGE_IN, pcm)`` — sustained caller speech interrupted the agent; ``pcm``
-      is the speech captured during the sustain window, which seeds the utterance
-      now in progress;
+    * ``(BARGE_IN, None)`` — sustained caller speech interrupted the agent. The
+      frames captured during the sustain window are retained internally as the seed
+      of the utterance now in progress and are returned later with that utterance's
+      ``UTTERANCE_END`` — so the interrupting words ("wait, actually—") are never
+      dropped, they arrive with the endpointed turn;
     * ``(NONE, None)`` — nothing to act on this frame.
 
     The state machine never raises on a malformed frame — a zero-length or odd
@@ -130,6 +132,7 @@ class VadState:
         self._playing_prev = False
         self._playing_ms = 0            # how long the current playback has run
         self._barge_sustain_ms = 0      # consecutive sustained speech while playing
+        self._barge_frames = []         # the sustained-speech frames themselves
         self._cooldown_ms = 0           # echo cooldown remaining after playback
 
     # -- public ------------------------------------------------------------- #
@@ -165,6 +168,8 @@ class VadState:
         self._silence_ms = 0
         self._utterance_ms = 0
         self._in_speech = False
+        self._barge_sustain_ms = 0
+        self._barge_frames = []
 
     # -- internals ---------------------------------------------------------- #
 
@@ -179,20 +184,26 @@ class VadState:
         if self._playing_ms < VAD_BARGE_IN_GRACE_MS:
             # Too early — the agent just started; ignore everything (grace window).
             self._barge_sustain_ms = 0
+            self._barge_frames = []
             return NONE, None
 
         if not is_speech:
             self._barge_sustain_ms = 0
+            self._barge_frames = []
             return NONE, None
 
-        # Sustained speech past the grace window: accumulate toward a barge-in.
+        # Sustained speech past the grace window: accumulate toward a barge-in,
+        # KEEPING the frames themselves (not just their duration) so the caller's
+        # opening words are not lost when the barge-in fires.
         self._barge_sustain_ms += dur
+        self._barge_frames.append(frame)
         if self._barge_sustain_ms >= VAD_BARGE_IN_SUSTAIN_MS:
-            # Fire. Seed a fresh utterance with the sustained-speech frame so the
-            # caller's interrupting words are not lost. Listening resumes cleanly.
-            self.reset_listening()
-            self._begin_speech(frame, dur)
-            self._barge_sustain_ms = 0
+            # Fire. Seed the new utterance with EVERY sustained-speech frame, not
+            # just the one that crossed the threshold — the ~300 ms of interrupting
+            # speech before the trip is the start of what the caller said.
+            frames = self._barge_frames
+            self.reset_listening()  # clears _barge_frames/_barge_sustain_ms too
+            self._begin_speech_frames(frames)
             self._cooldown_ms = 0  # a real interruption skips the echo cooldown
             return BARGE_IN, None
         return NONE, None
@@ -246,4 +257,18 @@ class VadState:
         self._speech_ms = dur
         self._silence_ms = 0
         self._utterance_ms = dur
+        self._in_speech = True
+
+    def _begin_speech_frames(self, frames):
+        """Start a new utterance seeded from the barge-in sustain frames.
+
+        Called only from the barge-in path, where the agent was playing so there is
+        no idle pre-roll to prepend (``reset_listening`` just cleared it) — the
+        seed is the sustained-speech frames themselves.
+        """
+        total_ms = sum(_frame_ms(f, self.rate) for f in frames)
+        self._utterance = list(frames)
+        self._speech_ms = total_ms
+        self._silence_ms = 0
+        self._utterance_ms = total_ms
         self._in_speech = True
