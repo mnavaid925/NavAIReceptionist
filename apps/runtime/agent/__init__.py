@@ -25,6 +25,7 @@ from apps.runtime.agent.turn import (
     ProviderBundle,
     TurnResult,
     run_turn,
+    tts_only_cost,
 )
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     'ProviderBundle',
     'TurnResult',
     'run_turn',
+    'tts_only_cost',
     'FALLBACK_LINE',
     'MAX_HISTORY_TURNS',
 ]
