@@ -1,0 +1,120 @@
+"""LLM adapter — sub-module 3.2.
+
+Narrow async interface (``voice-agent-runtime`` skill §12): ``generate(history,
+system, tools) -> (text, tool_calls, usage)``. The public method is bounded
+(timeout + retry); the concrete backend implements ``_generate``.
+
+**``tools`` accepts an empty list cleanly today.** 3.2 ships the turn loop with no
+tools — the 12-tool declarations and the ``apply_tool_call`` dispatcher are 3.3's.
+This interface's shape does not change when 3.3 lands: 3.3 populates the ``tools``
+argument and reads ``tool_calls`` from the return; 3.2 always passes ``[]`` and
+always gets back ``[]``, so the loop falls straight through to speaking the text.
+
+``usage`` is the per-turn token/audio accounting the turn loop folds into
+``CallSession.usage`` (skill §13) — the LLM is the only adapter that returns cost
+metadata; STT/TTS cost is derived by the turn loop from audio-seconds/characters.
+
+The fake is a real implementation: a deterministic scripted reply, no tool calls,
+a usage dict sized to the exchange. Tell-able to fail or stall for the
+bounded-call tests.
+"""
+import abc
+import asyncio
+
+from django.conf import settings
+
+from apps.runtime.providers.base import is_live, require_live
+from apps.runtime.providers.reliability import call_bounded
+
+__all__ = ['LlmBackend', 'FakeLlmBackend', 'LiveLlmBackend', 'get_llm_backend']
+
+#: What the fake replies when no script is supplied — a plausible receptionist
+#: line so a heartbeat call sounds like a call, never referencing a tool (skill §8).
+_FAKE_DEFAULT_REPLY = 'Sure, I can help you with that. What day works best for you?'
+
+
+class LlmBackend(abc.ABC):
+    """Bounded LLM interface. Concrete backends implement ``_generate``."""
+
+    async def generate(self, history, system, tools):
+        """Generate one assistant turn, bounded by ``PROVIDER_TIMEOUT_SECONDS``."""
+        return await call_bounded(
+            lambda: self._generate(history, system, tools),
+            timeout=settings.PROVIDER_TIMEOUT_SECONDS,
+        )
+
+    @abc.abstractmethod
+    async def _generate(self, history, system, tools):
+        """The raw provider call — return ``(text, tool_calls, usage)``."""
+        raise NotImplementedError
+
+
+class FakeLlmBackend(LlmBackend):
+    """Deterministic LLM for non-live modes — scripted replies, no tool calls.
+
+    ``replies`` is an optional script consumed one per turn; once exhausted it
+    falls back to the default line. ``errors`` / ``delay`` inject failures for the
+    bounded-call tests, and ``self.calls`` records each call. ``tool_calls`` is
+    always ``[]`` — 3.3 is what makes the model able to call a tool; wiring one
+    here would be building 3.3 early.
+    """
+
+    #: Rough cost model for the fake so ``CallSession.usage`` carries a plausible,
+    #: deterministic breakdown without a real tokenizer.
+    _MODEL = 'fake-llm'
+    _INPUT_TOKENS_PER_CHAR = 0.25
+    _OUTPUT_TOKENS_PER_CHAR = 0.25
+
+    def __init__(self, replies=None, errors=None, delay=0.0):
+        self._replies = list(replies or [])
+        self._errors = list(errors or [])
+        self._delay = delay
+        self.calls = []
+
+    async def _generate(self, history, system, tools):
+        self.calls.append({'history_len': len(history or []), 'tools': len(tools or [])})
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        if self._errors:
+            error = self._errors.pop(0)
+            if error is not None:
+                raise error
+        text = self._replies.pop(0) if self._replies else _FAKE_DEFAULT_REPLY
+        input_chars = len(system or '') + sum(
+            len(turn.get('text', '')) for turn in (history or []) if isinstance(turn, dict)
+        )
+        usage = {
+            'model': self._MODEL,
+            'input_tokens': int(input_chars * self._INPUT_TOKENS_PER_CHAR),
+            'output_tokens': int(len(text) * self._OUTPUT_TOKENS_PER_CHAR),
+        }
+        # (text, tool_calls, usage) — tool_calls stays empty until 3.3.
+        return text, [], usage
+
+
+class LiveLlmBackend(LlmBackend):
+    """The live LLM backend — refuses to exist outside live mode (see STT)."""
+
+    def __init__(self):
+        require_live('the live LLM backend')
+        raise NotImplementedError(
+            'Live LLM is not implemented in 3.2 — interface, bounded-call policy '
+            'and fake ship now; the vendor integration lands with credentials. '
+            'Run with PROVIDER_MODE=fake.'
+        )
+
+    async def _generate(self, history, system, tools):  # pragma: no cover - never constructed
+        raise NotImplementedError
+
+
+def get_llm_backend(voice_provider=None):
+    """Resolve the LLM backend for the active ``PROVIDER_MODE``.
+
+    Non-live → the fake. Live → the live backend, which refuses to initialize
+    without a real integration. ``voice_provider`` is accepted for interface
+    symmetry; the fake does not branch on it (the cost-breakdown *shape* by
+    provider is the turn loop's concern, not the adapter's).
+    """
+    if is_live():
+        return LiveLlmBackend()
+    return FakeLlmBackend()
