@@ -36,8 +36,8 @@ from apps.runtime.providers.audio import (
 )
 from apps.runtime.providers.reliability import ProviderError
 
-__all__ = ['ProviderBundle', 'TurnResult', 'run_turn', 'FALLBACK_LINE',
-           'MAX_HISTORY_TURNS']
+__all__ = ['ProviderBundle', 'TurnResult', 'run_turn', 'tts_only_cost',
+           'FALLBACK_LINE', 'MAX_HISTORY_TURNS']
 
 #: Spoken when a provider call is exhausted — the never-dead-air degrade (skill §11).
 FALLBACK_LINE = "I'm sorry, I'm having a little trouble right now. Could you say that again?"
@@ -135,6 +135,16 @@ def _cost_breakdown(voice_provider, usage, stt_seconds, tts_chars):
     return breakdown, round(llm_usd + stt_usd + tts_usd, 6)
 
 
+def tts_only_cost(voice_provider, text):
+    """Cost delta for a TTS-only utterance (the greeting) — no STT, no LLM leg.
+
+    The deterministic greeting still spends TTS, so it gets a ``usage`` entry like
+    any other assistant turn; without it the call's cost under-reports every call
+    by its greeting's synthesis spend.
+    """
+    return _cost_breakdown(voice_provider, {}, 0.0, len(text))
+
+
 async def _synthesize_to_carrier(tts, text):
     """TTS ``text`` and convert to 8 kHz carrier μ-law, or ``b''`` if TTS is down."""
     pcm, rate = await tts.synthesize(text)
@@ -203,6 +213,14 @@ async def run_turn(state, utterance_pcm, *, agent_setting, call_session, locatio
     state.history.append({'role': 'assistant', 'text': reply_text})
     _trim_history(state.history)
 
+    # Append the cost delta HERE, before the cancellable TTS await below. All the
+    # inputs are already known (usage, stt_seconds, reply length); computing it
+    # after TTS meant a turn cancelled mid-synthesis (hangup / idle / max-duration
+    # firing during TTS) kept its transcript row but lost its matching cost entry.
+    breakdown, cost_usd = _cost_breakdown(state.voice_provider, usage, stt_seconds,
+                                          len(reply_text))
+    state.add_usage(breakdown, cost_usd)
+
     # -- 3.4 seam: deferred-transport check. If state.pending_transfer is set, the
     #    transport executes the transfer AFTER this turn's audio plays. 3.2 sets it
     #    never, so this is a documented no-op that 3.4 fills in.
@@ -219,10 +237,6 @@ async def run_turn(state, utterance_pcm, *, agent_setting, call_session, locatio
     else:
         state.add_log('debug', 'tts', 'TTS complete',
                       {'ms': int((time.monotonic() - started) * 1000)})
-
-    breakdown, cost_usd = _cost_breakdown(state.voice_provider, usage, stt_seconds,
-                                          len(reply_text))
-    state.add_usage(breakdown, cost_usd)
 
     return TurnResult(reply_text=reply_text, reply_mulaw=reply_mulaw)
 
