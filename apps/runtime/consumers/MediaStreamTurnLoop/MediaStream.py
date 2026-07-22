@@ -100,12 +100,16 @@ def group_name(tenant_id, location_id, session_id):
 
 
 # Terminal status by ended-reason. A clean hangup or the hard duration cap is a
-# completed call; caller silence is abandoned; a consumer/provider crash is failed.
-# 'transferred' is 3.4's to set and is deliberately absent here.
+# completed call; caller silence is abandoned; a number disabled mid-ring, or a
+# consumer/provider crash, is failed. 'transferred' is 3.4's to set and is
+# deliberately absent here. ('error' is wired for a future fatal-error path — no
+# branch sets it yet; a turn crash logs and keeps the call up rather than ending
+# it — but the mapping is kept so that path lands on the right status when added.)
 _STATUS_BY_REASON = {
     'hangup': CallSession.STATUS_COMPLETED,
     'max_duration': CallSession.STATUS_COMPLETED,
     'idle_timeout': CallSession.STATUS_ABANDONED,
+    'disabled': CallSession.STATUS_FAILED,
     'error': CallSession.STATUS_FAILED,
 }
 
@@ -218,22 +222,15 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             return
         agent_setting, call_session, location, open_intervals = resolved
 
-        # 4. Re-check the number is still served — a number disabled between
-        #    webhook-answer and stream-connect must not get a call (TOCTOU).
-        if not agent_setting.enabled:
-            await self.close(code=CLOSE_FORBIDDEN)
-            return
-
-        # 5. Only now: build state, join the tenant+location-namespaced group,
-        #    and mark authorized. self.accept() already happened in connect().
+        # Bind the resolved row and state to self NOW — before the enabled re-check
+        # below can decline the call. 3.1's webhook already created this
+        # CallSession at status='in_progress'; if we decline past this point
+        # without owning it, _finalize() bails (state is None) and the row is
+        # stranded at in_progress with no ended_at forever. Assigning here lets the
+        # decline path finalize it through the one _finalize() path.
         self.agent_setting = agent_setting
         self.call_session = call_session
         self.location = location
-        self.providers = ProviderBundle(
-            stt=get_stt_backend(agent_setting.voice_provider),
-            tts=get_tts_backend(agent_setting.voice_provider),
-            llm=get_llm_backend(agent_setting.voice_provider),
-        )
         self.state = CallState(
             tenant_id=tenant_id,
             location_id=location_id,
@@ -242,6 +239,24 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             voice_provider=agent_setting.voice_provider,
             open_intervals=open_intervals,
             started_at=call_session.started_at,
+        )
+
+        # 4. Re-check the number is still served — a number disabled between
+        #    webhook-answer and stream-connect must not get a call (TOCTOU). The
+        #    row exists (the agent was enabled at answer time), so finalize it as
+        #    'disabled' rather than leaving it live, then decline.
+        if not agent_setting.enabled:
+            self.state.ended_reason = 'disabled'
+            await self._finalize()
+            await self.close(code=CLOSE_FORBIDDEN)
+            return
+
+        # 5. Only now: build providers, join the tenant+location-namespaced group,
+        #    and mark authorized. self.accept() already happened in connect().
+        self.providers = ProviderBundle(
+            stt=get_stt_backend(agent_setting.voice_provider),
+            tts=get_tts_backend(agent_setting.voice_provider),
+            llm=get_llm_backend(agent_setting.voice_provider),
         )
         self.stream_sid = start.get('streamSid') or message.get('streamSid')
         self.group_name = group_name(tenant_id, location_id, session_id)
