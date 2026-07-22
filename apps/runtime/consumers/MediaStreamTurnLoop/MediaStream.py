@@ -117,6 +117,7 @@ _STATUS_BY_REASON = {
     'max_duration': CallSession.STATUS_COMPLETED,
     'idle_timeout': CallSession.STATUS_ABANDONED,
     'disabled': CallSession.STATUS_FAILED,
+    'capacity': CallSession.STATUS_FAILED,
     'error': CallSession.STATUS_FAILED,
 }
 
@@ -124,11 +125,20 @@ _STATUS_BY_REASON = {
 class MediaStreamConsumer(AsyncWebsocketConsumer):
     """Terminates one Twilio media stream and runs the agent turn loop over it."""
 
+    #: Per-worker-process count of live authorized calls, for the MAX_CONCURRENT_CALLS
+    #: capacity gate (cost is a security control, skill §11). Touched only from the
+    #: single-threaded event loop, so a plain += is safe. This bounds ONE worker;
+    #: cross-worker enforcement needs a shared Redis/DB counter — 3.5's worker-health
+    #: pass. A per-process ceiling is still the right first layer (and the whole
+    #: ceiling on a single-process dev/Daphne run).
+    _active_calls = 0
+
     async def connect(self):
         # Per-call state, all initialized before accept so a frame arriving the
         # instant after accept never hits an unset attribute.
         self.authorized = False
         self.finalized = False
+        self.counted = False  # whether this call is counted in _active_calls
         self.group_name = None
         self.stream_sid = None
 
@@ -211,6 +221,15 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         session_param = params.get('sessionId')
 
         # 1. Verify the signed token FIRST. Identity comes only from its payload.
+        # WARNING: single-use/replay protection is a tracked deferral, not shipped
+        # here. The token is signed and short-TTL (300 s) and is never logged or
+        # echoed by this app, so a replay needs an already-leaked valid token; but a
+        # second socket presenting the same still-valid token would authorize a
+        # second stream on one CallSession. The fix (a single-use claim marker) is
+        # deferred to 3.5 because it wants either a CallSession field — a migration
+        # this service sub-module must not add — or a shared cache SETNX claim, a
+        # design choice better made with 3.5's recording/teardown pass. Tracked in
+        # .claude/tasks/todo.md.
         payload = verify_stream_token(token)
         if not payload:
             await self.close(code=CLOSE_UNAUTHORIZED)
@@ -263,6 +282,15 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             await self.close(code=CLOSE_FORBIDDEN)
             return
 
+        # 4b. Capacity gate (cost is a security control). At the per-worker ceiling,
+        #     decline gracefully and finalize the row rather than accepting unbounded
+        #     concurrent provider spend / worker exhaustion.
+        if type(self)._active_calls >= settings.MAX_CONCURRENT_CALLS:
+            self.state.ended_reason = 'capacity'
+            await self._finalize()
+            await self.close(code=CLOSE_FORBIDDEN)
+            return
+
         # 5. Only now: build providers, join the tenant+location-namespaced group,
         #    and mark authorized. self.accept() already happened in connect().
         self.providers = ProviderBundle(
@@ -273,6 +301,9 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         self.stream_sid = start.get('streamSid') or message.get('streamSid')
         self.group_name = group_name(tenant_id, location_id, session_id)
         await self.channel_layer.group_add(self.group_name, self.channel_name)
+        # Count this call against the per-worker ceiling; _finalize() decrements it.
+        type(self)._active_calls += 1
+        self.counted = True
         self.authorized = True
         self.last_activity_at = time.monotonic()
         self.call_started_monotonic = time.monotonic()
@@ -522,10 +553,14 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         try:
             await database_sync_to_async(self._flush_buffers, thread_sensitive=False)(
                 transcript, logs, usage)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # The DB write is atomic (nothing committed on failure), so re-buffer
             # the delta at the front to retry on the next flush rather than lose it.
-            logger.exception('call-session flush failed; re-buffering the delta')
+            # Log the exception TYPE only — a DB driver's error text can embed a
+            # fragment of the offending value (transcript / caller number = PII),
+            # so never dump str(exc) or the full traceback on this path.
+            logger.error('call-session flush failed (%s); re-buffering the delta',
+                         type(exc).__name__)
             self.state.transcript_buffer[:0] = transcript
             self.state.logs_buffer[:0] = logs
             self.state.usage_buffer[:0] = usage
@@ -561,6 +596,12 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             return
         self.finalized = True
 
+        # Release the capacity slot first, so a teardown error below can never leak
+        # a permanent count against the per-worker ceiling.
+        if self.counted:
+            type(self)._active_calls = max(0, type(self)._active_calls - 1)
+            self.counted = False
+
         for task in (self.turn_task, self.watchdog_task):
             if task is not None and not task.done():
                 task.cancel()
@@ -568,8 +609,9 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         if self.group_name:
             try:
                 await self.channel_layer.group_discard(self.group_name, self.channel_name)
-            except Exception:  # noqa: BLE001
-                logger.exception('group_discard failed during finalize')
+            except Exception as exc:  # noqa: BLE001
+                logger.error('group_discard failed during finalize (%s)',
+                             type(exc).__name__)
 
         if self.state is None or self.call_session is None:
             return  # never authorized — no row of ours to finalize
@@ -577,8 +619,9 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         try:
             await self._flush()
             await database_sync_to_async(self._finalize_session, thread_sensitive=False)()
-        except Exception:  # noqa: BLE001 — teardown must not raise
-            logger.exception('call finalize failed')
+        except Exception as exc:  # noqa: BLE001 — teardown must not raise
+            # Type only — a DB error's text can carry a PII fragment (see _flush).
+            logger.error('call finalize failed (%s)', type(exc).__name__)
 
     def _finalize_session(self):
         """Sync: stamp the terminal status, ended_at and ended-reason on the row."""
