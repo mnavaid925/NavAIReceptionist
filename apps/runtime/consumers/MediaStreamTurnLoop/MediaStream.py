@@ -21,8 +21,13 @@ matters ("no side effect before authorization") is preserved either way.
 resolving the discrepancy with the skill's older ``t{tenant}:call:{sid}`` form.
 
 **Nothing synchronous runs on the event loop.** Every ORM touch goes through
-``database_sync_to_async``; the codec/VAD math is pure CPU with no I/O. A blocked
-coroutine here freezes audio for every concurrent call on the worker.
+``database_sync_to_async(..., thread_sensitive=False)``; the codec/VAD math is pure
+CPU with no I/O. A blocked coroutine here freezes audio for every concurrent call
+on the worker. ``thread_sensitive=False`` is load-bearing: the default
+(``True``) runs every sync call on ONE process-global thread with no
+``ThreadSensitiveContext`` on the websocket path, so one call's DB write would
+serialize — and thereby stall audio for — every other concurrent call. Django DB
+connections are thread-local, so per-thread execution is safe here.
 
 **One in-flight turn, a single-slot pending queue.** A completed utterance is
 dispatched as a background task guarded by ``turn_busy``; an utterance captured
@@ -54,12 +59,14 @@ from django.utils import timezone
 from apps.agents.models import AgentSetting
 from apps.calls.models import CallSession
 from apps.runtime.agent import (
+    FALLBACK_LINE,
     CallState,
     ProviderBundle,
     build_open_intervals,
     build_variables,
     render_greeting,
     run_turn,
+    tts_only_cost,
 )
 from apps.runtime.providers.audio import (
     CARRIER_SAMPLE_RATE,
@@ -193,6 +200,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     # -- authorization + greeting (the `start` frame) ----------------------- #
 
     async def _authorize_and_start(self, message):
+        # A duplicated or replayed `start` must not re-verify, rebuild CallState,
+        # or spawn a second greeting/watchdog — which would orphan the running
+        # watchdog (now pointed at a detached state) and discard un-flushed buffers.
+        if self.authorized:
+            return
         start = message.get('start') or {}
         params = start.get('customParameters') or {}
         token = params.get('streamToken')
@@ -215,7 +227,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         # 3. Resolve the models by (tenant, location, session) — pk alone is never
         #    enough. A miss on any of the three closes 4404.
-        resolved = await database_sync_to_async(self._resolve)(
+        resolved = await database_sync_to_async(self._resolve, thread_sensitive=False)(
             tenant_id, location_id, session_id)
         if resolved is None:
             await self.close(code=CLOSE_NOT_FOUND)
@@ -297,7 +309,13 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         return agent_setting, call_session, location, open_intervals
 
     async def _greet(self):
-        """Speak the deterministic opener, non-interruptible (skill §6)."""
+        """Speak the deterministic opener, non-interruptible (skill §6).
+
+        Runs as a fire-and-forget task that nothing awaits, so it MUST catch its
+        own exceptions — an uncaught bug here would otherwise die silently, leaving
+        the caller in dead air until the idle timeout, on the very first thing every
+        caller hears.
+        """
         try:
             now = timezone.now()
             variables = build_variables(
@@ -307,22 +325,37 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             self.state.add_transcript('assistant', text)
             self.state.history.append({'role': 'assistant', 'text': text})
             self.state.add_log('info', 'call', 'Greeting played')
-            await self._flush()
             try:
                 pcm, rate = await self.providers.tts.synthesize(text)
                 mulaw = pcm16_to_carrier_mulaw(pcm, rate)
+                # The greeting spends TTS too — record its cost, flushed with the
+                # transcript below, so the call total is not under-reported.
+                self.state.add_usage(*tts_only_cost(self.state.voice_provider, text))
             except ProviderError:
                 self.state.add_log('error', 'tts', 'Greeting synthesis failed')
                 mulaw = b''
+            await self._flush()
             if mulaw:
                 await self._play(mulaw, interruptible=False)
         except asyncio.CancelledError:
             raise
+        except Exception:  # noqa: BLE001 — never let the greeting die in silence
+            logger.exception('greeting failed')
+            self.state.add_log('error', 'call', 'Greeting failed')
+            await self._speak_fallback_greeting()
         finally:
             self.turn_busy = False
             self.turn_task = None
             self.last_activity_at = time.monotonic()
             self._maybe_drain_pending()
+
+    async def _speak_fallback_greeting(self):
+        """Best-effort spoken fallback when the greeting itself crashed."""
+        try:
+            pcm, rate = await self.providers.tts.synthesize(FALLBACK_LINE)
+            await self._play(pcm16_to_carrier_mulaw(pcm, rate), interruptible=False)
+        except Exception:  # noqa: BLE001 — synthesizer may be the thing that broke
+            logger.exception('greeting fallback also failed')
 
     # -- inbound audio ------------------------------------------------------ #
 
@@ -347,6 +380,12 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                 # VAD has already reset and seeded the interrupting utterance.
                 await self._send_clear()
                 self.turn_task.cancel()
+                # Drop is_playing NOW, synchronously — the cancelled task's _play
+                # finally sets it too, but not until a later loop iteration, and any
+                # frame arriving in between must route to the listening path so it
+                # continues the seeded utterance instead of re-triggering barge-in
+                # (which would hit the else branch and discard it).
+                self.is_playing = False
                 self.state.add_log('info', 'vad', 'Barge-in')
             else:
                 # Fired during the non-interruptible greeting (or with no active
@@ -459,22 +498,45 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     # -- persistence -------------------------------------------------------- #
 
     async def _flush(self):
-        """Flush buffered transcript/log/usage deltas onto the CallSession row."""
+        """Flush buffered transcript/log/usage deltas onto the CallSession row.
+
+        **Capture-and-clear happens synchronously, before the await.** The event
+        loop is single-threaded up to that point, so two overlapping flushes (a
+        turn's own flush and a concurrent ``_finalize()`` flush, once cancellation
+        is in play) cannot both grab the same entries: whichever runs first drains
+        the buffer, the other captures an empty delta and no-ops. This is what makes
+        a cancelled turn safe without a lock — cancelling an async task does NOT
+        stop the sync thread it spawned, so awaiting the task is not enough on its
+        own to prevent a duplicate append.
+        """
         if self.state is None:
             return
-        if not (self.state.transcript_buffer or self.state.logs_buffer
-                or self.state.usage_buffer):
+        transcript = list(self.state.transcript_buffer)
+        logs = list(self.state.logs_buffer)
+        usage = list(self.state.usage_buffer)
+        if not (transcript or logs or usage):
             return
-        await database_sync_to_async(self._flush_buffers)()
+        self.state.transcript_buffer.clear()
+        self.state.logs_buffer.clear()
+        self.state.usage_buffer.clear()
+        try:
+            await database_sync_to_async(self._flush_buffers, thread_sensitive=False)(
+                transcript, logs, usage)
+        except Exception:  # noqa: BLE001
+            # The DB write is atomic (nothing committed on failure), so re-buffer
+            # the delta at the front to retry on the next flush rather than lose it.
+            logger.exception('call-session flush failed; re-buffering the delta')
+            self.state.transcript_buffer[:0] = transcript
+            self.state.logs_buffer[:0] = logs
+            self.state.usage_buffer[:0] = usage
 
-    def _flush_buffers(self):
-        """Sync: append the in-memory deltas to the row's JSON lists, then clear.
+    def _flush_buffers(self, transcript, logs, usage):
+        """Sync: append the captured deltas to the row's JSON lists.
 
-        One writer per call (this consumer), so ``select_for_update`` inside a
-        transaction is belt-and-suspenders against the concurrent-append hazard the
-        CallSession docstring names. Buffers are cleared only after a successful
-        save, and the sequence counters live on CallState so clearing does not
-        restart numbering.
+        The caller already drained and cleared the buffers, so this only touches
+        the DB. ``select_for_update`` inside a transaction serializes against any
+        other flush's row lock; sequence counters live on CallState, so the
+        already-cleared buffers do not restart numbering.
         """
         with transaction.atomic():
             cs = (
@@ -485,16 +547,13 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             )
             if cs is None:
                 return
-            if self.state.transcript_buffer:
-                cs.transcript = (cs.transcript or []) + self.state.transcript_buffer
-            if self.state.logs_buffer:
-                cs.logs = (cs.logs or []) + self.state.logs_buffer
-            if self.state.usage_buffer:
-                cs.usage = (cs.usage or []) + self.state.usage_buffer
+            if transcript:
+                cs.transcript = (cs.transcript or []) + transcript
+            if logs:
+                cs.logs = (cs.logs or []) + logs
+            if usage:
+                cs.usage = (cs.usage or []) + usage
             cs.save(update_fields=['transcript', 'logs', 'usage', 'updated_at'])
-        self.state.transcript_buffer.clear()
-        self.state.logs_buffer.clear()
-        self.state.usage_buffer.clear()
 
     async def _finalize(self):
         """Guaranteed teardown — idempotent, best-effort, never raises (skill §3)."""
@@ -517,7 +576,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         try:
             await self._flush()
-            await database_sync_to_async(self._finalize_session)()
+            await database_sync_to_async(self._finalize_session, thread_sensitive=False)()
         except Exception:  # noqa: BLE001 — teardown must not raise
             logger.exception('call finalize failed')
 
