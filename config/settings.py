@@ -389,7 +389,12 @@ ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY', '')
 MAX_CALL_SECONDS = env_int('MAX_CALL_SECONDS', 900)
 MAX_TOOL_ITERATIONS = env_int('MAX_TOOL_ITERATIONS', 4)
 IDLE_TIMEOUT_SECONDS = env_int('IDLE_TIMEOUT_SECONDS', 45)
-PROVIDER_TIMEOUT_SECONDS = env_int('PROVIDER_TIMEOUT_SECONDS', 10)
+# Per-attempt timeout on any STT/TTS/LLM call. A timeout is terminal (no retry —
+# see apps/runtime/providers/reliability.py), so this is also the worst-case delay
+# before a hung provider degrades to the spoken fallback. Kept well under a
+# caller's "is this call dead?" threshold rather than at a generous 10 s that would
+# strand the caller in silence past the turn-latency budget (skill §11).
+PROVIDER_TIMEOUT_SECONDS = env_int('PROVIDER_TIMEOUT_SECONDS', 6)
 MAX_CONCURRENT_CALLS = env_int('MAX_CONCURRENT_CALLS', 25)
 
 
