@@ -326,12 +326,14 @@ def _resolve_providers(tenant, location, provider_ids):
 
     ids = [i for i in (provider_ids or []) if isinstance(i, int)]
     if not ids:
-        return [None]
-    providers = list(User.objects.filter(
+        return None            # no filter — search everyone bookable here
+    # A supplied-but-unresolvable id yields an EMPTY pool, not None: the caller's
+    # filter matched nobody here, so the answer is "no slots", never "here is
+    # everyone's" (which would ignore the filter and hint the id exists elsewhere).
+    return list(User.objects.filter(
         pk__in=ids, tenant=tenant, is_provider=True,
         status=User.STATUS_ACTIVE, user_locations__location=location,
     ).distinct()[:_MAX_FANOUT])
-    return providers or [None]
 
 
 def _resolve_resources(tenant, location, resource_ids):
@@ -340,11 +342,10 @@ def _resolve_resources(tenant, location, resource_ids):
 
     ids = [i for i in (resource_ids or []) if isinstance(i, int)]
     if not ids:
-        return [None]
-    resources = list(Resource.objects.filter(
+        return None            # no filter — let the service decide
+    return list(Resource.objects.filter(
         pk__in=ids, tenant=tenant, location=location, is_active=True,
     )[:_MAX_FANOUT])
-    return resources or [None]
 
 
 def _get_open_slots(state, args):
@@ -401,35 +402,22 @@ def _get_open_slots(state, args):
     except (TypeError, ValueError):
         page = 1
 
-    # `find_available_slots` takes ONE provider/resource; the tool schema takes
-    # arrays. Fan out over the resolved pairs (bounded by _MAX_FANOUT each) and
-    # merge — it already mints a token per candidate, so merging is
-    # concatenate + dedupe + sort + slice, never a second minting pass.
-    providers = _resolve_providers(tenant, location, args.get('provider_ids'))
-    resources = _resolve_resources(tenant, location, args.get('resource_ids'))
-
-    merged = []
-    seen = set()
-    for provider in providers:
-        for resource in resources:
-            for slot in availability.find_available_slots(
-                tenant=tenant, location=location, service=service,
-                date_from=date_from, date_to=date_to,
-                provider=provider, resource=resource, limit=limit,
-            ):
-                provider_obj = slot.get('provider')
-                resource_obj = slot.get('resource')
-                key = (slot['start'],
-                       getattr(provider_obj, 'pk', None),
-                       getattr(resource_obj, 'pk', None))
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append(slot)
+    # The tool schema takes ARRAYS of provider/resource ids; `find_available_slots`
+    # takes pools and walks them internally against a SINGLE appointment-window
+    # query. So resolve the ids (bounded by _MAX_FANOUT each) and call it ONCE —
+    # calling it per (provider, resource) pair would re-run that same
+    # provider-independent query for every pair, mid-call, inside the turn budget.
+    # A resolved-but-empty pool correctly yields no slots (see _resolve_providers).
+    slots = availability.find_available_slots(
+        tenant=tenant, location=location, service=service,
+        date_from=date_from, date_to=date_to, limit=limit,
+        providers=_resolve_providers(tenant, location, args.get('provider_ids')),
+        resources=_resolve_resources(tenant, location, args.get('resource_ids')),
+    )
 
     tzinfo = location.tzinfo
     chosen = []
-    for slot in sorted(merged, key=lambda item: item['start']):
+    for slot in sorted(slots, key=lambda item: item['start']):
         local = slot['start'].astimezone(tzinfo)
         if wanted_days and WEEKDAY_BY_INDEX.get(local.weekday()) not in wanted_days:
             continue
