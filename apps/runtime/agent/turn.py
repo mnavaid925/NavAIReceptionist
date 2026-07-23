@@ -221,6 +221,13 @@ async def run_turn(state, utterance_pcm, *, agent_setting, call_session, locatio
             # each result as a tool-role turn the model reads on the next pass.
             # `apply_tool_call` never raises, so one failing tool degrades to an
             # {ok: false} the model can talk around rather than ending the call.
+            #
+            # SEQUENTIAL on purpose — do not "optimise" this into asyncio.gather.
+            # Handlers run in worker threads and mutate shared CallState (notably
+            # `contact_id`, which identify/create both set and the booking tools
+            # then read); running two at once would race that. The tools are local
+            # DB work, so serialising a handful of them costs far less than the
+            # correctness it buys.
             for call in tool_calls:
                 call_name = call.get('name') if isinstance(call, dict) else None
                 call_args = (call.get('args') if isinstance(call, dict) else None) or {}
