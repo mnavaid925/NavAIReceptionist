@@ -60,6 +60,12 @@ class CallState:
 
     # -- accounting / flow -------------------------------------------------- #
     turn_sequence: int = 0
+    #: Failed `search_contact` attempts on this call. That tool verifies identity
+    #: on name + date of birth, so without a ceiling a caller who knows a name
+    #: (easy to get) could use it as a yes/no oracle to brute-force the date of
+    #: birth across a 15-minute call. The per-turn tool-iteration cap does not
+    #: bound this — it resets every turn.
+    search_attempts: int = 0
     #: Deferred transport signals. 3.3's `transfer_call`/`transfer_call_spanish`
     #: and `end_call` tools SET these and return an ack; the transport acts only
     #: after the turn's audio has finished playing (skill §9). 3.4 executes the
