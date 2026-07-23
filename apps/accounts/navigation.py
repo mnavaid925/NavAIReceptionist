@@ -81,6 +81,11 @@ LIVE_LINKS = {
     # of `in_progress`. Pointing this at runtime:diagnostics would just duplicate
     # 3.1's row.
     '3.2': {},
+    # BUILT, empty for the same reason as 3.2: a tool dispatcher is not a page.
+    # 3.3's visible output is the tool-call trace it writes into CallSession.logs
+    # (category='tool'), which the call detail page 5.1's 'Call Logs' link already
+    # reaches renders through 5.3's event-log surface.
+    '3.3': {},
     '4.1': {'Contacts': 'scheduling:contact_list'},
     '4.2': {'Services': 'scheduling:service_list',
             'Resources': 'scheduling:resource_list'},
