@@ -4971,5 +4971,53 @@ its existing `CallSession.objects.filter(..., status='in_progress').count()` que
   scenarios) → a natural test-writer follow-up once the base command exists.
 - Webhook rate-limiting (carried over from 3.1, still unsized).
 
-## Review notes
-(filled in at the end)
+## Review notes — 3.2 build close-out
+
+**Shipped (service sub-module, zero models, `makemigrations runtime --check` → "No changes detected"):**
+- `providers/audio.py` (μ-law⇄PCM16 via `audioop`, persistent inbound `Resampler`, 20 ms pacing, `PlaybackTracker`),
+  `providers/vad.py` (energy VAD/endpointing, pre-roll, sustained-speech barge-in, echo guard — named constants),
+  `providers/reliability.py` (`call_bounded`: timeout **terminal**, `RateLimited` backoff vs transient retry),
+  `providers/{stt,tts,llm}.py` (narrow async adapters + real **fakes** + `get_*_backend()`; live refuses outside
+  `PROVIDER_MODE=='live'`).
+- `agent/{state,prompt,turn}.py` — `CallState` (identity from token only, buffered transcript/log/usage with
+  monotonic sequence counters), full `{{variable}}` runtime var set (`is_open_now` from provider hours), the turn
+  loop (deterministic greeting, STT→LLM(tool-cap seam, `tools=[]`)→TTS, per-turn cost by `voice_provider`, spoken
+  fallback).
+- `consumers/MediaStreamTurnLoop/MediaStream.py` — start-frame token auth before any side effect, off-loop ORM
+  (`thread_sensitive=False`), barge-in cancellation, single-slot pending queue, per-worker `MAX_CONCURRENT_CALLS`
+  gate, guaranteed idempotent `_finalize()`, idle/max-duration watchdog. `routing.py` + `config/asgi.py` wired.
+- `management/commands/simulate_call.py` (observable surface), `LIVE_LINKS['3.2'] = {}`.
+
+**Verified:** `manage.py check` clean; 157 tests green (`pytest apps/runtime` — 47 pre-existing + 110 new across
+`test_{audio,vad,provider_adapters,prompt,turn,call_state,media_consumer,simulate_call}.py`); websocket
+accept/reject incl. cross-tenant + cross-location IDOR (→ close, zero writes), disabled-mid-ring (→ failed),
+capacity cap (→ failed); no `SynchronousOnlyOperation`.
+
+**Review-agent findings applied:**
+- *code-reviewer* — a call declined on the TOCTOU disabled-mid-ring path left the webhook-created row stuck at
+  `in_progress`; now bound + finalized as `status=failed`, `ended_reason='disabled'`.
+- *realtime-reviewer (8 findings)* — greeting task now catches its own exceptions (else silent dead air); all
+  consumer ORM uses `thread_sensitive=False` (default serializes every concurrent call onto one thread); flush
+  capture-and-clears before the await (no duplicate/dropped entries under cancellation); barge-in retains the whole
+  sustain window (was dropping the caller's opening ~300 ms); greeting TTS cost recorded; per-turn cost appended
+  before the cancellable TTS await; provider timeout made terminal + `PROVIDER_TIMEOUT_SECONDS` 10→6; replayed
+  `start` frame guarded; barge-in drops `is_playing` synchronously.
+- *security-reviewer* — per-worker `MAX_CONCURRENT_CALLS` gate added (was declared-but-unenforced); flush/finalize
+  error paths log the exception **type** only (a DB driver's text can embed a PII fragment).
+- *explorer / frontend-reviewer / performance-reviewer / qa-smoke-tester* — no changes needed (wiring consistent;
+  diagnostics badge map already covers all five statuses; all per-call ORM hoisted to connect-time, per-turn path
+  query-free; every acceptance criterion holds).
+
+**Reconciled:** the Channels group name — CLAUDE.md's `t{t}:l{l}:call:{s}` is the logical namespace, but Channels
+forbids `:`, so the physical name is `t{t}.l{l}.call.{s}` (`group_name()`); `voice-agent-runtime` §3 and the runtime
+skill updated to match.
+
+**Deferred (tracked):**
+- **Token single-use / replay guard** → 3.5. The reviewer's fix needs a `CallSession` field (a migration this
+  service sub-module must not add) or a shared-cache SETNX claim; low risk (token is signed, short-TTL, never
+  logged). In-code `# WARNING` at the `verify_stream_token` call site.
+- **Cross-worker `MAX_CONCURRENT_CALLS`** (shared Redis/DB counter) → 3.5 worker-health pass; per-worker cap ships now.
+- Live vendor STT/TTS/LLM implementations (integration once credentials exist); VAD constant tuning against real
+  audio; backchannel filler; cross-vendor fallback; per-location turn-eagerness field (a 2.1 decision).
+- Rare load-induced flake in one malformed-frame test (once in a 916-test full-repo run, never reproduced in
+  isolation) hardened with a bounded `wait_for` poll rather than a fixed drain window.
