@@ -23,6 +23,7 @@ import struct
 import uuid
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.agents.models import AgentSetting
@@ -33,6 +34,7 @@ from apps.runtime.providers.audio import (
     pcm16_to_mulaw,
 )
 from apps.runtime.providers.base import active_mode
+from apps.runtime.providers.llm import clear_fake_script, set_fake_script
 from apps.runtime.providers.tokens import mint_stream_token
 
 _TONE_HZ = 200
@@ -59,12 +61,42 @@ def _silence_payload():
     return base64.b64encode(pcm16_to_mulaw(pcm)).decode('ascii')
 
 
+def _book_first_offered_slot(history):
+    """Script step: book the first slot the PREVIOUS `get_open_slots` returned.
+
+    A static script cannot name a `slot_token` — the server mints them at search
+    time. So this reads the most recent tool result out of `history` (where the
+    turn loop appended it as a tool-role turn) and echoes its token back, exactly
+    as a real model would. If no slots were offered, it emits no tool call and the
+    turn simply ends with the model's reply.
+    """
+    for entry in reversed(history or []):
+        if entry.get('role') != 'tool':
+            continue
+        try:
+            envelope = json.loads(entry.get('text') or '{}')
+        except ValueError:
+            continue
+        slots = ((envelope.get('data') or {}).get('slots')) or []
+        if slots:
+            return [{'name': 'book_appointment',
+                     'args': {'slot_token': slots[0]['slot_token'],
+                              'reason': 'Simulated booking'}}]
+    return []
+
+
 class Command(BaseCommand):
     help = 'Drive one fake inbound call through the real media-stream consumer.'
 
     def add_arguments(self, parser):
         parser.add_argument('--tenant', help='Tenant slug or customer_id (optional).')
         parser.add_argument('--location', help='Location slug (optional).')
+        parser.add_argument(
+            '--script', choices=('chat', 'booking'), default='chat',
+            help="'chat' (default) is one plain conversational turn. 'booking' "
+                 "drives a full tool round-trip through the real dispatcher: "
+                 "identify the caller, create them, find slots, book one.",
+        )
 
     def handle(self, *args, **options):
         mode = active_mode()
@@ -88,14 +120,68 @@ class Command(BaseCommand):
         )
         token = mint_stream_token(session.pk, session.tenant_id, session.location_id)
 
+        script = options.get('script') or 'chat'
+        if script == 'booking':
+            script = self._arm_booking_script(setting)
+
         self.stdout.write(
-            f'Simulating a call at {setting.location} '
+            f'Simulating a {script} call at {setting.location} '
             f'(tenant={setting.tenant}, mode={mode})…'
         )
-        asyncio.run(self._run(session, token))
+        try:
+            asyncio.run(self._run(session, token))
+        finally:
+            # Never leave the module-level script armed for the next process/test.
+            clear_fake_script()
 
         session.refresh_from_db()
-        self._report(session)
+        self._report(session, script)
+
+    def _arm_booking_script(self, setting):
+        """Script the fake model through a full booking round-trip, or fall back.
+
+        Returns the script name actually armed — 'chat' when the location has no
+        bookable service, since a booking script with nothing to book would report
+        a misleading failure rather than a missing prerequisite.
+        """
+        from apps.scheduling.models import Service
+
+        service = (
+            Service.objects
+            .filter(tenant=setting.tenant, is_active=True)
+            .filter(Q(location=setting.location) | Q(location__isnull=True))
+            .order_by('pk')
+            .first()
+        )
+        if service is None:
+            self.stdout.write(self.style.WARNING(
+                'No active service at this location — falling back to --script chat. '
+                'Seed one (seed_scheduling) to exercise the booking tools.'
+            ))
+            return 'chat'
+
+        # Three tool rounds then a plain reply: the loop breaks on the empty
+        # fourth round BEFORE the MAX_TOOL_ITERATIONS branch, so this exercises
+        # the happy path rather than the cap's spoken fallback.
+        set_fake_script(
+            replies=[
+                'Let me look you up.',
+                'One moment while I check the calendar.',
+                'Booking that for you now.',
+                "You're all set — I've got that booked. Anything else?",
+            ],
+            tool_calls=[
+                [
+                    {'name': 'get_contact_appointments', 'args': {}},
+                    {'name': 'create_contact',
+                     'args': {'first_name': 'Simulated', 'last_name': 'Caller'}},
+                ],
+                [{'name': 'get_open_slots', 'args': {'service_id': service.pk}}],
+                _book_first_offered_slot,
+                [],
+            ],
+        )
+        return 'booking'
 
     def _resolve_setting(self, tenant_hint, location_hint):
         qs = AgentSetting.objects.select_related('tenant', 'location').filter(
@@ -184,7 +270,7 @@ class Command(BaseCommand):
             received += 1
         return received
 
-    def _report(self, session):
+    def _report(self, session, script='chat'):
         self.stdout.write(self.style.SUCCESS(
             f'\nCallSession {session.provider_call_sid} — status={session.status}'))
         self.stdout.write(f'  started_at : {session.started_at}')
@@ -203,8 +289,30 @@ class Command(BaseCommand):
         logs = session.logs or []
         self.stdout.write(f'\n  logs ({len(logs)} events):')
         for entry in logs:
-            self.stdout.write(
-                f"    {entry.get('level')}/{entry.get('category')}: {entry.get('title')}")
+            line = (f"    {entry.get('level')}/{entry.get('category')}: "
+                    f"{entry.get('title')}")
+            if entry.get('category') == 'tool':
+                raw = entry.get('raw_json') or {}
+                # Args are already redacted at write time — this prints what was
+                # actually persisted, which is the point of showing it.
+                line += f"  ok={raw.get('ok')} args={raw.get('args')}"
+            self.stdout.write(line)
+
+        if script == 'booking':
+            from apps.scheduling.models import Appointment
+
+            booked = list(Appointment.objects.filter(booked_by_session=session))
+            self.stdout.write(f'\n  appointments booked on this call: {len(booked)}')
+            for appointment in booked:
+                self.stdout.write(
+                    f'    #{appointment.pk} {appointment.start_at} '
+                    f'source={appointment.source} status={appointment.status}')
+            if not booked:
+                raise CommandError(
+                    'The booking script produced no appointment. The tool path did '
+                    'not complete — check the tool log entries above for the '
+                    'error code.'
+                )
 
         if session.status == CallSession.STATUS_IN_PROGRESS:
             raise CommandError(
