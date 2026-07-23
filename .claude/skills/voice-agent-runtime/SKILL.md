@@ -211,6 +211,14 @@ utterance ─▶ STT ─▶ history.append(user) ─▶ ┌───────
 
 ## 8. Tools: declarations, dispatcher, envelope
 
+> **IMPLEMENTED (sub-module 3.3).** This section was written ahead of the code; it is now as-built.
+> `apps/runtime/agent/tools.py` (declarations + `active_tools`), `envelope.py` (`ok`/`err` over the closed code
+> set) and `dispatcher.py` (`apply_tool_call`) match what is described below, with two clarifications the build
+> established: identity keys are not merely absent from the declarations, they are **stripped from `args`** before
+> any handler runs (both layers); and the booking tools **wrap `apps/scheduling/availability.py`** rather than
+> reimplementing slot search, tokens or the write path — its `SlotError.code` values are a subset of the envelope's
+> codes, so they pass through untranslated.
+
 **Declarations are plain dicts**, provider-agnostic, in `apps/runtime/agent/tools.py`:
 
 ```python
