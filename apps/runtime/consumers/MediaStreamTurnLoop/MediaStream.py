@@ -452,7 +452,14 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             # transcript/usage of the turn must survive that cancellation.
             await self._flush()
             if not result.empty and result.reply_mulaw:
-                await self._play(result.reply_mulaw, interruptible=True)
+                # A goodbye that precedes a hangup is played NON-interruptible, the
+                # same rule §9.3 gives the transfer handoff line. Otherwise a caller
+                # talking over "goodbye" (the most likely moment for them to) would
+                # barge-in, cancel this task before the check below, and strand
+                # `pending_hangup` unconsumed — the call would then hang on until
+                # the 45s idle timeout, mislabelled as an end_call.
+                await self._play(result.reply_mulaw,
+                                 interruptible=not self.state.pending_hangup)
             # 3.3's end_call tool is a DEFERRED transport signal: the dispatcher
             # only set a flag, so the goodbye line above is spoken in full and the
             # socket closes after it. Checked whether or not audio was produced —
@@ -614,8 +621,16 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             type(self)._active_calls = max(0, type(self)._active_calls - 1)
             self.counted = False
 
+        # NEVER cancel the task we are currently running inside. `_finalize()` is
+        # reachable FROM the turn task (3.3's `end_call` hangs up after its goodbye
+        # plays) and from the watchdog; self-cancelling makes the very next `await`
+        # below raise CancelledError, which is not an `Exception` and so escapes the
+        # guards — aborting finalize partway with `self.finalized` already True, so
+        # no later path can ever finalize the row and it is stranded `in_progress`
+        # with a dead watchdog.
+        current = asyncio.current_task()
         for task in (self.turn_task, self.watchdog_task):
-            if task is not None and not task.done():
+            if task is not None and task is not current and not task.done():
                 task.cancel()
 
         if self.group_name:
