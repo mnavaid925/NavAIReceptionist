@@ -116,6 +116,11 @@ _STATUS_BY_REASON = {
     'hangup': CallSession.STATUS_COMPLETED,
     'max_duration': CallSession.STATUS_COMPLETED,
     'idle_timeout': CallSession.STATUS_ABANDONED,
+    # 3.3's end_call tool: the caller was done (or it was a wrong number) and the
+    # agent hung up deterministically rather than burning minutes on a silence
+    # timeout. That is a completed call, with a more specific ended-reason than
+    # the plain 'hangup' default.
+    'end_call': CallSession.STATUS_COMPLETED,
     'disabled': CallSession.STATUS_FAILED,
     'capacity': CallSession.STATUS_FAILED,
     'error': CallSession.STATUS_FAILED,
@@ -448,6 +453,13 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             await self._flush()
             if not result.empty and result.reply_mulaw:
                 await self._play(result.reply_mulaw, interruptible=True)
+            # 3.3's end_call tool is a DEFERRED transport signal: the dispatcher
+            # only set a flag, so the goodbye line above is spoken in full and the
+            # socket closes after it. Checked whether or not audio was produced —
+            # a TTS-down or empty reply must still hang up when asked to.
+            if self.state.pending_hangup:
+                await self._finalize()
+                await self.close(code=1000)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a turn crash must not kill the call
