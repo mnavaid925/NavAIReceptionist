@@ -671,9 +671,19 @@ async def apply_tool_call(state, name, args):
 
     # The tool-call trace: a row in CallSession.logs (Invariant 2 — no ToolCall
     # table), with the arguments REDACTED before they are ever persisted.
+    #
+    # The payload shape is the ENVELOPE plus the tool name — `{tool, arguments,
+    # ok, error}` — which is deliberately the shape Module 5.3's already-shipped
+    # event-log template reads (`raw_json.tool`, `.arguments`, `.error.code`,
+    # `.error.message`). 5.3 was built first and is the reader; the new writer
+    # conforms to it rather than the other way round, so the trace renders in the
+    # panel that exists for it instead of only in the raw-payload fallback.
+    # `error` is the envelope's own object (or None), so the spoken failure reason
+    # travels with the code — those strings are ours, never caller text.
     state.add_log('info', 'tool', f'Tool call: {name}', {
-        'args': _redact_args(safe_args),
+        'tool': name,
+        'arguments': _redact_args(safe_args),
         'ok': result['ok'],
-        'error_code': (result['error'] or {}).get('code') if not result['ok'] else None,
+        'error': result['error'],
     })
     return result
