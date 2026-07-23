@@ -5388,6 +5388,52 @@ adding a second command, and gives `qa-smoke-tester` a concrete end-to-end path 
 - A configurable per-tenant/per-location tool-call rate ceiling beyond `MAX_TOOL_ITERATIONS` — would need a new
   `AgentSetting` field (a 2.1 decision), not scoped to any sub-module yet.
 
-## Review notes
+## Review notes — 3.3 build close-out
 
-(filled in at the end of the build pass)
+**Shipped (service sub-module; `makemigrations runtime|scheduling --check` both "No changes detected"):**
+`agent/tools.py` (12 declarations + `active_tools` gating the transfer pair on `AgentSetting`),
+`agent/envelope.py` (`ok`/`err` over the closed 8-code set, `err` asserts membership), `agent/dispatcher.py`
+(`apply_tool_call` — identity from `CallState` only and stripped from `args`, every model-supplied id
+re-authorised against tenant + location + the identified contact, `SlotError` passed through untranslated, all
+exceptions contained). Turn loop seam filled; `CallState.pending_hangup`/`search_attempts` added; `FakeLlmBackend`
+gained scripted tool calls (incl. callable entries reading `history`); the consumer honours `pending_hangup` after
+the goodbye; `simulate_call --script booking` is the observable surface; `LIVE_LINKS['3.3'] = {}`.
+
+**The central design call:** 3.3 **wraps** `apps/scheduling/availability.py` (4.3), which was written for it —
+slot search, the opaque signed slot tokens, and the race-safe book/reschedule/cancel writes already existed and
+already re-authorised tenant/location/`actor_contact`. Reinventing any of it would have been the bug. The one
+change it needed was threading `booked_by_session=` through `book_slot()` (additive, keyword-only, no migration).
+
+**Verified:** `manage.py check` clean; **987 tests green** (`apps/runtime` 228 incl. 71 new, `apps/scheduling` 536,
+`apps/calls` 223).
+
+**Review-agent findings applied (11 across 4 agents — none cosmetic):**
+- *code-reviewer* (Critical) — `get_contact_appointments` filtered `Appointment` by tenant only on a
+  location-scoped model, leaking a caller's bookings at every other branch. The plan had specified tenant-only;
+  the plan was wrong. Also: docstring overclaimed a parity test; `create_contact` name leniency undocumented.
+- *frontend-reviewer* — the tool trace was written as `{args, ok, error_code}` but Module 5.3's already-shipped
+  event-log panel reads `{tool, arguments, error.code, error.message}`, so the panel rendered nothing. The new
+  writer conforms to the existing reader (whose shape is also the better one — it mirrors the envelope).
+- *performance-reviewer* (Critical) — `get_open_slots` called the slot search once per (provider, resource) pair,
+  up to 16 times, re-running the same provider-independent window query mid-call. `find_available_slots` already
+  walks pools against one index, so it gained `providers=`/`resources=` and the dispatcher now calls it once.
+- *realtime-reviewer* (2 Critical) — `end_call` reached `_finalize()` from inside the turn task, and `_finalize()`
+  cancelled that same task: a self-cancel whose `CancelledError` escaped the guards, aborting finalize with
+  `finalized` already True, so the row could never be finalized by any path. Also the goodbye played
+  interruptible, so barging over it stranded `pending_hangup`. Plus: pagination past page 1 was always empty
+  (search limit was the display cap); the fake-script global now refuses to arm twice (a ContextVar was tried and
+  does **not** reach the ASGI application task).
+- *security-reviewer* (1 High, 2 Medium, 2 Low) — **a caller-SUPPLIED phone number identified a contact on one
+  non-secret factor**, granting reschedule/cancel authority over their bookings; only the verified ANI identifies
+  now, with `search_contact`'s name+DOB as the second factor for callers on another line. Transfer tools re-check
+  `AgentSetting` at the point of action rather than trusting the offer-time gate. `_redact_args` flipped from a
+  deny-list (fails open on any future PII arg) to an allow-list. `search_contact` attempts capped per call.
+  Reschedule/cancel collapse `not_permitted` into `not_found` so appointment-id existence is not an oracle.
+- *explorer / qa-smoke-tester* — no changes needed; both confirmed the fixes hold end to end.
+
+**Deferred (tracked):** transfer EXECUTION (hours gate, single-fire guard, Twilio redirect, `CallSession.transfer`
+outcome) → 3.4, which reads the `pending_transfer` this pass sets; consent recording, waveform, the fuller
+diagnostics page and a rendered tool-call trace → 3.5; `provider_error`/`rate_limited` stay declared-but-unreachable
+until a tool calls an external provider; live native-audio tool-calling once `LiveLlmBackend` exists; a
+per-location tool-call rate ceiling (needs an `AgentSetting` field → 2.1). Also carried: a cancelled turn cannot
+stop an in-flight handler thread, so a late write can land with no log entry — documented in `dispatcher.py`.
