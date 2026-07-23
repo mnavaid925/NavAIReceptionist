@@ -64,7 +64,9 @@ __all__ = ['apply_tool_call', 'TOOL_HANDLERS', 'IDENTITY_KEYS']
 IDENTITY_KEYS = frozenset({'tenant_id', 'location_id', 'contact_id', 'session_id'})
 
 #: Tools that touch no ORM — pure `state` mutations, run on the event loop.
-_NO_ORM_TOOLS = frozenset({'transfer_call', 'transfer_call_spanish', 'end_call'})
+#: The transfer pair is NOT here: each re-reads its `AgentSetting` to re-check
+#: eligibility at the point of action, so they go off-loop like any other query.
+_NO_ORM_TOOLS = frozenset({'end_call'})
 
 #: How many of a contact's appointments to hand back. A voice agent cannot read a
 #: long list aloud, and an unbounded payload bloats the prompt every later turn.
@@ -73,6 +75,9 @@ _MAX_APPOINTMENTS = 10
 #: is deliberate — a caller naming a dozen people gets the first few rather than an
 #: error — but it IS truncation, so keep it generous enough to be unsurprising.
 _MAX_FANOUT = 4
+#: Failed `search_contact` attempts allowed per call before it stops answering —
+#: the anti-brute-force ceiling on the date-of-birth factor.
+_MAX_SEARCH_ATTEMPTS = 3
 #: How deep `get_open_slots` may search across all pages. `MAX_OFFERED_SLOTS` is a
 #: per-page DISPLAY cap (a voice agent cannot read ten options aloud); this bounds
 #: the underlying scan so paging works without letting a large `page` widen it.
@@ -95,6 +100,24 @@ _REDACT_LENGTH = frozenset({'notes', 'reason', 'cancellation_reason'})
 #: Reduced to initials — a name is PII, and the transcript already records what
 #: the caller actually said, so the log does not need to duplicate it.
 _REDACT_NAME = frozenset({'first', 'last', 'first_name', 'last_name', 'caller_name'})
+
+#: The ALLOW-LIST: argument names whose values are safe to persist verbatim —
+#: surrogate ids, counts, and the search window. Everything not named here is
+#: redacted by default.
+#:
+#: This is an allow-list on purpose. A deny-list keyed on recognised PII names
+#: fails OPEN: the next tool that carries an `email`, an `address`, an
+#: `insurance_id` — or just spells it `dob` — would be written verbatim into
+#: `CallSession.logs`, because the declarations, the handlers and the redaction
+#: table are three separately-maintained lists that nothing forces to stay in
+#: sync. Failing closed means a new argument is unreadable in the log until
+#: someone deliberately decides it is safe, which is the right direction for a
+#: mistake to point.
+_LOG_SAFE_ARGS = frozenset({
+    'service_id', 'appointment_id', 'provider_ids', 'resource_ids',
+    'page', 'page_size', 'duration_minutes',
+    'date_from', 'date_to', 'time_from', 'time_to', 'weekdays',
+})
 
 
 def _mask_phone(value):
@@ -123,8 +146,13 @@ def _redact_args(args):
         elif 'token' in lowered:
             # A slot token is a signed bearer credential — never log the value.
             redacted[key] = '<token>'
-        else:
+        elif lowered in _LOG_SAFE_ARGS:
             redacted[key] = value
+        else:
+            # Unknown argument: FAIL CLOSED. Record that it was present and how
+            # big it was, never what it said.
+            text = str(value or '')
+            redacted[key] = f'<{len(text)} chars>' if text else ''
     return redacted
 
 
@@ -203,6 +231,25 @@ def _appointment_payload(appointment):
     }
 
 
+#: The one answer for "that appointment is not yours" and "no such appointment".
+_APPOINTMENT_NOT_FOUND = "I couldn't find that appointment."
+
+
+def _appointment_error(exc):
+    """Map a `SlotError` from an appointment write onto the envelope.
+
+    `availability.py` answers a wrong-contact appointment with `not_permitted` and
+    a missing one with nothing at all (the dispatcher's own scoped lookup returns
+    `not_found` first). Left distinguishable, that difference lets an identified
+    caller probe which appointment ids exist at their own location by watching
+    which error comes back. Both collapse to the same `not_found` here — there is
+    no caller-facing reason to word them differently.
+    """
+    if exc.code == 'not_permitted':
+        return err('not_found', _APPOINTMENT_NOT_FOUND)
+    return err(exc.code, exc.message)
+
+
 def _resolve_appointment(tenant, location, appointment_id):
     """An appointment scoped by tenant AND location. pk alone is never enough."""
     from apps.scheduling.models import Appointment
@@ -228,11 +275,27 @@ def _get_contact_appointments(state, args):
     from apps.scheduling.services import normalize_e164
 
     tenant, location = _scope(state)
-    # Default to the number this call came from. A caller-supplied number is
-    # allowed (they may be calling about a different line) but is normalised the
-    # same way, so a repeat caller deduplicates however they phrase it.
-    raw = args.get('phone') or (state.variables or {}).get('from_e164') or ''
-    phone = normalize_e164(raw)
+    # ONLY THE VERIFIED CALLER ID MAY IDENTIFY SOMEONE.
+    #
+    # A phone number is not a credential — it is on business cards, shared in
+    # households, and trivially claimed. So a number the CALLER supplies is a
+    # claim, not proof: honouring it would let a stranger say "look me up under
+    # 312-555-0142" and inherit that person's identity for the rest of the call,
+    # which `book`/`reschedule`/`cancel` then act on. That is the whole IDOR this
+    # module exists to prevent, just entered through the identity claim itself.
+    #
+    # So: identification runs off `from_e164` (the ANI the carrier gave us) only.
+    # A caller ringing from someone else's phone proves who they are through
+    # `search_contact`'s name + date-of-birth pair instead — that is what the two
+    # factors are for. A supplied number that differs from the ANI returns the
+    # neutral "someone may be on file, ask me differently" shape, which reveals
+    # nothing about whether that number is known to us.
+    ani = normalize_e164((state.variables or {}).get('from_e164') or '')
+    supplied = str(args.get('phone') or '').strip()
+    if supplied and normalize_e164(supplied) != ani:
+        return ok({'contact_id': None, 'is_new': False, 'appointments': []})
+
+    phone = ani
     if not phone:
         return ok({'contact_id': None, 'is_new': True, 'appointments': []})
 
@@ -274,6 +337,14 @@ def _search_contact(state, args):
     from apps.scheduling.models import Contact
 
     tenant, _location = _scope(state)
+    # This tool is the second factor, so it is also a date-of-birth oracle for
+    # anyone who knows a name. Cap the failed attempts per CALL — the per-turn
+    # tool-iteration cap resets every turn and so bounds nothing here.
+    if state.search_attempts >= _MAX_SEARCH_ATTEMPTS:
+        return err('not_permitted',
+                   "I can't look that up right now. Let me take a message and "
+                   "have someone call you back.")
+
     first = str(args.get('first') or '').strip()
     last = str(args.get('last') or '').strip()
     dob = _parse_date(args.get('date_of_birth'))
@@ -295,6 +366,9 @@ def _search_contact(state, args):
         # The disambiguation path that makes search_contact -> book_appointment work.
         state.contact_id = matches[0].pk
         data['contact_id'] = matches[0].pk
+    else:
+        # Zero or ambiguous: a failed identification attempt, counted.
+        state.search_attempts += 1
     return ok(data)
 
 
@@ -522,7 +596,7 @@ def _reschedule_appointment(state, args):
             token=token, reason='', actor_contact=contact,
         )
     except availability.SlotError as exc:
-        return err(exc.code, exc.message)
+        return _appointment_error(exc)
     return ok(_appointment_payload(appointment))
 
 
@@ -545,7 +619,7 @@ def _cancel_appointment(state, args):
             actor_contact=contact,
         )
     except availability.SlotError as exc:
-        return err(exc.code, exc.message)
+        return _appointment_error(exc)
     return ok({'appointment_id': appointment.pk, 'status': appointment.status})
 
 
@@ -604,6 +678,26 @@ def _get_location_hours(state, args):
 # Handlers — deferred transport signals (no ORM, no side effect here)
 # --------------------------------------------------------------------------- #
 
+def _transfer_eligible(state, destination_field):
+    """True when this location really has that transfer line configured.
+
+    `active_tools()` already withholds the tool at OFFER time, but the dispatcher
+    must not depend on the model only calling what it was offered: a
+    non-conforming response (or a later refactor that widens what is passed) would
+    otherwise set a transfer signal for a location that has transfer switched off
+    or no destination. Re-checking here means the only thing that can arm a
+    handoff is the configuration, at the moment of action.
+    """
+    from apps.agents.models import AgentSetting
+
+    setting = AgentSetting.objects.filter(
+        pk=state.agent_setting_id, tenant_id=state.tenant_id,
+        location_id=state.location_id).first()
+    if setting is None or not setting.transfer_enabled:
+        return False
+    return bool((getattr(setting, destination_field, '') or '').strip())
+
+
 def _transfer_call(state, args):
     """Set the deferred human-transfer signal and acknowledge (skill §9).
 
@@ -613,12 +707,16 @@ def _transfer_call(state, args):
     always the configured `AgentSetting.transfer_phone_number` — this tool takes
     no arguments precisely so nothing the caller says can influence where it goes.
     """
+    if not _transfer_eligible(state, 'transfer_phone_number'):
+        return err('not_permitted', "I'm not able to transfer you right now.")
     state.pending_transfer = 'human'
     return ok({'transfer': 'human'})
 
 
 def _transfer_call_spanish(state, args):
     """Same as `_transfer_call`, routed to the configured secondary line."""
+    if not _transfer_eligible(state, 'transfer_secondary_number'):
+        return err('not_permitted', "I'm not able to transfer you right now.")
     state.pending_transfer = 'spanish'
     return ok({'transfer': 'spanish'})
 
