@@ -714,8 +714,15 @@ def _lock_contended_rows(*, tenant, location, provider_id, resource_id):
 
 
 def book_slot(*, tenant, location, token, contact, reason='', notes='',
-              source='manual', created_by=None):
+              source='manual', created_by=None, booked_by_session=None):
     """Book the slot described by `token`. Raises `SlotError` on any refusal.
+
+    `booked_by_session` is the `calls.CallSession` the booking was made during —
+    the provenance stamp `Appointment.booked_by_session` exists for and its help
+    text calls "server-stamped by the runtime". Module 3.3's `book_appointment`
+    tool passes it; the HTTP booking view passes nothing and the field stays null.
+    It is a MODEL INSTANCE, not an id, and it is never taken from a tool argument:
+    the runtime resolves it from server-side session state (Invariant 3).
 
     This is the function Module 3.3's `book_appointment` tool will call, so it
     re-authorises everything rather than trusting its caller:
@@ -818,6 +825,7 @@ def book_slot(*, tenant, location, token, contact, reason='', notes='',
                 start_at=start_utc, end_at=end_utc,
                 status=Appointment.STATUS_SCHEDULED,
                 reason=reason, notes=notes, source=source,
+                booked_by_session=booked_by_session,
             )
     except OperationalError as exc:
         # 1213 deadlock, 1205 lock wait timeout. Both mean "another writer got
