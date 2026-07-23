@@ -210,7 +210,7 @@ def _get_contact_appointments(state, args):
     from apps.scheduling.models import Appointment, Contact
     from apps.scheduling.services import normalize_e164
 
-    tenant, _location = _scope(state)
+    tenant, location = _scope(state)
     # Default to the number this call came from. A caller-supplied number is
     # allowed (they may be calling about a different line) but is normalised the
     # same way, so a repeat caller deduplicates however they phrase it.
@@ -231,10 +231,18 @@ def _get_contact_appointments(state, args):
 
     contact = matches[0]
     state.contact_id = contact.pk
+    # Appointments are scoped by tenant AND location. The CONTACT deliberately
+    # spans locations (Invariant 1), but their appointments do not: `Appointment`
+    # is a location-scoped model and CLAUDE.md admits no exception. Reading a
+    # caller's bookings at other branches out to whoever dialled THIS number —
+    # identified only by a caller-ID match — widens what a spoofed number learns.
+    # It would also be incoherent: `reschedule_appointment`/`cancel_appointment`
+    # resolve strictly within this location, so an appointment listed from another
+    # branch could be named but never acted on.
     appointments = (
         Appointment.objects
         .select_related('service')
-        .filter(tenant=tenant, contact=contact)
+        .filter(tenant=tenant, location=location, contact=contact)
         .order_by('-start_at')[:_MAX_APPOINTMENTS]
     )
     return ok({
@@ -279,6 +287,11 @@ def _create_contact(state, args):
     tenant, _location = _scope(state)
     first = str(args.get('first_name') or '').strip()
     last = str(args.get('last_name') or '').strip()
+    # Deliberately laxer than the declaration, which marks both names required:
+    # EITHER name is enough to file someone. A caller who gives only one name (or
+    # goes by one) still gets recorded, the same reasoning as the date-of-birth
+    # leniency below — a receptionist would write down what they were given rather
+    # than refuse the caller. Only a wholly nameless call is refused.
     if not first and not last:
         return err('invalid_argument', "I need a name to put this under.")
 
@@ -610,8 +623,9 @@ def _end_call(state, args):
 # The dispatch table + entry point
 # --------------------------------------------------------------------------- #
 
-#: name -> handler. Asserted equal to `tools.TOOL_NAMES` in the suite, so a
-#: declared-but-undispatched tool (a silent mid-call failure) cannot ship.
+#: name -> handler. This MUST equal `tools.TOOL_NAMES`: a declared-but-undispatched
+#: tool fails silently mid-call, and a dispatched-but-undeclared one is dead code
+#: the model can never reach. The dispatcher suite asserts the set equality.
 TOOL_HANDLERS = {
     'get_contact_appointments': _get_contact_appointments,
     'search_contact': _search_contact,
