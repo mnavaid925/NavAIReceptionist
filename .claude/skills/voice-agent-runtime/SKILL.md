@@ -105,8 +105,12 @@ bookkeeping, the turn task, the deferred-transport flags.
 - **Never trust `tenant_id`, `location_id` or `session_id` taken from the websocket URL.** That is a cross-tenant —
   and cross-location — vulnerability, not a shortcut. Resolve from the verified token or the `CallSession` row.
 - Reject with an explicit close code (`4401` unauthorized, `4403` forbidden, `4404` unknown session).
-- Join **tenant-namespaced** groups only: `t{tenant_id}:call:{session_id}`. An un-namespaced group name lets
-  tenant A subscribe to tenant B's live call.
+- Join **tenant- AND location-namespaced** groups only. The logical scheme is
+  `t{tenant_id}:l{location_id}:call:{session_id}` (CLAUDE.md rule 3), but **Channels forbids `:` in a group name**
+  (`require_valid_group_name` allows only `[A-Za-z0-9._-]`), so the physical name substitutes `.` for `:` —
+  `t{tenant_id}.l{location_id}.call.{session_id}` (see `apps/runtime/consumers/.../MediaStream.py:group_name()`, 3.2).
+  An un-namespaced (or location-less) group name lets tenant A — or another location — subscribe to a live call that
+  is not theirs.
 
 **`receive()` — the frame loop.** Twilio sends JSON text frames: `connected`, `start`, `media`, `stop`, `mark`.
 - `start` carries `streamSid`, `callSid` and the custom parameters. Re-resolve and re-check that the number is
