@@ -242,14 +242,25 @@ async def test_history_trimmed_to_max_history_turns(
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_empty_tool_list_means_a_single_llm_call(
+async def test_no_tool_calls_means_a_single_llm_call(
     state, agent_setting, call_session, location_a1,
 ):
+    """A reply with no tool calls ends the loop after exactly one model call.
+
+    3.2 asserted `tools == 0` here because the loop hard-coded `tools=[]`. 3.3
+    fills that seam: the loop now offers the location's real tool surface
+    (`active_tools`), so the meaningful assertion is that the turn still makes ONE
+    call when the model asks for no tools — and that the tools it was offered are
+    exactly what this location enables.
+    """
+    from apps.runtime.agent import active_tools
+
     llm = FakeLlmBackend()
     providers = _bundle(llm=llm)
     await _run(state, _utterance_pcm(), agent_setting, call_session, location_a1, providers)
     assert len(llm.calls) == 1
-    assert llm.calls[0]['tools'] == 0  # tools=[] is what 3.2 always passes
+    assert llm.calls[0]['tools'] == len(active_tools(agent_setting))
+    assert llm.calls[0]['tools'] > 0
 
 
 # --------------------------------------------------------------------------- #
