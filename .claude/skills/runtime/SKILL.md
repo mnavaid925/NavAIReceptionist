@@ -22,7 +22,7 @@ tool envelope §8, deferred transfer §9, providers/PROVIDER_MODE §12, what the
 |---|---|---|
 | **3.1** | **Inbound Webhook & Call Resolution** | **BUILT** — the HTTP half: voice webhook, signature verification, dialed-number resolution, idempotent CallSession creation, unmapped/disabled decline, diagnostics page |
 | **3.2** | **Media Stream & Turn Loop** | **BUILT** — the media-stream consumer (`connect`/`receive`/`disconnect`), the audio codec chain, VAD/barge-in + echo guard, the agent package (state, prompt/variable rendering, turn loop), bounded STT/TTS/LLM adapters + fakes, and the `simulate_call` observable surface |
-| 3.3 | Tools & Dispatcher | not built — `apply_tool_call`, the 12-tool set, signed slot tokens, the `{ok,data,error}` envelope |
+| **3.3** | **Tools & Dispatcher** | **BUILT** — the 12 tool declarations, the `{ok,data,error}` envelope over a closed 8-code set, and `apply_tool_call` (identity from server state only). Wraps 4.3's `scheduling/availability.py` booking engine rather than reinventing it |
 | 3.4 | Transfer Execution | not built — deferred transfer signal, hours/target gating, the telephony `get_backend()` handoff |
 | 3.5 | Recording, Teardown & Diagnostics | not built — consent-gated recording, teardown, waveform/cost capture, the fuller diagnostics page |
 
@@ -79,7 +79,10 @@ apps/runtime/
   agent/             (3.2) the conversation brain — imported by the consumer, kept apart from transport/providers
     state.py         CallState dataclass — identity (from token only), history, buffered transcript/log/usage, seams
     prompt.py        render_template / build_variables (full runtime var set) / is_open_now / render_greeting
-    turn.py          run_turn() — STT→history→LLM(tool-cap seam)→TTS; ProviderBundle, TurnResult, tts_only_cost
+    turn.py          run_turn() — STT→history→LLM→tools→TTS; ProviderBundle, TurnResult, tts_only_cost
+    tools.py         (3.3) TOOL_DECLARATIONS (12 plain dicts, no SDK import) + active_tools(agent_setting)
+    envelope.py      (3.3) ok()/err() — the one result shape; err() asserts the CLOSED 8-code set
+    dispatcher.py    (3.3) apply_tool_call(state, name, args) — Invariant 3, wraps scheduling/availability.py
   consumers/         (3.2) fifth backend layer — <SubModule>/<Entity>.py, re-exported in __init__
     MediaStreamTurnLoop/MediaStream.py   MediaStreamConsumer (connect/receive/disconnect + group_name())
   management/commands/simulate_call.py   (3.2) observable surface — drives a full fake call through the real consumer
@@ -106,11 +109,43 @@ gathered once at connect via `build_open_intervals` so the per-turn check is pur
 are in the **location's** timezone, recomputed each turn, portable strftime (no `%-d`/`%-I`). The greeting is
 rendered from `AgentSetting.greeting`, deterministic, 0 LLM tokens.
 
-**Tools — still NONE (3.3's job).** The turn loop calls the LLM with `tools=[]` inside a bounded iteration loop
-(`MAX_TOOL_ITERATIONS`); the dispatcher branch and the `{ok,data,error}` envelope are documented no-op seams. When
-3.3 lands: identity args (`tenant_id`, `location_id`, `contact_id`, `session_id`) come from server state, **never**
-as tool parameters (Invariant 3); the prompt names no tool. The `apply_tool_call(state, name, args)` dispatcher and
-the 12-tool declarations go in `apps/runtime/agent/` alongside the existing `prompt.py`/`turn.py`.
+**Tools — BUILT (3.3).** `agent/tools.py` holds `TOOL_DECLARATIONS`: 12 plain provider-agnostic dicts
+(`name`, `description`, `parameters` JSON-schema) importing no SDK, so they are assertable in tests.
+`active_tools(agent_setting)` returns the subset to offer on THIS call.
+
+| Tool | Model-supplied args | Notes |
+|---|---|---|
+| `get_contact_appointments` | `phone?` | Call first for any appointment intent. **Only the verified ANI identifies** — a caller-supplied number is a claim, not a credential, and returns a neutral shape |
+| `search_contact` | `first`, `last`, `date_of_birth` | The second factor. Failed attempts capped per call (`_MAX_SEARCH_ATTEMPTS`) so it is not a DOB oracle |
+| `create_contact` | `first_name`, `last_name`, `date_of_birth?`, `phone?` | `source='ai_phone'`; either name is enough |
+| `get_open_slots` | `service_id`, `date_from?`, `date_to?`, `weekdays?`, `time_from?`, `time_to?`, `duration_minutes?`, `provider_ids?`, `resource_ids?`, `page?`, `page_size?` | Returns one opaque `slot_token` per slot |
+| `book_appointment` | `slot_token`, `reason?`, `notes?` | Requires an identified contact |
+| `reschedule_appointment` | `appointment_id`, `slot_token` | |
+| `cancel_appointment` | `appointment_id`, `cancellation_reason?` | |
+| `create_callback_request` | `caller_name?`, `caller_phone?`, `reason` | **No** identified-contact precondition |
+| `get_location_hours` | *(none)* | Reuses `state.open_intervals` — no hours query |
+| `transfer_call` / `transfer_call_spanish` | *(none)* | Deferred signal only; re-checks `AgentSetting` at point of action |
+| `end_call` | *(none)* | Sets `pending_hangup`; the consumer closes after the goodbye |
+
+Formats: `date_*` are `MM/DD/YYYY`, `time_*` are 24h `HH:MM`, `weekdays` is `['mon','tue',…]`.
+
+**Identity args (`tenant_id`, `location_id`, `contact_id`, `session_id`) come from server-side session state and
+are NEVER tool parameters** (Invariant 3). No declaration exposes one, AND `apply_tool_call` strips those keys from
+`args` before any handler runs — both layers, deliberately. Every model-supplied id (`appointment_id`,
+`slot_token`, `service_id`, `provider_ids`, `resource_ids`) is re-authorised server-side against tenant **and**
+location, and reschedule/cancel additionally bind to the identified contact via `availability.py`'s
+`actor_contact`. The prompt names no tool.
+
+**The envelope** (`agent/envelope.py`): every tool returns `{"ok", "data", "error"}`; `err()` raises on a code
+outside the closed set `{not_found, invalid_argument, slot_unavailable, slot_expired, not_permitted,
+provider_error, rate_limited, internal_error}`. `SlotError`'s four codes are a subset, so a `SlotError` from the
+booking engine passes through **untranslated**.
+
+**The tool-call trace** is a `CallSession.logs` row with `category='tool'` and
+`raw_json = {tool, arguments, ok, error}` — the exact shape Module 5.3's event-log template reads. `arguments` is
+redacted by an **allow-list** (`_LOG_SAFE_ARGS`): ids/counts/dates verbatim, phones masked, names to an initial,
+`date_of_birth` dropped, tokens elided, and anything unrecognised reduced to a length marker (fail closed).
+`result['data']` is never logged. Invariant 2 holds — no `ToolCall` table.
 
 ## Realtime surfaces
 
@@ -205,6 +240,27 @@ then — do not duplicate CallSession writes across two seeders.
 - **`simulate_call` uses `asyncio.run`**, so a pytest test invokes it from a SYNC test via `call_command`, never an
   async one.
 
+### 3.3 tool/dispatcher gotchas
+
+- **Never reinvent booking.** `apps/scheduling/availability.py` (4.3) was written *for* these tools — it owns slot
+  search, the signed slot tokens, and the race-safe book/reschedule/cancel writes, each re-authorising tenant,
+  location and `actor_contact` itself. The dispatcher is a thin wrapper. 3.3's only change to it was threading
+  **`booked_by_session=`** through `book_slot()` (additive, keyword-only, no migration) so a booking carries the
+  call it was made on.
+- **`book_slot` is idempotent by design** — it checks "did this contact already book this slot?" *before* the
+  conflict check, so a model retrying a tool call gets the same appointment back instead of being told it failed
+  after it actually succeeded. A test asserting a replay ERRORS is testing the wrong thing.
+- **`find_available_slots` takes `providers=`/`resources=` POOLS** (plural) as well as the singular pins. Use the
+  pools — calling it once per (provider, resource) pair re-runs the same provider-independent window query for
+  every pair, mid-call. A pool given but empty means "the filter matched nobody" → no slots, not "everyone".
+- **The declaration list and the dispatch table must stay equal** (`TOOL_NAMES == set(TOOL_HANDLERS)`). A
+  declared-but-undispatched tool fails silently mid-call. **A repo hook enforces this on edit** — adding a
+  declaration without a handler blocks the write.
+- **`MAX_OFFERED_SLOTS` is a per-page DISPLAY cap, not a search cap.** Searching with it makes every page after
+  the first empty.
+- **`set_fake_script` is process-global** (a ContextVar was tried and does NOT reach the ASGI application task).
+  It refuses to arm over an existing script; always clear it in a `finally`.
+
 ## Common tasks
 
 - **Run a call end-to-end (3.2):** `venv\Scripts\python.exe manage.py simulate_call` (fake providers, no real call).
@@ -212,7 +268,11 @@ then — do not duplicate CallSession writes across two seeders.
   `runserver` — it can't serve the websocket). The consumer is `apps/runtime/consumers/MediaStreamTurnLoop/
   MediaStream.py`; the turn loop and prompt/variable rendering are `apps/runtime/agent/`; the adapters are
   `apps/runtime/providers/{audio,vad,reliability,stt,tts,llm}.py`.
-- **Add an LLM tool (3.3):** declaration dict in `apps/runtime/agent/tools.py` + a dispatcher branch in
+- **Exercise the tools end to end (3.3):** `venv\Scripts\python.exe manage.py simulate_call --script booking`
+  drives identify → create contact → find slots → book through the REAL dispatcher and booking engine under
+  `PROVIDER_MODE=fake`, then prints the tool trace and the appointment it created. `--script chat` is the plain
+  one-turn conversation.
+- **Add an LLM tool:** declaration dict in `apps/runtime/agent/tools.py` + a dispatcher branch in
   `apply_tool_call` + the `{ok,data,error}` envelope + identity from server state + tests through both runtime paths.
 - **Add transfer execution (3.4):** the deferred-signal flow (`/voice-agent-runtime` §9) and the telephony
   `get_backend()` with `redirect_call`/`hangup`, at which point `apps/agents/telephony.py` starts delegating to it.
@@ -225,4 +285,6 @@ then — do not duplicate CallSession writes across two seeders.
 `LIVE_LINKS['3.2'] = {}` (built, no navigable page — the consumer and `simulate_call` are not user surfaces; same
 empty-dict posture as `0.1`/`5.2`–`5.4`). What 3.2 makes real is 3.1's existing "active calls" stat, which now
 reflects live sessions because `disconnect()` is the first code that moves a session out of `in_progress`. Module 3
-shows Live via 3.1's link; 3.3–3.5 add their own entries as they are built.
+shows Live via 3.1's link. `LIVE_LINKS['3.3'] = {}` for the same reason — a tool dispatcher is not a page; what
+3.3 makes visible is the `category='tool'` trace it writes into `CallSession.logs`, which Module 5.3's event-log
+panel on the call detail page renders. 3.4–3.5 add their own entries as they are built.
