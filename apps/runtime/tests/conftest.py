@@ -85,6 +85,55 @@ def make_call_session(db):
     return _make
 
 
+#: Weekday keys covering every day. Duplicated rather than imported from
+#: `apps.tenants.services.WEEKDAY_KEYS` so this fixture carries no import-time
+#: dependency beyond what it already needs inside the factory closure.
+_ALL_WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+
+
+@pytest.fixture
+def make_bookable_service(db):
+    """Factory: ``make_bookable_service(tenant, location, **overrides) ->
+    (Service, provider User)``.
+
+    A `Service` plus an ACTIVE provider whose `provider_hours` covers every day
+    00:00-23:45, so `apps.scheduling.availability.find_available_slots` has real
+    slots to offer without every 3.3 dispatcher / turn-loop / simulate_call test
+    hand-rolling one. Mirrors the setup `temp/verify_3_3.py`'s `_bookable()`
+    proved out.
+    """
+    def _make(tenant, location, **overrides):
+        import uuid
+
+        from apps.accounts.models import User, UserLocation
+        from apps.scheduling.models import Service
+
+        service = Service.objects.create(
+            tenant=tenant, location=location,
+            name=overrides.pop('name', 'Cleaning'),
+            duration_minutes=overrides.pop('duration_minutes', 30),
+            buffer_minutes=overrides.pop('buffer_minutes', 0),
+            requires_resource=overrides.pop('requires_resource', False),
+            is_active=overrides.pop('is_active', True),
+        )
+        email = overrides.pop('email', None) \
+            or f'prov-{uuid.uuid4().hex[:10]}@{tenant.slug}.example'
+        provider = User.objects.create_user(
+            tenant=tenant, email=email, password='x', tier=User.TIER_STAFF,
+            first_name=overrides.pop('first_name', 'Pat'),
+            last_name=overrides.pop('last_name', 'Provider'),
+            is_provider=True, **overrides,
+        )
+        UserLocation.objects.create(tenant=tenant, user=provider, location=location)
+        provider.provider_hours = {
+            str(location.pk): [{'start_time': '00:00', 'end_time': '23:45',
+                                'days': _ALL_WEEKDAYS}]
+        }
+        provider.save(update_fields=['provider_hours'])
+        return service, provider
+    return _make
+
+
 @pytest.fixture(autouse=True)
 def _reset_media_stream_capacity():
     """Zero the consumer's process-global live-call counter around each test.
