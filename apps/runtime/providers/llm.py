@@ -128,19 +128,43 @@ class LiveLlmBackend(LlmBackend):
 #: Scripting for fakes built by :func:`get_llm_backend` — the ONLY way to drive a
 #: scripted conversation through code that constructs its own backend (the media
 #: consumer does, in `_authorize_and_start`). Affects the FAKE path only; live mode
-#: never reads it. Set it, run, and clear it in a `finally` — see
-#: `manage.py simulate_call --script booking` and the dispatcher tests.
+#: never reads it.
+#:
+#: **PROCESS-GLOBAL, and deliberately so.** A `ContextVar` was tried first and does
+#: NOT work here: the consumer runs in the ASGI application task, which does not
+#: inherit the context the script was armed in, so `get_llm_backend()` saw nothing.
+#: A plain dict is the mechanism that actually reaches the consumer.
+#:
+#: The cost is that this is shared by every call in the process, so two simulated
+#: calls running at once would clobber each other. Rather than let that corrupt a
+#: run silently, :func:`set_fake_script` REFUSES to arm over an already-armed
+#: script — misuse becomes a loud error at the call site instead of a mystifying
+#: transcript. Arm it, run one call, and clear it in a `finally`.
+#:
+#: Diagnostic/test use only: it affects the FAKE backend only, live never reads it.
 _FAKE_SCRIPT = {}
 
 
 def set_fake_script(replies=None, tool_calls=None):
-    """Script the next fake backend(s) `get_llm_backend()` builds. Diagnostic only."""
+    """Script the next fake backend(s) `get_llm_backend()` builds. Diagnostic only.
+
+    Refuses to arm over an existing script: this state is process-global, so a
+    second concurrent arming would silently steal the first call's script. Callers
+    must clear in a ``finally``.
+    """
+    if _FAKE_SCRIPT:
+        raise RuntimeError(
+            'A fake-LLM script is already armed in this process. It is global, so '
+            'arming a second one would clobber the first — clear it first '
+            '(clear_fake_script()), and never run two scripted calls concurrently '
+            'in one process.'
+        )
     _FAKE_SCRIPT['replies'] = replies
     _FAKE_SCRIPT['tool_calls'] = tool_calls
 
 
 def clear_fake_script():
-    """Drop any scripting, so the next fake is a plain conversational responder."""
+    """Drop the scripting, so the next fake is a plain conversational responder."""
     _FAKE_SCRIPT.clear()
 
 
@@ -155,5 +179,6 @@ def get_llm_backend(voice_provider=None):
     """
     if is_live():
         return LiveLlmBackend()
-    return FakeLlmBackend(replies=_FAKE_SCRIPT.get('replies'),
-                          tool_calls=_FAKE_SCRIPT.get('tool_calls'))
+    script = _FAKE_SCRIPT
+    return FakeLlmBackend(replies=script.get('replies'),
+                          tool_calls=script.get('tool_calls'))
