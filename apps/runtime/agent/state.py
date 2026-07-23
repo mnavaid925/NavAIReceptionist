@@ -60,8 +60,13 @@ class CallState:
 
     # -- accounting / flow -------------------------------------------------- #
     turn_sequence: int = 0
-    #: The 3.4 seam. 3.2 declares it and never sets it; 3.4's transfer tool does.
+    #: Deferred transport signals. 3.3's `transfer_call`/`transfer_call_spanish`
+    #: and `end_call` tools SET these and return an ack; the transport acts only
+    #: after the turn's audio has finished playing (skill §9). 3.4 executes the
+    #: transfer (hours gate, single-fire guard, Twilio redirect); the consumer
+    #: handles the hangup, which needs no REST call.
     pending_transfer: str = None
+    pending_hangup: bool = False
     #: Why the call ended, stamped at teardown ('hangup', 'idle_timeout',
     #: 'max_duration', 'error') — the seed of 3.5's ended-reason diagnostics.
     ended_reason: str = None
