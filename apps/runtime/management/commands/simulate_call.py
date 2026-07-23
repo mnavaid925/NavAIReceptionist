@@ -295,7 +295,7 @@ class Command(BaseCommand):
                 raw = entry.get('raw_json') or {}
                 # Args are already redacted at write time — this prints what was
                 # actually persisted, which is the point of showing it.
-                line += f"  ok={raw.get('ok')} args={raw.get('args')}"
+                line += f"  ok={raw.get('ok')} args={raw.get('arguments')}"
             self.stdout.write(line)
 
         if script == 'booking':
