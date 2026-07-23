@@ -395,8 +395,25 @@ def _widest_buffer_minutes(tenant):
 
 def find_available_slots(*, tenant, location, service, date_from=None,
                          date_to=None, provider=None, resource=None,
-                         limit=MAX_OFFERED_SLOTS, now=None):
+                         limit=MAX_OFFERED_SLOTS, now=None,
+                         providers=None, resources=None):
     """Return up to `limit` bookable slots, soonest first.
+
+    `provider`/`resource` pin ONE of each. `providers`/`resources` are the plural
+    form: an already-resolved POOL to search across, which is what Module 3.3's
+    `get_open_slots` tool passes when the caller named several people or rooms.
+    Both default to None, meaning "no restriction" — the pre-existing behaviour.
+
+    The plural form matters for latency, not just ergonomics: the day/window loop
+    below already walks providers x resources against a SINGLE `_BookedIndex`, so
+    passing a pool costs one appointment-window query, while calling this function
+    once per (provider, resource) pair would re-run that same
+    provider-independent query for every pair, mid-call, inside the turn budget.
+
+    A pool that is given but resolves to nothing means the caller's filter matched
+    nobody bookable here — that yields NO slots, deliberately, rather than
+    silently widening back to "everyone" (which would ignore the filter and hint
+    that the named id exists somewhere else).
 
     Each item is a dict carrying an aware UTC `start`/`end`, the resolved provider
     and resource, and a freshly minted opaque `token`.
@@ -432,9 +449,17 @@ def find_available_slots(*, tenant, location, service, date_from=None,
     _, window_end = local_day_bounds_utc(location, end_day)
     booked = _BookedIndex(tenant, location, window_start, window_end)
 
-    providers = _candidate_providers(tenant, location, provider)
-    resources = _candidate_resources(tenant, location, service, resource)
+    # Remember whether a POOL was explicitly supplied: an empty pool means "the
+    # caller's filter matched nothing", which must yield no slots — distinct from
+    # None, which means "no filter, search everything".
+    provider_pool_given = providers is not None
+    resource_pool_given = resources is not None
+    providers = _candidate_providers(tenant, location, provider, pool=providers)
+    resources = _candidate_resources(tenant, location, service, resource,
+                                     pool=resources)
 
+    if resource_pool_given and not resources:
+        return []
     # A service that needs a room, at a location with no active rooms, has no
     # slots — never "book it anyway and sort the room out later".
     if service.requires_resource and not resources:
@@ -442,7 +467,7 @@ def find_available_slots(*, tenant, location, service, date_from=None,
     if not service.requires_resource and not resources:
         resources = [None]
     if not providers:
-        if provider is not None:
+        if provider is not None or provider_pool_given:
             # A SPECIFIC person was asked for and they are not bookable here —
             # suspended, unassigned, or not a provider at all. Falling through to
             # the no-provider branch would answer "yes, Tuesday at ten" for a
@@ -614,10 +639,19 @@ def _first_free_resource(*, booked, resources, start_utc, end_utc, provider):
     return _NO_RESOURCE_FREE
 
 
-def _candidate_providers(tenant, location, provider):
-    """Providers bookable at this location, or `[provider]` when one is pinned."""
+def _candidate_providers(tenant, location, provider, pool=None):
+    """Providers bookable at this location.
+
+    `pool` (an already-resolved list) wins over `provider` (a single pin), which
+    wins over "everyone assigned here". Pool members are re-checked for active
+    status for the same reason a pinned provider is: a suspended user who cannot
+    log in must not have slots minted against them, however they were selected.
+    """
     from apps.accounts.models import User
 
+    if pool is not None:
+        return [p for p in pool
+                if p is not None and p.status == User.STATUS_ACTIVE]
     if provider is not None:
         # Even a PINNED provider is re-checked: a suspended user who cannot log
         # in must not have slots minted against them.
@@ -636,10 +670,17 @@ def _candidate_providers(tenant, location, provider):
     )
 
 
-def _candidate_resources(tenant, location, service, resource):
-    """Active resources at this location, or `[resource]` when one is pinned."""
+def _candidate_resources(tenant, location, service, resource, pool=None):
+    """Active resources at this location.
+
+    `pool` (an already-resolved list) wins over `resource` (a single pin), which
+    wins over "every active resource here". The dispatcher scopes pool members to
+    tenant+location+is_active before passing them, so they are used as given.
+    """
     from apps.scheduling.models import Resource
 
+    if pool is not None:
+        return [r for r in pool if r is not None]
     if resource is not None:
         return [resource]
     if not service.requires_resource:
