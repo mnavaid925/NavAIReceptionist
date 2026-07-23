@@ -25,6 +25,17 @@ module's closed envelope codes, so a ``SlotError`` passes straight through with
 unexpected exception into ``err('internal_error', …)``; a tool failure is a spoken
 apology, never a dropped call.
 
+**Known limit — a cancelled turn does not stop an in-flight handler.** Cancelling
+the awaiting task does not kill the worker thread a handler runs in
+(``database_sync_to_async`` has no way to interrupt it). So if a turn is cancelled
+mid-tool — the watchdog firing on max-duration/idle, or a ``stop`` frame arriving —
+an already-started write (a booking, a contact) can still land AFTER the session
+was finalized, and because the trace log is written after the await it lands with
+no ``logs`` entry describing it. The write itself is still correctly scoped and
+authorized, so this is a *record* gap, not a safety one; it is inherent to the
+sync-in-thread boundary rather than to any tool. Anything added here that must be
+atomic with the call record needs its own reconciliation, not a bigger try block.
+
 **Every handler is a plain SYNC function** ``(state, args) -> envelope``. The
 dispatcher runs the ORM-touching ones through
 ``database_sync_to_async(..., thread_sensitive=False)`` (3.2's established
@@ -58,8 +69,14 @@ _NO_ORM_TOOLS = frozenset({'transfer_call', 'transfer_call_spanish', 'end_call'}
 #: How many of a contact's appointments to hand back. A voice agent cannot read a
 #: long list aloud, and an unbounded payload bloats the prompt every later turn.
 _MAX_APPOINTMENTS = 10
-#: Bounds the provider x resource fan-out in `get_open_slots` (see that handler).
+#: Caps how many provider/resource ids one call may filter on. Silent truncation
+#: is deliberate — a caller naming a dozen people gets the first few rather than an
+#: error — but it IS truncation, so keep it generous enough to be unsurprising.
 _MAX_FANOUT = 4
+#: How deep `get_open_slots` may search across all pages. `MAX_OFFERED_SLOTS` is a
+#: per-page DISPLAY cap (a voice agent cannot read ten options aloud); this bounds
+#: the underlying scan so paging works without letting a large `page` widen it.
+_MAX_SEARCH_SLOTS = 20
 
 _DATE_FORMAT = '%m/%d/%Y'
 _TIME_FORMAT = '%H:%M'
@@ -391,16 +408,22 @@ def _get_open_slots(state, args):
         if str(d).strip().lower() in WEEKDAY_KEYS
     }
 
-    limit = availability.MAX_OFFERED_SLOTS
+    # MAX_OFFERED_SLOTS caps how many are read ALOUD — it is a display cap, not a
+    # search cap. Searching with it would make every page after the first empty
+    # (page 2 slices [5:10] of at most 5 results), so the agent would confidently
+    # tell a caller there is nothing else when there is. Search deep enough to
+    # cover the requested page, bounded so a large `page` cannot widen the scan.
+    display_cap = availability.MAX_OFFERED_SLOTS
     try:
-        page_size = min(int(args.get('page_size') or limit), limit)
+        page_size = min(int(args.get('page_size') or display_cap), display_cap)
     except (TypeError, ValueError):
-        page_size = limit
+        page_size = display_cap
     page_size = max(1, page_size)
     try:
         page = max(1, int(args.get('page') or 1))
     except (TypeError, ValueError):
         page = 1
+    limit = min(page * page_size, _MAX_SEARCH_SLOTS)
 
     # The tool schema takes ARRAYS of provider/resource ids; `find_available_slots`
     # takes pools and walks them internally against a SINGLE appointment-window
