@@ -5021,3 +5021,373 @@ skill updated to match.
   audio; backchannel filler; cross-vendor fallback; per-location turn-eagerness field (a 2.1 decision).
 - Rare load-induced flake in one malformed-frame test (once in a 916-test full-repo run, never reproduced in
   isolation) hardened with a bounded `wait_for` poll rather than a fixed drain window.
+
+---
+# Sub-module 3.3 — Tools & Dispatcher (Module 3: Call Runtime, `runtime`) — plan from research-runtime-3.3.md (2026-07-24)
+
+## Shape: SERVICE — zero models, zero migrations attributable to 3.3
+
+Confirmed by grep: `apps/runtime/models/` still does not exist, and `manage.py makemigrations runtime --check`
+must keep reporting "No changes detected" throughout this pass. 3.3 wraps an engine that already exists rather
+than reinventing it — `apps/scheduling/availability.py` (4.3) already ships `find_available_slots`,
+`mint_slot_token`/`redeem_slot_token`, `book_slot`, `reschedule_appointment`, `cancel_appointment` and
+`SlotError`, all written explicitly for this sub-module to call. 3.3 reuses five already-built models it does
+not own — `scheduling.Contact` (read/write, tenant-scoped only), `scheduling.Appointment` (read/write via
+`availability.py`, tenant+location scoped), `scheduling.CallbackRequest` (write, tenant+location scoped),
+`agents.AgentSetting` (read-only — `transfer_enabled`/`transfer_phone_number`/`transfer_secondary_number` gate
+tool enablement), `calls.CallSession` (never touched directly — 3.3 writes only through `state.add_log`/
+`state.add_transcript`, which the 3.2 consumer flushes, same discipline as 3.2). Invariant 1 (one contact
+identity table — `scheduling.Contact`) and Invariant 2 (one call log — `calls.CallSession`'s JSON columns) are
+hard constraints on this pass: **no `Lead`/`Caller` table for `create_contact`, no `ToolCall`/`CallEvent` table
+for the tool-call trace** — every tool-call entry is a row in `CallState.logs_buffer` → `CallSession.logs`,
+`category='tool'`.
+
+**One real gap found by grepping the code the research describes** (ground everything, don't just trust the
+research's narration): `apps/scheduling/availability.py`'s `book_slot(*, tenant, location, token, contact,
+reason='', notes='', source='manual', created_by=None)` has **no `booked_by_session` parameter** today, even
+though `scheduling.Appointment.booked_by_session` (FK → `calls.CallSession`, `SET_NULL`, `related_name=
+'booked_appointments'`) exists and its own help text calls it "server-stamped by the runtime." 3.3's
+`book_appointment` tool has nowhere else to attach that provenance stamp without a second write, so this pass
+makes one small, additive change to `book_slot()`'s signature (see Backend) — flagged explicitly because the
+research's tool-by-tool description assumed the parameter already existed.
+
+## Models: NONE — service sub-module. Tables read/written (all pre-existing, re-verified by grep)
+
+- `scheduling.Contact` — `apps/scheduling/models/ContactDirectory/Contacts.py` (tenant-scoped only; `save()`
+  auto-normalizes `phone_e164` via `apps.scheduling.services.normalize_e164`; `SOURCE_AI_PHONE` choice exists)
+- `scheduling.Appointment` — `apps/scheduling/models/Bookings/Appointments.py` (tenant+location scoped;
+  `SOURCE_AI_PHONE` choice exists; `booked_by_session` FK exists but is unset by `book_slot()` today — see gap
+  above)
+- `scheduling.CallbackRequest` — `apps/scheduling/models/CallbackRequests/CallbackRequests.py` (tenant+location
+  scoped; `contact` nullable `SET_NULL`; `caller_name`/`caller_phone`/`reason` free text; `SOURCE_AI_PHONE` is
+  already the field default but the dispatcher stamps it explicitly rather than relying on the default)
+- `agents.AgentSetting` — `apps/agents/models/AgentConfiguration/AgentSettings.py` (`transfer_enabled`,
+  `transfer_phone_number`, `transfer_secondary_number` read-only, gate tool enablement)
+- `calls.CallSession` — never written directly by the dispatcher; all writes are via `CallState`'s buffers,
+  flushed by the 3.2 consumer
+
+## Backend (apps/runtime/agent/ — new files + touches; one touch outside `runtime`)
+
+- [ ] `apps/runtime/agent/tools.py` (new) — `TOOL_DECLARATIONS`: the 12 tool dicts (`name`, `description`,
+  `parameters` JSON-schema), importing no SDK so they can be asserted in tests. `active_tools(agent_setting) ->
+  list` filters `transfer_call`/`transfer_call_spanish` out unless `agent_setting.transfer_enabled` and the
+  matching destination (`transfer_phone_number` / `transfer_secondary_number`) is non-blank — a function, not a
+  static constant, since enablement is per-call.
+- [ ] `apps/runtime/agent/envelope.py` (new) — `ok(data=None) -> dict`, `err(code, message) -> dict`, both
+  returning exactly `{"ok": bool, "data": {...}|None, "error": {"code","message"}|None}`. `err()` asserts `code`
+  is a member of the closed set `{'not_found', 'invalid_argument', 'slot_unavailable', 'slot_expired',
+  'not_permitted', 'provider_error', 'rate_limited', 'internal_error'}`, mirroring `SlotError.__init__`'s own
+  `assert` in `availability.py` — a typo'd code is a bug the dev environment catches loudly, not a code the
+  runtime silently ships.
+- [ ] `apps/runtime/agent/dispatcher.py` (new) — `async def apply_tool_call(state, name, args) -> dict`, the
+  Invariant-3 dispatcher. A dispatch table (`{name: async_handler}` dict, not an `if/elif` chain) so the
+  declaration/dispatch-table-parity test is a single set-equality assertion. Identity (`tenant_id`,
+  `location_id`, `contact_id`, `session_id`) is read **only** from `state`; any `args` key that collides with an
+  identity name (`tenant_id`, `location_id`, `contact_id`, `session_id`) is dropped before the handler runs —
+  never trusted even if a hallucinating/prompt-injected model supplies one. A shared `_load_scope(state)` helper
+  resolves `location = await database_sync_to_async(Location.objects.select_related('tenant').get,
+  thread_sensitive=False)(pk=state.location_id)` and `tenant = location.tenant` in **one** query — every
+  ORM-touching branch calls it once; `transfer_call`/`transfer_call_spanish`/`end_call` skip it (pure `state`
+  mutations, no ORM). Every branch wrapped so an unhandled exception (including `Location.DoesNotExist`, which
+  should never fire since `state.location_id` came from a verified token, but is not trusted blindly) becomes
+  `err('internal_error', ...)`, never propagates into the turn loop. A shared `_redact_args(args)` helper drops
+  `date_of_birth`, masks any key containing `phone` to its last 4 digits, and replaces `notes`/`reason`/
+  `cancellation_reason` values with a length-only marker (never the raw text) before anything reaches
+  `state.add_log` — applied generically across all 12 branches' logged args, not special-cased per tool
+  (CLAUDE.md vulnerability rule 5; a `create_contact` payload is a full name and a date of birth). Each handler
+  logs its own call: `state.add_log('info', 'tool', f'Tool call: {name}', {'args': redacted, 'ok': result['ok']})`
+  — `category='tool'`, distinct from 3.2's existing `category='llm'` cap-hit log, so a future 5.x diagnostics
+  page can filter the two apart.
+- [ ] `apps/scheduling/availability.py` (touch, own commit) — extend `book_slot(...)`'s signature with
+  `booked_by_session=None`, threaded into the `Appointment.objects.create(...)` call. Additive only: no new
+  migration (the field already exists), no behavior change for the two existing callers (the HTTP booking view,
+  which will pass nothing / `None`). This is the one line item in this pass that reaches outside `apps/runtime/`,
+  because the function it fixes was written in 4.3 explicitly for 3.3 to call and the gap is a signature omission,
+  not a design disagreement.
+- [ ] `apps/runtime/agent/turn.py` (touch, not rewrite) — fill the "3.3 seam":
+  - `tools = active_tools(agent_setting)` computed once per turn, before the `while True:` loop (`AgentSetting`
+    fields don't change mid-turn).
+  - **Populate `state.variables = variables` right after `build_variables(...)` is computed.** `CallState.variables`
+    is a field 3.2 declared but never assigned (dead weight until now) — 3.3 is what makes it live, because
+    `get_contact_appointments`'s ANI fallback needs `state.variables.get('from_e164', '')` and `apply_tool_call`'s
+    signature is fixed at `(state, name, args)` with no room for a fourth `call_session`/`variables` parameter.
+    This reuses an existing seam instead of adding a new `CallState` field for the same data.
+  - Replace `tools=[]` with `tools=tools`; on a non-empty `tool_calls` return, for each call:
+    `result = await apply_tool_call(state, call['name'], call.get('args') or {})`, then
+    `state.history.append({'role': 'tool', 'name': call['name'], 'text': json.dumps(result)})`. Apply **all**
+    tool calls in the turn before the next `providers.llm.generate(...)` (skill §7 — multiple tool calls per turn
+    are normal). `_trim_history(state.history)` after appending, same as the user/assistant turns.
+  - The iteration cap (`settings.MAX_TOOL_ITERATIONS`, already wired) and its spoken-fallback branch are
+    untouched — this pass only fills what runs *inside* the loop, per the existing seam comment.
+- [ ] `apps/runtime/agent/state.py` (touch) — add `pending_hangup: bool = False` to `CallState`, same shape as
+  the existing `pending_transfer: str = None` seam. `end_call`'s dispatcher branch sets it (and
+  `state.ended_reason = 'end_call'`); nothing else in 3.3 sets it.
+- [ ] `apps/runtime/consumers/MediaStreamTurnLoop/MediaStream.py` (touch) — in `_run_turn`, after the reply
+  playback attempt completes (whether or not audio was actually produced — TTS-down and empty-reply cases still
+  need the hangup to happen), check `if self.state.pending_hangup:` and if set, call `await self._finalize()`
+  then `await self.close(code=1000)`. Add `'end_call': CallSession.STATUS_COMPLETED` to `_STATUS_BY_REASON` so
+  `_finalize_session()` stamps the row `completed` rather than falling through to the `'hangup'` default (which
+  would still be correct but loses the more specific ended-reason). This is the one piece of 3.3 that touches
+  the consumer — no Twilio REST call, unlike 3.4's transfer, so it needs none of 3.4's drain-interval/single-fire
+  machinery.
+- [ ] `apps/runtime/agent/__init__.py` — re-export `TOOL_DECLARATIONS`, `active_tools` (from `tools.py`), `ok`,
+  `err` (from `envelope.py`), `apply_tool_call` (from `dispatcher.py`), alongside the existing 3.2 exports.
+- [ ] `apps/runtime/admin.py` — **not touched.** No new model.
+
+## Realtime & agent surface — tool-by-tool plan (all 12; declaration → dispatcher branch → envelope → tests)
+
+- [ ] **`get_contact_appointments(phone?)`** — resolves `phone` from `args.get('phone')` normalized via
+  `normalize_e164`, falling back to `state.variables.get('from_e164', '')` (the caller's ANI, populated by the
+  `turn.py` change above) when omitted. `Contact.objects.filter(tenant_id=state.tenant_id, phone_e164=phone)` —
+  **tenant-scoped only**, matching `Contact`'s own scope. Exactly one match → `state.contact_id = contact.pk`,
+  `data = {'contact_id': contact.pk, 'is_new': False, 'appointments': [...]}` where appointments is
+  `Appointment.objects.filter(contact=contact, tenant_id=state.tenant_id).order_by('-start_at')` mapped to
+  `{appointment_id, start_at, service, status}` (tenant-scoped only — a contact's history spans every location).
+  Zero matches, or no phone resolvable at all → `ok(data={'contact_id': None, 'is_new': True, 'appointments':
+  []})` — a new/unidentified caller is a normal outcome, not an error. Multiple matches → leave `state.contact_id`
+  unset, `data={'contact_id': None, 'is_new': False, 'appointments': []}` (ambiguous; the model should fall back
+  to `search_contact`). No error codes on this tool's happy paths; `internal_error` on the generic exception
+  guard only.
+- [ ] **`search_contact(first, last, date_of_birth)`** — `date_of_birth` parsed `MM/DD/YYYY` (same convention as
+  `get_open_slots`'s date args — the skill doesn't specify a separate DOB format, so one convention avoids the
+  model needing to remember two); unparseable → `err('invalid_argument', "I didn't catch that date of birth.")`.
+  `Contact.objects.filter(tenant_id=state.tenant_id, first_name__iexact=first, last_name__iexact=last,
+  date_of_birth=dob)`. Exactly one match → sets `state.contact_id` too (this is the disambiguation path that
+  makes `search_contact` → `book_appointment` work), `data={'contact_id': contact.pk, 'matches': [...]}`. Zero or
+  multiple → `state.contact_id` untouched, `data={'contact_id': None, 'matches': [...]}` — an empty list is
+  `ok(true)`, never an error.
+- [ ] **`create_contact(first_name, last_name, date_of_birth?, phone?)`** — `Contact.objects.create(tenant=tenant,
+  first_name=first_name, last_name=last_name, date_of_birth=parsed_dob_or_none, phone_e164=phone or '',
+  source=Contact.SOURCE_AI_PHONE)` — `save()` normalizes the phone itself, no manual normalization needed.
+  `state.contact_id = contact.pk`. `data={'contact_id': contact.pk}`. `date_of_birth`/`phone` malformed → still
+  create the contact with that field blank rather than refusing the whole tool (a receptionist would not refuse
+  to log a caller over an unparseable birthdate). PII note: `_redact_args` drops `date_of_birth` from the logged
+  entry — the args blob is exactly the "full name and date of birth" CLAUDE.md's vulnerability rule 5 names.
+- [ ] **`get_open_slots(date_from?, date_to?, weekdays?, time_from?, time_to?, duration_minutes?, service_id?,
+  provider_ids?, resource_ids?, page?, page_size?)`** — **bridging gap, called out explicitly**:
+  `find_available_slots(*, tenant, location, service, date_from, date_to, provider, resource, limit, now)` takes
+  a **single** `provider=`/`resource=`, but the declared tool schema (matching the skill's table) takes **plural**
+  `provider_ids`/`resource_ids` arrays. The dispatcher resolves each supplied id against
+  `_candidate_providers`/`Resource.objects.filter(tenant=, location=, is_active=True)` (an id that doesn't
+  resolve under this tenant+location is silently dropped, never leaked as "not found" — a prompt-injected
+  foreign-tenant id must degrade to "no slots for that one," not an error), then calls `find_available_slots`
+  once per resolved provider/resource pair (or once with `provider=None, resource=None` when both arrays are
+  empty), merges the results, sorts by `start`, and slices to `min(page_size or MAX_OFFERED_SLOTS,
+  MAX_OFFERED_SLOTS)` — `find_available_slots` already mints one `slot_token` per candidate, so merging is
+  concatenate + sort + slice, never a second minting pass. `service_id` missing → `err('invalid_argument', "Which
+  service would you like to check?")`; present but unresolvable (wrong tenant/location, inactive) →
+  `err('not_found', "I don't have that service on file here.")`. `date_from`/`date_to` parsed `MM/DD/YYYY`,
+  `time_from`/`time_to` parsed `HH:MM`; a malformed value on any of them → `invalid_argument`. `weekdays` values
+  are lower-cased and validated against `WEEKDAY_KEYS`; an unrecognized entry is dropped, not an error. `data =
+  {'slots': [{'slot_token', 'display', 'provider_name', 'resource_label'}]}` — `display` formatted in the
+  location's timezone (reuse the date/time formatting shape `agent/prompt.py`'s `_format_date`/`_format_time`
+  already use, for one consistent "how a time reads aloud" convention across the codebase).
+- [ ] **`book_appointment(slot_token, reason?, notes?)`** — refuses with `err('not_permitted', "I need to know
+  who I'm speaking with first.")` when `state.contact_id is None` (the tool table implicitly requires
+  `get_contact_appointments`/`search_contact`/`create_contact` to have run first). Otherwise fetches `contact =
+  Contact.objects.filter(pk=state.contact_id, tenant=tenant).first()` (re-authorized — `state.contact_id` is
+  server state, but the row could theoretically have been anonymized mid-call) and calls
+  `availability.book_slot(tenant=tenant, location=location, token=slot_token, contact=contact, reason=reason or
+  '', notes=notes or '', source=Appointment.SOURCE_AI_PHONE, booked_by_session=<the CallSession row>)` — the
+  `CallSession` instance itself, fetched once via `_load_scope`-style lookup keyed on `state.session_id`
+  (`CallSession.objects.filter(pk=state.session_id, tenant=tenant, location=location).first()`), since
+  `booked_by_session` is a FK, not an id. `SlotError` → `err(exc.code, exc.message)` unmodified (the four
+  `SLOT_ERROR_CODES` — `invalid_argument`, `not_permitted`, `slot_expired`, `slot_unavailable` — map straight
+  through, zero translation). Success → `data={'appointment_id': appt.pk, 'start_at': appt.start_at.isoformat(),
+  'service': appt.service.name if appt.service_id else None}`. **Never announce success before the write
+  returns** — the model only sees `ok:true` after `book_slot` has actually committed.
+- [ ] **`reschedule_appointment(appointment_id, slot_token)`** — same `state.contact_id is None` precondition as
+  `book_appointment`. Resolves `appointment = Appointment.objects.filter(pk=appointment_id,
+  tenant=tenant, location=location).first()`; `None` → `err('not_found', "I couldn't find that appointment.")`
+  (a dispatcher-level code `availability.py` never emits, since it only ever sees an already-scoped instance).
+  Calls `availability.reschedule_appointment(tenant=tenant, location=location, appointment=appointment,
+  token=slot_token, reason='', actor_contact=contact)` where `contact` is the `state.contact_id`-resolved row —
+  `actor_contact=` is what makes a cross-**contact** id (a second caller guessing this call's appointment id)
+  come back `not_permitted` via `availability.py`'s own check, not a new check 3.3 has to write. `SlotError` →
+  `err(exc.code, exc.message)`. Success → `data={'appointment_id': appt.pk, 'start_at': ..., 'service': ...}`.
+- [ ] **`cancel_appointment(appointment_id, cancellation_reason)`** — identical resolution/precondition shape to
+  `reschedule_appointment`; calls `availability.cancel_appointment(appointment=appointment, tenant=tenant,
+  location=location, reason=cancellation_reason, actor_contact=contact)`. `SlotError` → `err(exc.code,
+  exc.message)`; missing/foreign-scoped id → dispatcher-level `err('not_found', ...)`. Success →
+  `data={'appointment_id': appt.pk, 'status': 'cancelled'}`.
+- [ ] **`create_callback_request(caller_name, caller_phone, reason)`** — **no `state.contact_id` precondition** —
+  matches the model's own docstring ("Invariant 1 holds even for a caller nobody identified... `contact` is
+  simply left null"). `CallbackRequest.objects.create(tenant=tenant, location=location, contact=contact_or_none,
+  caller_name=caller_name or '', caller_phone=caller_phone or '', reason=reason or '',
+  status=CallbackRequest.STATUS_PENDING, source=CallbackRequest.SOURCE_AI_PHONE)` — `contact` is the
+  `state.contact_id`-resolved row **when set**, else `None`; this is an enhancement, never a requirement.
+  `data={'callback_id': cb.pk}`. No `SlotError` path here (this tool never touches `availability.py`); only the
+  generic `internal_error` guard.
+- [ ] **`get_location_hours()`** — **no new query for the hours half.** Reuses `state.open_intervals` — the same
+  data 3.2's `build_open_intervals(location)` already gathered once at `connect()` via
+  `apps.tenants.services.get_provider_intervals` — formatted into `{weekday, windows: [{start, end}]}` groups (one
+  entry per `WEEKDAY_KEYS` value present in `state.open_intervals`). Only `location.full_address` needs the fresh
+  `_load_scope` fetch. `data={'address': location.full_address, 'hours': [...]}`. Never errors on its happy path
+  (a location with zero configured hours returns an empty `hours` list, not a failure).
+- [ ] **`transfer_call()`** — pure `state` mutation, no ORM: `state.pending_transfer = 'human'`; returns
+  `ok({})` immediately. **No working-hours check, no Twilio call, no single-fire guard here** — those are 3.4's,
+  which reads `state.pending_transfer` at the seam `turn.py` already documents. Declared only when
+  `active_tools()` includes it (per `AgentSetting.transfer_enabled` + `transfer_phone_number` non-blank); if the
+  dispatcher receives this call anyway (a stale/hallucinated call for an undeclared tool) it still sets the flag
+  — 3.4's gate is what actually decides whether anything dials, so a defensive re-check here would just duplicate
+  work 3.4 already owns, per the research's explicit scope call.
+- [ ] **`transfer_call_spanish()`** — identical shape, `state.pending_transfer = 'spanish'`, gated on
+  `transfer_secondary_number` instead.
+- [ ] **`end_call()`** — `state.ended_reason = 'end_call'`, `state.pending_hangup = True` (new `CallState` field,
+  see Backend); returns `ok({})`. The consumer closes the socket after this turn's goodbye line finishes
+  playing (see the `MediaStream.py` touch above) — no Twilio REST call needed, unlike transfer.
+
+## Provider adapter + prompt surface
+
+- [ ] `apps/runtime/providers/llm.py` (touch) — `FakeLlmBackend.__init__` gains an optional `tool_calls=None`
+  parameter: a list-of-lists, consumed one entry per `_generate()` call in parallel with `replies` (`self.
+  _tool_calls = list(tool_calls or [])`; `calls = self._tool_calls.pop(0) if self._tool_calls else []`). Each
+  scripted entry is `[{'name': str, 'args': dict}, ...]`. `_generate` returns `(text, calls, usage)` — the shape
+  contract (`(text, tool_calls, usage)`) is unchanged; only the fake gains the ability to script tool calls, so
+  the dispatcher can be exercised end to end through the **real** `turn.py` loop in tests and via
+  `simulate_call`, with no SDK. `self.calls` (the existing call-log list) already records `tools=len(tools or
+  [])` per call — leave it as is.
+- [ ] Prompt variables: **none new this pass.** `RUNTIME_VAR_KEYS` in `apps/runtime/agent/prompt.py` is
+  unchanged. The prompt continues to name no tool and no tool parameter — trivially true today (no runtime code
+  ever interpolates a tool name into `prompt_text`), reaffirmed as a review-time check, not a runtime behavior
+  3.3 enforces in code.
+- [ ] `CallSession.usage` cost lines: **none new this pass.** Every one of the 12 tools is a local DB read/write
+  with no external provider round-trip — the LLM cost of the tool-bearing turn is already accounted for by
+  `turn.py`'s existing per-turn `usage` append (unchanged shape/timing). `provider_error` stays declared-but-
+  unreachable in the closed code set until a future tool calls an external provider.
+- [ ] **Trace through both runtime paths**: `apply_tool_call(state, name, args)` is a pure function of `state` —
+  it has no dependency on which LLM backend produced `tool_calls`, so it is transport-agnostic by construction.
+  Today only the cascaded/`FakeLlmBackend` path exists in code (`LiveLlmBackend` still raises `NotImplementedError`
+  per 3.2's own deferred scope) — tests exercise the dispatcher through that path exclusively; proving the same
+  dispatcher against a real native-audio adapter is deferred until that adapter exists (carried over from 3.2's
+  own deferral, not a new gap this pass introduces).
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` — add `'3.3': {}` to `LIVE_LINKS`, same posture as `'0.1'`/`'3.2'`/`'5.2'`–
+  `'5.4'`: a tool dispatcher is not a navigable page. One-line comment matching the existing entries' style,
+  noting that the tool-call trace (`category='tool'` log entries) becomes visible once 5.3's event-log view reads
+  `CallSession.logs`.
+- [ ] No `config/settings.py`, `config/urls.py` or `config/asgi.py` change — this pass adds no HTTP route, no
+  websocket route and no new setting (`MAX_TOOL_ITERATIONS` already exists and is unmodified).
+
+## Templates
+
+**None — service sub-module, no CRUD templates, no new observable page.** `templates/runtime/diagnostics.html`
+(3.1) needs zero edits this pass.
+
+## Observable surface — extend `manage.py simulate_call`
+
+Recommendation: **extend `simulate_call`**, not a new management command — a `--script <name>` option (or a
+default richer fixture) that drives the fake LLM through one full booking round-trip (`get_contact_appointments`
+→ `create_contact` → `get_open_slots` → `book_appointment`) using the new `FakeLlmBackend(tool_calls=...)`
+scripting, and prints the resulting `Appointment` alongside the existing transcript/logs/usage report. This
+satisfies the service-sub-module observable-surface obligation through the surface 3.2 already built rather than
+adding a second command, and gives `qa-smoke-tester` a concrete end-to-end path to assert against
+(`CallSession.logs` contains `category='tool'` entries; a `scheduling.Appointment` row exists with
+`source='ai_phone'` and `booked_by_session_id` set).
+
+- [ ] `apps/runtime/management/commands/simulate_call.py` (touch) — add the scripted-booking path (behind
+  `--script booking` or as the new default when a `--tenant`/`--location` resolves an `AgentSetting` with at
+  least one active `Service`), reusing `FakeLlmBackend`'s new `tool_calls=` scripting.
+- [ ] Still refuses `PROVIDER_MODE=live` outright (unchanged guard); still never touches
+  `providers.telephony`'s redirect/TwiML helpers.
+
+## Verify
+
+- [ ] `manage.py makemigrations runtime --check` → "No changes detected" (acceptance criterion).
+- [ ] `manage.py makemigrations scheduling --check` → "No changes detected" (the `book_slot()` touch is a
+  signature change only, no field/model change).
+- [ ] `manage.py migrate` — no-op for both apps.
+- [ ] `manage.py check` clean.
+- [ ] Assert `PROVIDER_MODE=fake` in `config/settings_test.py` (already pinned).
+- [ ] `pytest -q apps/runtime` — new tests:
+  - [ ] **Declaration/dispatch-table parity**: `{t['name'] for t in TOOL_DECLARATIONS} ==
+    set(_TOOL_HANDLERS)` — every declared tool has a branch, no dispatched-but-undeclared name exists.
+  - [ ] **No declaration lists an identity parameter** — `tenant_id`/`location_id`/`contact_id`/`session_id`
+    never appear in any tool's `parameters.properties`.
+  - [ ] **Identity args in `args` are ignored** — calling `apply_tool_call` with an `args` dict containing a
+    spoofed `tenant_id`/`contact_id` does not change which row is touched; the result is identical to omitting
+    those keys.
+  - [ ] **Missing identity precondition** — `book_appointment`/`reschedule_appointment`/`cancel_appointment` with
+    `state.contact_id is None` return `{'ok': False, 'error': {'code': 'not_permitted', ...}}` and write nothing
+    (assert row counts unchanged).
+  - [ ] **Cross-tenant `appointment_id`** on `reschedule_appointment`/`cancel_appointment` → `not_found` (the
+    dispatcher's own scoped lookup misses it entirely).
+  - [ ] **Cross-location `appointment_id`** (same tenant, other location) → `not_found`, same reasoning.
+  - [ ] **Cross-contact `appointment_id`** (same tenant+location, different identified contact on this call) →
+    `not_permitted` (via `availability.py`'s `actor_contact` check, not a dispatcher-level short-circuit).
+  - [ ] **Tampered/unoffered `slot_token`** (garbage string, or a validly-signed token for a different
+    tenant/location) → `invalid_argument` / `not_permitted` respectively, matching `SlotError`'s own codes
+    unmodified.
+  - [ ] **Expired `slot_token`** (minted `> SLOT_TOKEN_TTL_SECONDS` ago) → `slot_expired`.
+  - [ ] **`get_open_slots` bridging**: multiple `provider_ids` merge into one sorted, deduplicated, capped
+    result; a `provider_id`/`resource_id`/`service_id` belonging to another tenant or location silently yields no
+    matching slots (not an error) rather than leaking existence.
+  - [ ] **Envelope shape**: every branch's return is `{'ok': bool, 'data': ..., 'error': ...}` with no extra
+    top-level keys; every `error.code` observed across all branches is a member of the closed 8-code set.
+  - [ ] **Iteration cap with a populated tool table** (distinct from 3.2's empty-list case): a scripted
+    `FakeLlmBackend` that keeps returning tool calls hits `MAX_TOOL_ITERATIONS` and the turn still ends in the
+    spoken `FALLBACK_LINE`, never silence.
+  - [ ] **Transfer tools absent when disabled**: `active_tools(agent_setting)` with `transfer_enabled=False`
+    omits both `transfer_call` and `transfer_call_spanish`; with it `True` but `transfer_phone_number` blank,
+    `transfer_call` is still omitted (destination presence, not just the flag, gates it).
+  - [ ] **Transfer tools never dial**: calling `transfer_call`/`transfer_call_spanish` through the dispatcher only
+    sets `state.pending_transfer`; assert no `providers.telephony` method is invoked (mock/spy it and assert zero
+    calls).
+  - [ ] **`end_call` sets `pending_hangup`** and, driven through the real consumer via `WebsocketCommunicator`
+    (or `simulate_call`'s scripted path), the socket closes only **after** the goodbye audio is sent — assert
+    frame ordering, not just that it eventually closes.
+  - [ ] **PII redaction**: a `create_contact` call's logged `CallSession.logs` entry has no `date_of_birth` key
+    and a masked (not raw) phone; the same call's `CallSession.transcript` (unaffected by redaction) still shows
+    what the caller actually said.
+  - [ ] `manage.py simulate_call --script booking` (or the new default) runs to completion under
+    `PROVIDER_MODE=fake` via `call_command` in a test, exits 0, and leaves a `scheduling.Appointment` row with
+    `source='ai_phone'` and `booked_by_session_id` set to the simulated `CallSession`'s pk.
+- [ ] Sidebar: Module 3 still shows Live via `'3.1'`; `'3.3'` present in `LIVE_LINKS` (empty dict, no new row).
+
+## Close-out
+
+- [ ] Review agents in order: code-reviewer → explorer → frontend-reviewer → performance-reviewer (the
+  `get_open_slots` provider/resource-array bridging and the shared `_load_scope` one-query resolution are the two
+  spots most likely to regress into N+1) → realtime-reviewer (async discipline on every new `database_sync_to_async`
+  call; the `end_call`/`pending_hangup` consumer addition; transport-agnostic dispatcher correctness) →
+  qa-smoke-tester → security-reviewer (the load-bearing one for this pass — identity-arg stripping, cross-tenant/
+  location/contact IDOR on every model-supplied id, PII redaction in `logs`, transfer tools never dialing) →
+  test-writer.
+- [ ] **Update** (not re-author) `.claude/skills/runtime/SKILL.md`: flip 3.3's row to **BUILT**, add
+  `agent/{tools,envelope,dispatcher}.py` to the backend layout tree, add the 12-tool table with argument schemas
+  under **Tools & prompt surface** (identity args come from server state, never the model — stated plainly per
+  the mandatory skill-body rule), note the `book_slot()` signature extension in **Conventions & gotchas**, add
+  "extend `simulate_call --script booking`" under **Common tasks**.
+- [ ] **Update** `.claude/skills/voice-agent-runtime/SKILL.md` — mark §8 (tools/dispatcher/envelope) as
+  **implemented** (it was written ahead of any 3.3 code, per 3.2's own note); no content correction needed unless
+  the build surfaces a real discrepancy (none found in this planning pass).
+- [ ] README — note Module 3's third sub-module shipped; the call runtime can now identify a caller, check
+  availability, book/reschedule/cancel, log a callback, read out hours, and set (but not yet execute) a transfer
+  or hangup signal.
+
+## Later passes / deferred
+
+- Transfer working-hours gating, the single-fire guard, the drain interval, E.164/SID validation before
+  interpolation, the actual Twilio REST `<Dial>` redirect, and `CallSession.transfer` outcome capture →
+  **3.4** (this pass only sets `state.pending_transfer`).
+- Consent-gated recording, the two-party-consent announcement, `waveform_peaks`, `recording_blob` persistence,
+  the full runtime diagnostics page (per-stage latency, a tool-call trace **rendering** of the `logs` entries
+  this pass produces) → **3.5**.
+- The call-detail transcript/event-log/cost-breakdown UI that renders this sub-module's `logs` entries and
+  tool-call trace → **Module 5** (5.2/5.3, already built as view sub-modules reading `CallSession`'s JSON
+  columns — no new work triggered here).
+- `provider_error` and `rate_limited` stay declared-but-unreachable in the closed code set — no tool this pass
+  calls an external provider or enforces a per-tool rate limit.
+- A per-call-session ceiling on repeated `create_contact`/`create_callback_request` calls (beyond the existing
+  per-turn iteration cap and call-duration/idle bounds) — no researched competitor documents an equivalent, and
+  the existing 3.2 bounds are the shipped mitigation for this pass.
+- Live native-audio (`voice_provider='live'`) tool-calling semantics — proving `apply_tool_call` against a real
+  `LiveLlmBackend` once that adapter exists, carried over from 3.2's own deferral.
+- A configurable per-tenant/per-location tool-call rate ceiling beyond `MAX_TOOL_ITERATIONS` — would need a new
+  `AgentSetting` field (a 2.1 decision), not scoped to any sub-module yet.
+
+## Review notes
+
+(filled in at the end of the build pass)
