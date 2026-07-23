@@ -37,6 +37,8 @@ __all__ = [
     'build_variables',
     'render_greeting',
     'render_system_prompt',
+    'format_local_date',
+    'format_local_time',
 ]
 
 #: Whitespace-tolerant ``{{ key }}`` — word chars, dot, hyphen (skill §10).
@@ -102,12 +104,12 @@ def location_is_open_now(open_intervals, now_local):
     return False
 
 
-def _format_date(now_local):
+def format_local_date(now_local):
     """`Thursday, July 23, 2026` — portable (no %-d)."""
     return f'{now_local.strftime("%A, %B")} {now_local.day}, {now_local.year}'
 
 
-def _format_time(now_local):
+def format_local_time(now_local):
     """`2:05 PM` — portable (no %-I)."""
     hour = now_local.hour % 12 or 12
     return f'{hour}:{now_local.minute:02d} {now_local.strftime("%p")}'
@@ -132,8 +134,8 @@ def build_variables(agent_setting, call_session, location, now, open_intervals,
         'location_name': location.name,
         'location_address': location.full_address,
         'is_open_now': 'yes' if location_is_open_now(open_intervals, now_local) else 'no',
-        'current_date': _format_date(now_local),
-        'current_time': _format_time(now_local),
+        'current_date': format_local_date(now_local),
+        'current_time': format_local_time(now_local),
         'caller_display_name': contact.display_name if contact is not None else '',
         # agent_name is nominally a runtime var (so it always resolves), but its
         # value defers to the location's configured one — computing it here just
