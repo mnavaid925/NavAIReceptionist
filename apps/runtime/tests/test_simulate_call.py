@@ -19,6 +19,7 @@ import pytest
 from django.core.management import CommandError, call_command
 
 from apps.calls.models import CallSession
+from apps.scheduling.models import Appointment, Contact
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -93,3 +94,56 @@ def test_disabled_only_setting_is_not_selected(tenant_a, location_a1, make_agent
     make_agent_setting(tenant_a, location_a1, enabled=False)
     with pytest.raises(CommandError):
         _run()
+
+
+# --------------------------------------------------------------------------- #
+# --script — sub-module 3.3's tool round-trip driven through the real command
+# --------------------------------------------------------------------------- #
+
+def test_script_chat_is_the_default_and_books_nothing(
+    tenant_a, location_a1, make_agent_setting, make_bookable_service,
+):
+    """`--script chat` is one plain conversational turn — even with a bookable
+    service on hand, the fake model was never scripted to call a tool."""
+    make_agent_setting(tenant_a, location_a1)
+    make_bookable_service(tenant_a, location_a1)
+    text = _run(script='chat')
+
+    assert 'CallSession SIM-' in text
+    status = text.split('status=')[1].split()[0]
+    assert status in dict(CallSession.STATUS_CHOICES)
+    assert Appointment.objects.count() == 0
+
+
+def test_script_booking_books_exactly_one_appointment_via_the_real_dispatcher(
+    tenant_a, location_a1, make_agent_setting, make_bookable_service,
+):
+    """`--script booking` drives get_contact_appointments -> create_contact ->
+    get_open_slots -> book_appointment through the REAL `apply_tool_call`, not
+    a mock — the observable surface for the whole 3.3 tool round-trip."""
+    make_agent_setting(tenant_a, location_a1)
+    make_bookable_service(tenant_a, location_a1)
+    text = _run(script='booking')
+
+    assert 'Tool call: book_appointment' in text, text
+    assert 'appointments booked on this call: 1' in text, text
+
+    appointment = Appointment.objects.get()
+    assert appointment.source == Appointment.SOURCE_AI_PHONE
+    assert appointment.booked_by_session_id is not None
+    # The caller was created by the create_contact tool DURING the call, not
+    # pre-seeded — proof the identify -> create -> book chain really ran.
+    assert Contact.objects.filter(source=Contact.SOURCE_AI_PHONE).exists()
+
+
+def test_script_booking_falls_back_to_chat_with_no_bookable_service(
+    tenant_a, location_a1, make_agent_setting,
+):
+    """No active service at the location -> the command degrades to --script
+    chat rather than reporting a misleading tool failure."""
+    make_agent_setting(tenant_a, location_a1)
+    text = _run(script='booking')
+
+    assert 'falling back to --script chat' in text, text
+    assert 'Simulating a chat call' in text, text
+    assert Appointment.objects.count() == 0
