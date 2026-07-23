@@ -1,21 +1,28 @@
-"""The turn loop — sub-module 3.2.
+"""The turn loop — sub-module 3.2, tool dispatch filled in by 3.3.
 
 One completed caller utterance in, one spoken reply out (``voice-agent-runtime``
 skill §7). This module is pure of the transport: it runs STT → history → LLM →
-TTS, appends the transcript / log / usage rows to ``CallState``'s buffers, and
-returns the reply as carrier-ready μ-law for the **consumer** to pace onto the
+tools → TTS, appends the transcript / log / usage rows to ``CallState``'s buffers,
+and returns the reply as carrier-ready μ-law for the **consumer** to pace onto the
 wire. It touches no ORM and no websocket — the consumer owns both, and flushes the
-buffers this fills.
+buffers this fills. (The tool dispatcher it calls *does* touch the ORM, off-loop
+behind its own ``database_sync_to_async``; that boundary lives in
+``dispatcher.py``, not here.)
 
-Three seams are wired now so 3.3 and 3.4 plug in without reshaping the loop:
+Where the seams stand:
 
-* the LLM is called with ``tools=[]`` inside a **bounded iteration loop**
-  (``MAX_TOOL_ITERATIONS``); 3.3 populates the tool list and the dispatcher branch,
-  and the cap already guarantees a looping model can never produce silence;
+* **Tools — LIVE (3.3).** The LLM is called with the location's ``active_tools``
+  inside a **bounded iteration loop** (``MAX_TOOL_ITERATIONS``); every returned
+  call goes through ``apply_tool_call`` and its ``{ok, data, error}`` result is
+  appended as a tool-role turn. The cap guarantees a looping model still ends in a
+  spoken line rather than silence.
 * a **deferred-transport check** after the reply is composed; 3.4 acts on
-  ``state.pending_transfer`` there, 3.2 leaves it a documented no-op;
+  ``state.pending_transfer`` there. 3.3's transfer/end-call tools SET those flags;
+  the transport is what executes them, after this turn's audio has played.
 * the **per-turn cost** is appended as a delta whose ``cost_breakdown`` shape
   already differs for native-audio vs. cascaded ``voice_provider`` (skill §13).
+  3.3's tools are local DB work with no external round-trip, so they add no cost
+  line of their own — the turn's LLM cost already covers the tool-bearing turn.
 
 Every provider call is bounded by the adapter (timeout + retry); on exhaustion the
 loop degrades to a **spoken fallback line, never dead air** (skill §11). The one
@@ -23,12 +30,15 @@ exception it cannot speak around is TTS itself being down — there is no way to
 synthesize a fallback with a broken synthesizer, so it logs and returns no audio
 rather than raising into the frame loop.
 """
+import json
 import time
 from dataclasses import dataclass
 
 from django.conf import settings
 
+from apps.runtime.agent.dispatcher import apply_tool_call
 from apps.runtime.agent.prompt import build_variables, render_system_prompt
+from apps.runtime.agent.tools import active_tools
 from apps.runtime.providers.audio import (
     SAMPLE_WIDTH,
     STT_SAMPLE_RATE,
@@ -163,7 +173,18 @@ async def run_turn(state, utterance_pcm, *, agent_setting, call_session, locatio
     # are current this turn (skill §10).
     variables = build_variables(agent_setting, call_session, location, now,
                                 state.open_intervals)
+    # Publish them onto state: the dispatcher's signature is fixed at
+    # (state, name, args), so `state.variables` is how a tool reaches call-scoped
+    # facts — `get_contact_appointments` falls back to `from_e164` (the caller's
+    # ANI) when the model supplies no phone. 3.2 declared this field; 3.3 is what
+    # makes it live, rather than adding a second field for the same data.
+    state.variables = variables
     system_prompt = render_system_prompt(agent_setting, variables)
+
+    # The tool surface for THIS call — transfer tools appear only when the
+    # location has them enabled with a destination configured. Computed once per
+    # turn: AgentSetting does not change mid-turn.
+    tools = active_tools(agent_setting)
 
     # -- STT ---------------------------------------------------------------- #
     started = time.monotonic()
@@ -183,7 +204,7 @@ async def run_turn(state, utterance_pcm, *, agent_setting, call_session, locatio
     state.history.append({'role': 'user', 'text': transcript})
     _trim_history(state.history)
 
-    # -- LLM (bounded tool-iteration loop; tools empty until 3.3) ----------- #
+    # -- LLM (bounded tool-iteration loop) ---------------------------------- #
     started = time.monotonic()
     reply_text = ''
     usage = {}
@@ -191,13 +212,25 @@ async def run_turn(state, utterance_pcm, *, agent_setting, call_session, locatio
     try:
         while True:
             reply_text, tool_calls, usage = await providers.llm.generate(
-                state.history, system_prompt, tools=[])
+                state.history, system_prompt, tools=tools)
             iterations += 1
             if not tool_calls:
                 break
-            # -- 3.3 seam: apply_tool_call for each tool_call, append the results
-            #    as a tool-role turn, and loop. Empty in 3.2 (tools=[] => never
-            #    reached), but the cap below already protects a looping model.
+            # Apply EVERY tool call this round produced before the next model call
+            # (skill §7 — multiple tool calls in one turn are normal), appending
+            # each result as a tool-role turn the model reads on the next pass.
+            # `apply_tool_call` never raises, so one failing tool degrades to an
+            # {ok: false} the model can talk around rather than ending the call.
+            for call in tool_calls:
+                call_name = call.get('name') if isinstance(call, dict) else None
+                call_args = (call.get('args') if isinstance(call, dict) else None) or {}
+                result = await apply_tool_call(state, call_name, call_args)
+                state.history.append({
+                    'role': 'tool',
+                    'name': call_name or '',
+                    'text': json.dumps(result, default=str),
+                })
+            _trim_history(state.history)
             if iterations >= settings.MAX_TOOL_ITERATIONS:
                 state.add_log('warning', 'llm', 'Tool-iteration cap hit',
                               {'cap': settings.MAX_TOOL_ITERATIONS})
