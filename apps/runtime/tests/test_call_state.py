@@ -8,7 +8,13 @@ instead, independent of how many times the buffer has been drained.
 """
 from django.utils import timezone
 
-from apps.runtime.agent import CallState
+from apps.runtime.agent import (
+    CONSENT_NOT_RECORDED,
+    CONSENT_ONE_PARTY,
+    CONSENT_TWO_PARTY,
+    ENDED_REASON_KEYS,
+    CallState,
+)
 
 
 def _state(**kw):
@@ -126,3 +132,51 @@ def test_usage_buffer_survives_a_flush_and_keeps_using_live_turn_sequence():
     assert state.usage_buffer == [
         {'turn_sequence': 6, 'cost_breakdown': {'model': 'fake'}, 'cost_usd': 0.02},
     ]
+
+
+# --------------------------------------------------------------------------- #
+# 3.5 — the ended-reason vocabulary and the consent gate
+# --------------------------------------------------------------------------- #
+
+def test_ended_reason_vocabulary_matches_the_consumer_status_map():
+    """The drift guard `ENDED_REASON_DISPLAY`'s own docstring promises.
+
+    Two files describe the same closed set of ended reasons for two different
+    purposes — `state.ENDED_REASON_DISPLAY` labels them for the diagnostics tally,
+    `MediaStream._STATUS_BY_REASON` maps them to a terminal CallSession.status.
+    Add a reason to one and forget the other and it silently falls through
+    `_STATUS_BY_REASON`'s default AND vanishes from the tally, with nothing
+    failing. This is the something that fails.
+    """
+    from apps.runtime.consumers.MediaStreamTurnLoop.MediaStream import _STATUS_BY_REASON
+
+    assert ENDED_REASON_KEYS == frozenset(_STATUS_BY_REASON)
+
+
+def test_should_record_is_false_until_consent_is_resolved():
+    state = _state()
+    assert state.consent_basis is None
+    assert state.should_record is False
+    state.consent_basis = CONSENT_NOT_RECORDED
+    assert state.should_record is False
+
+
+def test_one_party_consent_records_without_an_announcement():
+    state = _state(consent_basis=CONSENT_ONE_PARTY)
+    assert state.requires_announcement is False
+    assert state.should_record is True
+
+
+def test_two_party_consent_records_only_once_the_notice_actually_played():
+    """A resolved two-party basis is a REQUIREMENT, not a permission.
+
+    If the notice never reached the caller — TTS down, playback cut — the call is
+    not recorded, and the row says so honestly: basis announced_notice, announced
+    False, recorded False.
+    """
+    state = _state(consent_basis=CONSENT_TWO_PARTY)
+    assert state.requires_announcement is True
+    assert state.should_record is False
+
+    state.consent_announced = True
+    assert state.should_record is True
