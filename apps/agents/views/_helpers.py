@@ -47,15 +47,25 @@ def webhook_urls(setting):
     need broader API permission than reading, and getting it wrong silently
     breaks their phone line.
 
-    The paths are Module 3's ingress and do not resolve yet, so they are built as
-    strings rather than through `reverse()`.
+    **Both values are resolved from Module 3's real routes, never hand-written.**
+    They were string literals while Module 3 was unbuilt, and by the time 3.1/3.2
+    shipped the literals no longer matched (`/ws/runtime/media/` for a route that
+    is really `/ws/media-stream/`) — a page instructing staff to paste a URL that
+    does not resolve is worse than one that says nothing. `reverse()` and
+    `media_stream_ws_url()` cannot drift from the routes the same way.
+
+    There is deliberately **no status-callback URL**: no such route exists. The
+    `<Dial action>` status callback is a tracked deferral, and offering a 404 for
+    a caller to configure would break every call it was set on.
     """
     base = (django_settings.TWILIO_WEBHOOK_BASE_URL or '').rstrip('/')
     if not base:
         return {}
-    stream_base = base.replace('https://', 'wss://').replace('http://', 'ws://')
+    from django.urls import reverse
+
+    from apps.runtime.providers.telephony import media_stream_ws_url
+
     return {
-        'voice': f'{base}/runtime/voice/',
-        'status': f'{base}/runtime/status/',
-        'stream': f'{stream_base}/ws/runtime/media/',
+        'voice': f"{base}{reverse('runtime:voice_webhook')}",
+        'stream': media_stream_ws_url(),
     }
