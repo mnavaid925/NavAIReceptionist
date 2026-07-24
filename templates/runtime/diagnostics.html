@@ -71,7 +71,12 @@
       <div class="stat-label">Transferred</div>
       <div class="stat-meta">Handed off to a person</div>
     </div>
-    <div class="stat-card">
+    {% comment %}
+      Five cards is a prime count, so at the 2-column tier the last one would sit
+      alone at half width. `sm:col-span-2` lets it fill that row instead, and
+      `lg:col-span-1` hands it back to the normal flow from the 3-column tier up.
+    {% endcomment %}
+    <div class="stat-card sm:col-span-2 lg:col-span-1">
       <span class="stat-icon green" aria-hidden="true"><i data-lucide="circle-dollar-sign"></i></span>
       <div class="stat-value">${{ total_cost_today|floatformat:4 }}</div>
       <div class="stat-label">Spend today</div>
@@ -148,7 +153,7 @@
                 <tbody>
                   {% for entry in recent_errors %}
                     <tr>
-                      <td><span class="badge {{ entry.badge }}">{{ entry.level }}</span></td>
+                      <td><span class="badge {{ entry.badge }}">{{ entry.level|title }}</span></td>
                       <td>{{ entry.category }}</td>
                       <td>{{ entry.title }}</td>
                       <td><a href="{% url 'calls:callsession_detail' entry.session_pk %}">{{ entry.call_sid }}</a></td>
