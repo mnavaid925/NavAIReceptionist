@@ -396,6 +396,13 @@ IDLE_TIMEOUT_SECONDS = env_int('IDLE_TIMEOUT_SECONDS', 45)
 # strand the caller in silence past the turn-latency budget (skill §11).
 PROVIDER_TIMEOUT_SECONDS = env_int('PROVIDER_TIMEOUT_SECONDS', 6)
 MAX_CONCURRENT_CALLS = env_int('MAX_CONCURRENT_CALLS', 25)
+# How long the transport waits after the handoff line finishes sending, before it
+# issues the transfer REST redirect (3.4). `_play` returns once the frames are on
+# the wire, but Twilio's carrier-side jitter buffer is still draining them to the
+# caller; redirecting immediately would clip the last word of "I'm connecting you
+# now". Short enough not to add noticeable dead air, long enough to empty a 20 ms
+# frame buffer with margin.
+TRANSFER_DRAIN_SECONDS = env_float('TRANSFER_DRAIN_SECONDS', 0.6)
 
 
 # --------------------------------------------------------------------------- #
