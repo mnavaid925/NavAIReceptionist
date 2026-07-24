@@ -291,12 +291,33 @@ def test_ensure_list_returns_empty_list_for_anything_that_is_not_a_list(value):
 
 @pytest.mark.parametrize('value, expected', [
     ('announced_notice', 'Recorded — consent announced'),
-    ('two_party', 'Recorded — two-party consent'),
-    ('one_party', 'Recorded — one-party consent'),
+    ('one_party_notice', 'Recorded — one-party consent'),
     ('not_recorded', 'Not recorded'),
 ])
 def test_consent_basis_label_maps_known_values(value, expected):
     assert consent_basis_label(value) == expected
+
+
+def test_consent_basis_label_covers_every_basis_the_runtime_can_write():
+    """The coupling that keeps this map honest, since drift fails SILENTLY.
+
+    5.4 shipped the label map before 3.5 shipped the resolver, and guessed two
+    values (`two_party`/`one_party`) the runtime never produces while missing the
+    one it does. Nothing failed — `consent_basis_label` falls back to the raw
+    value, so a real one-party call simply rendered `one_party_notice` on a
+    compliance badge. `apps/runtime/agent/consent.py` is the authority; this
+    asserts the map has a label for every value it can emit.
+    """
+    from apps.accounts.templatetags.ui import _CONSENT_BASIS_LABELS
+    from apps.runtime.agent import (
+        CONSENT_NOT_RECORDED,
+        CONSENT_ONE_PARTY,
+        CONSENT_TWO_PARTY,
+    )
+
+    for basis in (CONSENT_TWO_PARTY, CONSENT_ONE_PARTY, CONSENT_NOT_RECORDED):
+        assert basis in _CONSENT_BASIS_LABELS, basis
+        assert consent_basis_label(basis) != basis
 
 
 def test_consent_basis_label_falls_back_to_the_raw_value_for_an_unknown_basis():
@@ -312,4 +333,4 @@ def test_consent_basis_label_returns_empty_string_for_empty_input(value):
 
 
 def test_consent_basis_label_strips_whitespace():
-    assert consent_basis_label('  two_party  ') == 'Recorded — two-party consent'
+    assert consent_basis_label('  one_party_notice  ') == 'Recorded — one-party consent'
