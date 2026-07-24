@@ -30,6 +30,18 @@ from apps.runtime.agent.tools import (
     TRANSFER_TOOLS,
     active_tools,
 )
+from apps.runtime.agent.transfer import (
+    REASON_BY_KIND,
+    RESULT_CHOICES,
+    RESULT_CONNECTED,
+    RESULT_DISABLED,
+    RESULT_FAILED,
+    RESULT_NO_ANSWER,
+    RESULT_OFF_HOURS,
+    build_transfer_record,
+    looks_like_call_sid,
+    looks_like_e164,
+)
 from apps.runtime.agent.turn import (
     FALLBACK_LINE,
     MAX_HISTORY_TURNS,
@@ -67,4 +79,15 @@ __all__ = [
     'tts_only_cost',
     'FALLBACK_LINE',
     'MAX_HISTORY_TURNS',
+    # -- 3.4 transfer execution ------------------------------------------- #
+    'build_transfer_record',
+    'looks_like_e164',
+    'looks_like_call_sid',
+    'REASON_BY_KIND',
+    'RESULT_CHOICES',
+    'RESULT_CONNECTED',
+    'RESULT_NO_ANSWER',
+    'RESULT_OFF_HOURS',
+    'RESULT_DISABLED',
+    'RESULT_FAILED',
 ]
