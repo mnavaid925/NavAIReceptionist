@@ -463,9 +463,10 @@ def test_recording_context_retention_date_is_derived_for_a_positive_int(
 
 
 def test_recording_context_consent_basis_passthrough(tenant_a, location_a1, make_call_session):
-    session = make_call_session(tenant_a, location_a1, metadata={'consent_basis': 'two_party'})
+    session = make_call_session(
+        tenant_a, location_a1, metadata={'consent_basis': 'one_party_notice'})
 
-    assert _recording_context(session)['consent_basis'] == 'two_party'
+    assert _recording_context(session)['consent_basis'] == 'one_party_notice'
 
 
 def test_recording_context_consent_basis_defaults_to_empty_string(tenant_a, location_a1, make_call_session):
