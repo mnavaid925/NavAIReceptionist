@@ -455,27 +455,41 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         ``consent_announced`` is set only AFTER the audio actually played, so a TTS
         failure leaves it False and the finalized row says honestly that the
-        announcement did not happen. Claiming an announcement that never played
-        would be worse than recording no claim at all — so this is deliberately not
-        set optimistically up front.
+        announcement did not happen — and because ``CallState.should_record``
+        requires it in a two-party jurisdiction, such a call is simply not
+        recorded. Claiming an announcement that never played would be worse than
+        recording no claim at all, so this is deliberately not set optimistically.
+
+        **``interruptible`` is held False across the SYNTHESIS, not just the
+        playback.** ``_play``'s own ``finally`` resets it to True the instant the
+        greeting's audio ends, so without this a caller speaking into the gap
+        while this line is being synthesized would barge-in, cancel the ``_greet``
+        task this runs inside, and the notice would never play. The ``finally``
+        below restores it on every path, including a TTS failure — leaving it
+        False would make the whole rest of the call un-interruptible.
         """
         if not self.state.requires_announcement:
             return
+        self.interruptible = False
         try:
-            pcm, rate = await self.providers.tts.synthesize(CONSENT_ANNOUNCEMENT_LINE)
-        except ProviderError:
-            self.state.add_log('error', 'tts', 'Recording notice synthesis failed')
-            return
-        self.state.add_transcript('assistant', CONSENT_ANNOUNCEMENT_LINE)
-        self.state.history.append({'role': 'assistant', 'text': CONSENT_ANNOUNCEMENT_LINE})
-        # A second TTS spend — recorded, or the call's cost under-reports it (the
-        # same rule the greeting's own TTS cost already follows).
-        self.state.add_usage(*tts_only_cost(self.state.voice_provider,
-                                            CONSENT_ANNOUNCEMENT_LINE))
-        await self._flush()
-        await self._play(pcm16_to_carrier_mulaw(pcm, rate), interruptible=False)
-        self.state.consent_announced = True
-        self.state.add_log('info', 'call', 'Recording notice played')
+            try:
+                pcm, rate = await self.providers.tts.synthesize(CONSENT_ANNOUNCEMENT_LINE)
+            except ProviderError:
+                self.state.add_log('error', 'tts', 'Recording notice synthesis failed')
+                return
+            self.state.add_transcript('assistant', CONSENT_ANNOUNCEMENT_LINE)
+            self.state.history.append(
+                {'role': 'assistant', 'text': CONSENT_ANNOUNCEMENT_LINE})
+            # A second TTS spend — recorded, or the call's cost under-reports it
+            # (the same rule the greeting's own TTS cost already follows).
+            self.state.add_usage(*tts_only_cost(self.state.voice_provider,
+                                                CONSENT_ANNOUNCEMENT_LINE))
+            await self._flush()
+            await self._play(pcm16_to_carrier_mulaw(pcm, rate), interruptible=False)
+            self.state.consent_announced = True
+            self.state.add_log('info', 'call', 'Recording notice played')
+        finally:
+            self.interruptible = True
 
     async def _speak_fallback_greeting(self):
         """Best-effort spoken fallback when the greeting itself crashed."""
@@ -1000,6 +1014,30 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         reason = self.state.ended_reason or 'hangup'
         status = _STATUS_BY_REASON.get(reason, CallSession.STATUS_COMPLETED)
         should_record = self.state.should_record
+
+        # Write the audio BEFORE opening the transaction. This is real file I/O
+        # (and the deferred live backend will be a network encode/upload), so
+        # doing it inside the block would hold `select_for_update`'s row lock for
+        # the whole write. The consent gate is untouched by the move: the gate is
+        # about what lands in the DATABASE write, and the path and the basis that
+        # justified it still land in the one `save()` below.
+        #
+        # A recorder failure must not strand the row in_progress — the status
+        # stamp matters more than the audio, so it degrades to "not recorded".
+        # Log the TYPE only: a storage error's text carries the path, which embeds
+        # the tenant and location ids.
+        blob = ''
+        if should_record:
+            try:
+                blob = get_recording_backend().finalize(
+                    self.call_session, should_record=True)
+            except Exception as exc:  # noqa: BLE001 — teardown must still land
+                logger.error('recording finalize failed (%s)', type(exc).__name__)
+                should_record = False
+        # Peaks are derived from LIVE per-frame DSP, not from the stored audio, so
+        # they are genuinely partial-but-real on an early drop.
+        peaks = self.waveform.finalize() if should_record else None
+
         with transaction.atomic():
             cs = (
                 CallSession.objects.select_for_update()
@@ -1007,11 +1045,13 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                         location_id=self.state.location_id)
                 .first()
             )
-            if cs is None:
-                return
             # Only advance a still-live call. Never overwrite a terminal status a
-            # later sub-module (3.4's 'transferred') may already have set.
-            if cs.status != CallSession.STATUS_IN_PROGRESS:
+            # later sub-module (3.4's 'transferred') may already have set. Either
+            # bail means the file just written will never be referenced by a row,
+            # so delete it rather than leaving orphaned caller audio on disk that
+            # the retention job — which walks ROWS — could never reach.
+            if cs is None or cs.status != CallSession.STATUS_IN_PROGRESS:
+                self._discard_recording(blob)
                 return
             cs.status = status
             cs.ended_at = timezone.now()
@@ -1023,20 +1063,19 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             metadata['retention_days'] = (
                 settings.RECORDING_RETENTION_DAYS if should_record else 0)
             cs.metadata = metadata
-            # A recorder failure must not strand the row in_progress — the status
-            # stamp below matters more than the audio. Log the TYPE only: a storage
-            # error's text carries the path, which embeds tenant and call ids.
-            if should_record:
-                try:
-                    cs.recording_blob = get_recording_backend().finalize(
-                        cs, should_record=True)
-                except Exception as exc:  # noqa: BLE001 — teardown must still land
-                    logger.error('recording finalize failed (%s)', type(exc).__name__)
-                    cs.recording_blob = ''
-                    metadata['recorded'] = False
-                    cs.metadata = metadata
-                # Peaks are derived from LIVE per-frame DSP, not from the stored
-                # audio, so they are genuinely partial-but-real on an early drop.
-                cs.waveform_peaks = self.waveform.finalize()
+            cs.recording_blob = blob
+            cs.waveform_peaks = peaks
             cs.save(update_fields=['status', 'ended_at', 'metadata',
                                    'recording_blob', 'waveform_peaks', 'updated_at'])
+
+    @staticmethod
+    def _discard_recording(blob):
+        """Delete a recording no row will ever point at. Never raises."""
+        if not blob:
+            return
+        try:
+            from apps.calls.storage import recording_storage
+
+            recording_storage.delete(blob)
+        except Exception as exc:  # noqa: BLE001 — teardown must not raise
+            logger.error('orphan recording cleanup failed (%s)', type(exc).__name__)
