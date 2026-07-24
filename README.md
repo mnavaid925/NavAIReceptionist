@@ -12,22 +12,23 @@ setup, calendar and staff are configured **per location**.
 
 > **Build state — read this before trusting any path below.**
 >
-> **25 of the 26 sub-modules are built.** The remaining 1 (3.5, the rest of Module 3) renders as a greyed-out
-> roadmap row in the sidebar, which reflects the truth honestly. `LIVE_LINKS` in `apps/accounts/navigation.py` is
-> the build-state ledger — a sub-module is built if and only if it has an entry there.
+> **All 26 sub-modules are built.** `LIVE_LINKS` in `apps/accounts/navigation.py` is the build-state ledger — a
+> sub-module is built if and only if it has an entry there. Several of those entries are deliberately empty dicts:
+> a sub-module whose surfaces are not pages a signed-in user navigates to (the media consumer, the tool dispatcher,
+> transfer execution, the recorder) is built and contributes no sidebar link rather than duplicating another row.
 >
 > | Module | Built | Not built |
 > |---|---|---|
 > | **0 · Accounts & Access** (`apps/accounts`) | 0.1 auth & session · 0.2 change password/email · 0.3 user directory & profile · 0.4 location switcher | — |
 > | **1 · Business & Locations** (`apps/tenants`) | 1.1 business settings · 1.2 location directory · 1.3 staff assignment · 1.4 provider working hours | — |
 > | **2 · Agent Setup & Telephony** (`apps/agents`) | 2.1 agent setup · 2.2 Twilio connection · 2.3 transfer settings · 2.4 test call | — |
-> | **3 · Call Runtime** (`apps/runtime`) | **3.1 inbound webhook & call resolution** — the `/runtime/voice/` webhook (signature-verified per-location, dialed-number → tenant+location, idempotent `CallSession` on `provider_call_sid`, unmapped/disabled spoken decline) issuing `<Connect><Stream>` TwiML with an opaque signed stream token, plus a runtime diagnostics page. **3.2 media stream & turn loop** — the `wss://…/ws/media-stream/` Channels consumer (start-frame token auth, tenant+location-namespaced group), the μ-law⇄PCM audio chain, energy VAD + sustained-speech barge-in, the agent turn loop (deterministic greeting, STT→LLM→TTS, `{{variable}}` rendering, per-turn cost) over bounded STT/TTS/LLM adapters + fakes, and a `manage.py simulate_call` observable surface. `config/asgi.py` now serves the websocket route. **3.3 tools & dispatcher** — the 12 LLM tool declarations, the `{ok, data, error}` envelope over a closed error-code set, and `apply_tool_call` (identity from server state only, every model-supplied id re-authorised against tenant + location + the identified contact), wrapping Module 4.3's booking engine so the agent can identify a caller, offer opaque signed slots, book/reschedule/cancel, log a callback, read out hours, and set (not yet execute) a transfer or hangup. **3.4 transfer execution** — the dispatcher hours/target gate (a `human` transfer is gated on `is_transfer_available` *before* promising a handoff; off-hours writes an `off_hours` `CallSession.transfer` record + a de-duped `CallbackRequest`; the Spanish line skips the hours gate), the consumer's deferred `_execute_transfer` after the acknowledgement audio (single-fire guard, E.164/SID validation before any REST interpolation, a drained bounded `redirect_call` with no retry, outcome capture to `CallSession.transfer`, and a spoken apology + callback on a failed redirect), the `apps/agents/telephony.py` → `apps/runtime/providers/telephony.py:get_backend()`/`redirect_call` handoff, and a transfer-outcome summary on the diagnostics page | 3.5 recording, teardown & diagnostics |
+> | **3 · Call Runtime** (`apps/runtime`) | **3.1 inbound webhook & call resolution** — the `/runtime/voice/` webhook (signature-verified per-location, dialed-number → tenant+location, idempotent `CallSession` on `provider_call_sid`, unmapped/disabled spoken decline) issuing `<Connect><Stream>` TwiML with an opaque signed stream token, plus a runtime diagnostics page. **3.2 media stream & turn loop** — the `wss://…/ws/media-stream/` Channels consumer (start-frame token auth, tenant+location-namespaced group), the μ-law⇄PCM audio chain, energy VAD + sustained-speech barge-in, the agent turn loop (deterministic greeting, STT→LLM→TTS, `{{variable}}` rendering, per-turn cost) over bounded STT/TTS/LLM adapters + fakes, and a `manage.py simulate_call` observable surface. `config/asgi.py` now serves the websocket route. **3.3 tools & dispatcher** — the 12 LLM tool declarations, the `{ok, data, error}` envelope over a closed error-code set, and `apply_tool_call` (identity from server state only, every model-supplied id re-authorised against tenant + location + the identified contact), wrapping Module 4.3's booking engine so the agent can identify a caller, offer opaque signed slots, book/reschedule/cancel, log a callback, read out hours, and set (not yet execute) a transfer or hangup. **3.4 transfer execution** — the dispatcher hours/target gate (a `human` transfer is gated on `is_transfer_available` *before* promising a handoff; off-hours writes an `off_hours` `CallSession.transfer` record + a de-duped `CallbackRequest`; the Spanish line skips the hours gate), the consumer's deferred `_execute_transfer` after the acknowledgement audio (single-fire guard, E.164/SID validation before any REST interpolation, a drained bounded `redirect_call` with no retry, outcome capture to `CallSession.transfer`, and a spoken apology + callback on a failed redirect), the `apps/agents/telephony.py` → `apps/runtime/providers/telephony.py:get_backend()`/`redirect_call` handoff, and a transfer-outcome summary on the diagnostics page. **3.5 recording, teardown & diagnostics** — consent-gated recording (the basis is resolved once from the *location's* jurisdiction, never the caller's number; a two-party location hears a spoken notice before the first turn, and because the basis is a requirement rather than a permission a call whose notice never played is not recorded and the row says so), a recording adapter whose fake writes real playable bytes through the private storage 5.4 reads, a two-channel waveform derived from live per-frame energy (so the agent lane shows only audio actually sent and an abnormal drop still yields real partial peaks), all written inside the ONE guaranteed-teardown path every termination already routes through, a single-use stream-token claim closing 3.2's replay gap, a `manage.py purge_expired_recordings` retention job enforcing each row's own window, and four new diagnostics panels (ended-reason tally, per-stage ASR/LLM/TTS p50/p95, recent runtime errors, spend today) — **Module 3 is complete** | — |
 > | **4 · Calendar & Bookings** (`apps/scheduling`) | **4.1 contact directory · 4.2 services & resources · 4.3 availability & booking · 4.4 calendar views · 4.5 bookings & callbacks** — the whole module | — |
 > | **5 · Call Logs** (`apps/calls`) | **5.1 call log list · 5.2 call detail & transcript · 5.3 event log & cost · 5.4 recording & transfer outcome** — the whole module: `CallSession` and every reading surface over its JSON columns, plus a signed-media serve route for private recordings | — |
 >
 > Also built: `config/` (settings, ASGI + Channels, urls), the design system
 > (`static/css/theme.css`, `static/js/layout.js`, `templates/base.html` + partials), and the test suite
-> (`conftest.py` + `apps/scheduling/tests/` + `apps/calls/tests/` + `apps/runtime/tests/`, **1029 passing**).
+> (`conftest.py` + `apps/scheduling/tests/` + `apps/calls/tests/` + `apps/runtime/tests/`, **1113 passing**).
 >
 > **Build order note.** Module 3 is numbered before 4 and 5 but depends on both — it writes
 > `calls.CallSession` and `scheduling.Appointment`/`CallbackRequest`/`Contact`, and reads `Service` and
@@ -180,6 +181,31 @@ end. **It contacts no provider under any `PROVIDER_MODE`; `apps/calls` has no ad
 > every session. Nothing errors and the pages still render; the demo just shows every caller as
 > unidentified, which reads as a scoping bug rather than a stale seed. If you flush scheduling, re-run
 > `seed_calls --flush` afterwards.
+
+Module 3 seeds nothing of its own — it writes the same `CallSession` rows. Its two observable surfaces
+are management commands, both safe on a dev machine because neither can reach a carrier:
+
+```bash
+venv\Scripts\python.exe manage.py simulate_call --location downtown
+```
+
+`simulate_call` drives one full fake call through the *real* consumer under `PROVIDER_MODE=fake` —
+greeting, VAD, turn loop, tools, teardown — and prints the finalized session: transcript, event log,
+per-turn cost, and the recording block (consent basis, whether the notice was announced, the retention
+window, the stored blob and the waveform bin counts). It refuses to run under `PROVIDER_MODE=live`.
+Point it at different locations to see both consent branches: the seeded Downtown and Uptown are in
+Illinois, a two-party state, so the agent speaks a recording notice; Riverside is in Oregon and records
+without one. `--script booking` and `--script transfer` drive the tool and handoff paths.
+
+```bash
+venv\Scripts\python.exe manage.py purge_expired_recordings --dry-run
+```
+
+`purge_expired_recordings` enforces the retention window: it deletes recordings past **their own row's**
+`metadata.retention_days` (stamped at teardown from the setting in force when the call happened, so
+lowering `RECORDING_RETENTION_DAYS` never retroactively expires older recordings), clears the path and
+stamps the purge. `--dry-run` reports and writes nothing; it is idempotent, so it is safe on a schedule
+via cron or Task Scheduler. `--tenant` / `--location` narrow it.
 
 > **Database version.** This project is pinned to **Django 4.2 LTS** because Django 5.1+ requires
 > MariaDB 10.5 or later, and XAMPP currently ships 10.4. If you see
