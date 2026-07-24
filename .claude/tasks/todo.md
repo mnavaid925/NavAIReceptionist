@@ -5859,3 +5859,450 @@ is reachable and `duration_seconds` is real — until then a 2xx redirect is a p
 redirect's timeout-vs-outcome ambiguity is tracked here too); warm-transfer whisper / three-way conferencing; SIP
 REFER; a true primary→secondary waterfall (needs a new `AgentSetting` field, a 2.3 call); metering the bridged
 call's carrier-minute cost (5.3); a transfer-specific rate ceiling.
+
+---
+# Sub-module 3.5 — Recording, Teardown & Diagnostics (Module 3: Call Runtime, `runtime`) — plan from research-runtime-3.5.md (2026-07-25)
+
+## Shape: SERVICE — zero models, zero migrations attributable to 3.5
+
+Confirmed by grep: `apps/runtime/models/` still does not exist; `manage.py makemigrations runtime --check` must
+keep reporting "No changes detected" through this pass — the LAST sub-module of Module 3. Every feature this pass
+builds writes into fields `calls.CallSession` already declares (`recording_blob`, `waveform_peaks`, `metadata`,
+`status`) or reads fields `tenants.Location` already declares (`.state`, `.country`) — confirmed by reading
+`apps/calls/models/CallLogList/CallSessions.py` and `apps/tenants/models/Location.py`. The two features the
+research explicitly flags as "most likely to tempt a new model" — a queryable webhook-health log and a
+per-attempt diagnostics list — are answered with structured `logging` / a bounded in-process read, not a table.
+No twelfth model is invented to hit a count target; this pass's build surface is two new pure/adapter modules, a
+DSP extension, five touches to already-shipped 3.2/3.4 files, one new management command, and a diagnostics
+extension.
+
+## Models: NONE — service sub-module. Tables read/written (all pre-existing, re-verified by grep)
+
+- `calls.CallSession` (`apps/calls/models/CallLogList/CallSessions.py`, tenant+location scoped) — this pass is the
+  FIRST real writer of `.recording_blob` and `.waveform_peaks` (both declared in 5.1, written only by
+  `seed_calls.py`'s fiction until now) and extends `.metadata` with the keys `seed_calls.py`'s `_build_metadata`
+  already seeds ahead of any real writer: `recorded`, `consent_basis`, `consent_announced`, `retention_days`,
+  plus `ended_reason` (already written by 3.2's `_finalize_session`). The model's own docstring is explicit that a
+  non-empty `recording_blob` REQUIRES a resolved `consent_basis` in `metadata` first — this pass is the code that
+  docstring was written for.
+- `tenants.Location` (`apps/tenants/models/Location.py`, read-only) — `.state` (blank `CharField`) and `.country`
+  (default `'US'`) drive jurisdiction-based consent resolution; **zero new field**. Seeded demo locations already
+  span both branches without any seed change: Downtown/Uptown = `'IL'` (two-party), Riverside = `'OR'`, Lakeside =
+  `'CO'` (both one-party) — confirmed by grepping `seed_tenants.py` — so `simulate_call` against different
+  locations organically exercises both consent branches.
+- `agents.AgentSetting` (`apps/agents/models/AgentConfiguration/AgentSettings.py`, read-only) — **no new field**.
+  Confirmed by reading the file: there is no recording-enabled/consent toggle on it today. Per research, that
+  toggle is explicitly parked to **2.1/2.3**, not this pass — 3.5 defaults to "always record when consent allows."
+- `apps/runtime/agent/state.py` — `CallState.ended_reason`'s own comment already calls it "the seed of 3.5's
+  ended-reason diagnostics"; `apps/runtime/consumers/MediaStreamTurnLoop/MediaStream.py`'s `_STATUS_BY_REASON`
+  (8 keys: `hangup`/`max_duration`/`idle_timeout`/`end_call`/`transferred`/`disabled`/`capacity`/`error`) and its
+  ONE guaranteed-teardown path `_finalize()` → `_finalize_session()` (idempotent via `self.finalized`, reached by
+  EVERY termination — clean hangup, Twilio `stop`, watchdog close, capacity/disabled declines) are what this pass
+  extends, not replaces.
+- `apps/runtime/providers/audio.py` — `frame_energy()` (RMS per PCM16 frame, already used by the VAD) and
+  `PlaybackTracker` (already tracks "frames actually sent"; its own docstring says outright *"3.2 only tracks
+  this — the trimmed audio is persisted into `CallSession.recording_blob` by 3.5"*) are the DSP primitives this
+  pass's waveform binner reuses rather than reinventing.
+- `apps/calls/storage.py` (5.4, already shipped) — `save_recording(name, content)`'s own docstring: *"The paved
+  write path for Module 3's recorder (unbuilt)... 5.4 reads; this is the symmetric write it says Module 3 owns."*
+  This pass is that write. `recording_exists`/`open_recording`/`recording_size` are the read side 5.4 already
+  built and this pass's writes must satisfy (a non-empty `recording_blob` must resolve to real bytes — no more
+  "6 of 11 seeded rows point at nothing" for the REAL runtime path, even though fixing the seeder's own fiction is
+  explicitly not this pass's job).
+- `apps/runtime/providers/base.py` — `is_live()` / `require_live()`, the ONE `PROVIDER_MODE` gate every adapter
+  in this app obeys; the new recording adapter uses it exactly like `tts.py`/`stt.py`/`telephony.py` already do.
+
+## Backend — `apps/runtime/agent/consent.py` (NEW — pure, no ORM, no Channels import)
+
+- [ ] `TWO_PARTY_CONSENT_STATES = frozenset({'CA', 'CT', 'FL', 'IL', 'MD', 'MA', 'MT', 'NV', 'NH', 'PA', 'WA'})` —
+  the research's own list, carried verbatim, with a code comment flagging it for verification against
+  recordinglaw.com's current guide at build/review time (state consent laws are occasionally amended — an
+  implementation detail the research explicitly declines to freeze, not a finding to silently narrow).
+- [ ] `CONSENT_TWO_PARTY = 'announced_notice'` (matches `seed_calls.py`'s own vocabulary exactly — no drift from
+  the fiction Module 5 already renders), `CONSENT_ONE_PARTY = 'one_party_notice'` (**new value** — the seeder
+  never resolves per-jurisdiction, so it never needed this branch; the real resolver does), `CONSENT_NOT_RECORDED
+  = 'not_recorded'` (matches the seeder; written when a call never reached the point of resolving consent at all —
+  see below).
+- [ ] `CONSENT_ANNOUNCEMENT_LINE = 'This call may be recorded for quality and training purposes.'` — a platform
+  constant, never caller text, spoken exactly once per call when required (same posture as
+  `MediaStream.py`'s `_TRANSFER_FAILED_LINE`).
+- [ ] `resolve_consent(location) -> str` — returns exactly one of the three `CONSENT_*` values above; **never**
+  `CONSENT_NOT_RECORDED` (that value is stamped only by the consumer, when consent was never resolved at all — see
+  the "Realtime & agent surface" section). Rule: `country != 'US'` (uppercased, default `'US'`) OR `state` (2-letter,
+  uppercased) is in `TWO_PARTY_CONSENT_STATES` → `CONSENT_TWO_PARTY`; else → `CONSENT_ONE_PARTY`. Unknown/foreign
+  jurisdiction defaults to the SAFER (two-party, announce) branch rather than silently skipping disclosure — a
+  defensible conservative default, not a legal ruling.
+- [ ] Re-export `TWO_PARTY_CONSENT_STATES`, `CONSENT_TWO_PARTY`, `CONSENT_ONE_PARTY`, `CONSENT_NOT_RECORDED`,
+  `CONSENT_ANNOUNCEMENT_LINE`, `resolve_consent` from `apps/runtime/agent/__init__.py`'s existing re-export block
+  (append, do not restructure the file).
+
+## Backend — `apps/runtime/agent/state.py` (touch — additive, no field removed)
+
+- [ ] `CallState` gains two fields, alongside the existing `ended_reason` field and its "seed of 3.5's diagnostics"
+  comment: `consent_basis: str = None` (one of the `CONSENT_*` constants, set once in `_authorize_and_start`, never
+  recomputed mid-call — "the policy that applies is the policy at the time of the call," per the model's own
+  docstring) and `consent_announced: bool = False` (set `True` only after the announcement actually plays).
+  **No separate `requires_announcement` field** — `_greet()` derives it by comparing `consent_basis ==
+  CONSENT_TWO_PARTY`, avoiding two fields that could drift out of sync with each other.
+- [ ] `ENDED_REASON_DISPLAY = [(key, label, badge), ...]` — an ordered list of exactly the 8 keys
+  `MediaStream.py`'s `_STATUS_BY_REASON` already declares (`hangup`, `max_duration`, `idle_timeout`, `end_call`,
+  `transferred`, `disabled`, `capacity`, `error`), each with a short staff-facing label and a theme.css badge
+  class (`badge-slate`/`badge-amber`/`badge-muted`/`badge-info`/`badge-red` — no `badge-purple`). This is the
+  "name them as a shared constant" the research asks for, so a ninth ended-reason string typo'd somewhere does not
+  silently fall through `_STATUS_BY_REASON.get(reason, STATUS_COMPLETED)`'s default AND silently vanish from the
+  diagnostics tally too. `_STATUS_BY_REASON` itself is NOT rewritten (it is a reason→terminal-status map, a
+  different concern) — instead add one test asserting `set(_STATUS_BY_REASON) ==
+  {key for key, _, _ in ENDED_REASON_DISPLAY}` so the two can never silently drift apart.
+- [ ] Re-export `ENDED_REASON_DISPLAY` from `apps/runtime/agent/__init__.py` alongside `CallState`.
+
+## Backend — `apps/runtime/providers/audio.py` (touch — additive DSP extension, no existing function changed)
+
+- [ ] `WAVEFORM_TARGET_BINS = 60` and `WAVEFORM_ENERGY_CEILING = 8000` (the same reference amplitude
+  `FakeTtsBackend._AMPLITUDE` / `simulate_call._TONE_AMPLITUDE` already use for their synthetic tones, so a
+  fake-mode call's waveform values land in a sane, non-zero range under test).
+- [ ] `class WaveformAccumulator` — pure, no ORM, no I/O, same class as `PlaybackTracker` sits beside:
+  - `add_caller_frame(pcm16_bytes)` — `frame_energy(pcm16_bytes)`, appended to an internal caller-energy list.
+    Called unconditionally, every inbound media frame (Twilio's `media` event only ever carries the CALLER's
+    audio — there is no echo/loopback on this event to filter out).
+  - `add_bot_frame(mulaw_frame_bytes)` — decodes via `mulaw_to_pcm16` then `frame_energy`, appended to an internal
+    bot-energy list. Called only for frames `_play()` actually sends (see below) — a barge-in-truncated reply's
+    peaks reflect only what really played, not the full synthesis, mirroring `PlaybackTracker`'s own discipline.
+  - `finalize() -> dict | None` — bins each channel's energy list into up to `WAVEFORM_TARGET_BINS` buckets by
+    averaging (fewer buckets than that on a short call — never pad with fake zeros), normalizes each bucket
+    against `WAVEFORM_ENERGY_CEILING` clamped to `[0.0, 1.0]`, rounded to 2 dp (matching `seed_calls.py`'s own
+    value range and precision). Returns `{'caller': [...], 'bot': [...], 'bins': N}`, or `None` when BOTH lists
+    are empty (nothing was ever captured — matches the column's own "NULL means never computed" contract).
+- [ ] Re-export `WAVEFORM_TARGET_BINS`, `WaveformAccumulator` from `apps/runtime/providers/audio.py`'s existing
+  `__all__` list.
+
+## Backend — `apps/runtime/providers/recording.py` (NEW — mirrors `tts.py`'s `get_tts_backend()` shape)
+
+- [ ] `class RecordingBackend(abc.ABC)` with one method: `def finalize(self, call_session, *, should_record) ->
+  str` (returns the stored `recording_blob` path, or `''` when `should_record` is `False`). **Deliberately SYNC,
+  not async** — unlike `TtsBackend.synthesize`/`LiveTelephonyBackend.redirect_call`, this is called from
+  `_finalize_session()`, which is ALREADY a sync method running off-loop via `database_sync_to_async` — wrapping
+  it async would mean spinning an event loop inside an already-sync worker thread for no benefit, since local file
+  I/O needs no timeout/retry policy the way a network call does. Document this deviation from the other adapters'
+  shape explicitly in the module docstring so a reviewer does not "fix" it into an unnecessary async method.
+- [ ] `class FakeRecordingBackend(RecordingBackend)` — when `should_record`, synthesizes a small deterministic
+  mono WAV (stdlib `wave` module writing into an `io.BytesIO()`, ~0.5s of a fixed low tone at
+  `providers.audio.CARRIER_SAMPLE_RATE`, 16-bit — no numpy dependency, matching `FakeTtsBackend`'s own
+  no-external-dependency posture) and writes it through `apps.calls.storage.save_recording(name, ContentFile(...))`
+  where `name = f'private/calls/{call_session.tenant_id}/{call_session.location_id}/{call_session.provider_call_sid}.wav'`
+  (mirrors `seed_calls.py`'s own `private/calls/<tenant>/<location>/<sid>.<ext>` path shape, numeric ids instead of
+  slugs since the consumer has no slug loaded at teardown). Returns the stored path from `save_recording`. When
+  `not should_record`, returns `''` and writes nothing. **The stub's bytes are unrelated to `waveform_peaks`** —
+  the waveform is derived from LIVE per-frame DSP energy (see above), never from the stub file's content; these
+  are two independent write paths that happen to both finalize inside `_finalize_session()`.
+- [ ] `class LiveRecordingBackend(RecordingBackend)` — `__init__` calls `require_live('the live recording
+  backend')` then raises `NotImplementedError('Live recording capture/encode/store is not implemented in 3.5 —
+  the adapter interface and fake ship now; the vendor/encode integration lands with credentials. Run with
+  PROVIDER_MODE=fake.')`, byte-for-byte the same posture as `LiveTtsBackend`/`LiveSttBackend`.
+- [ ] `def get_recording_backend() -> RecordingBackend` — `LiveRecordingBackend()` if `is_live()` else
+  `FakeRecordingBackend()`. Same "anything not exactly `'live'` resolves to the fake" rule every other
+  `get_*_backend()` in this app already follows.
+
+## Backend — the consent-basis validation gate (belongs to `_finalize_session`, see Realtime section)
+
+- [ ] The gate from the research ("refuses to persist a non-empty `recording_blob` unless `metadata` already
+  carries a resolved `consent_basis`") is enforced structurally, not by a separate function: `should_record` is
+  computed as `bool(self.state.consent_basis) and self.state.consent_basis != CONSENT_NOT_RECORDED`, and ONLY when
+  that is `True` does `_finalize_session` call `get_recording_backend().finalize(...)` at all — there is no code
+  path that can set `recording_blob` without `metadata['consent_basis']` already being one of `CONSENT_TWO_PARTY`/
+  `CONSENT_ONE_PARTY`, because both are written from the SAME `should_record` boolean in the SAME `save()` call
+  (see below). A MySQL/SQLite `CheckConstraint` on a JSON sub-key is not portable (the model's own docstring
+  already says so) — this is the Python-level guarantee that docstring calls for.
+
+## Realtime & agent surface — `apps/runtime/consumers/MediaStreamTurnLoop/MediaStream.py` (touch, five spots)
+
+- [ ] **`connect()`** — add `self.waveform = WaveformAccumulator()` alongside the existing `self.playback_tracker =
+  None` / `self.vad = VadState(...)` initialization. Created ONCE for the call's whole life (unlike
+  `PlaybackTracker`, which `_play()` recreates per playback) — it must accumulate ACROSS every turn's playback and
+  every inbound frame, not reset each time the agent speaks.
+- [ ] **`_authorize_and_start()` — the stream-token single-use claim (closes 3.2's tracked security deferral)**.
+  Immediately after the `sessionId` custom-parameter match check (step 2) and BEFORE the `database_sync_to_async`
+  DB resolve (step 3) — the cheapest possible reject point, no wasted query on a replay:
+  ```python
+  from django.core.cache import cache
+  if not cache.add(f'runtime:stream-claim:{session_id}', True,
+                   timeout=STREAM_TOKEN_TTL_SECONDS):
+      await self.close(code=CLOSE_FORBIDDEN)
+      return
+  ```
+  `cache.add` is Django's atomic SETNX-equivalent (`True` only on first insert, `False` if the key already exists)
+  — a second socket presenting the SAME still-valid token within its 5-minute TTL is rejected outright, with ZERO
+  side effect (no DB hit, no row bound, no group joined). **Called directly on the event loop, not wrapped in
+  `database_sync_to_async`**: the default `LocMemCache` backend is an in-memory dict guarded by a
+  `threading.Lock` — no ORM, no network, no file I/O — the same class of safe direct call this file already makes
+  for pure CPU/VAD work. **Caveat, stated honestly**: on a NETWORKED cache backend (Redis, for a real multi-worker
+  deployment) this call would need the same off-loop treatment the cross-worker `MAX_CONCURRENT_CALLS` deferral
+  already flags — tracked together, not solved here; `LocMemCache` is per-process, so this closes the replay gap
+  within one worker (which is the whole gap on a single-process dev/Daphne run) but not yet across a worker fleet.
+  No release-on-disconnect: the claim expires naturally with the token's own TTL, and Twilio never re-presents the
+  same token after a genuinely new call attempt (which mints a fresh one via 3.1's webhook).
+- [ ] **`_authorize_and_start()` — consent resolution (step 5, alongside `self.providers = ProviderBundle(...)`)**.
+  Right before `self.authorized = True`: `self.state.consent_basis = resolve_consent(self.location)`. Placed
+  AFTER the `enabled`/capacity gates (step 4/4b) on purpose — a declined call (disabled number, at-capacity) never
+  resolves consent at all, so its `consent_basis` stays `None` and `_finalize_session` correctly records
+  `CONSENT_NOT_RECORDED` for a call that was never really answered.
+- [ ] **`_greet()`** — after the existing greeting is synthesized, transcript-logged and played (unchanged), add:
+  if `self.state.consent_basis == CONSENT_TWO_PARTY`, synthesize + play `CONSENT_ANNOUNCEMENT_LINE` as a SECOND
+  non-interruptible utterance in the same task (before `self.turn_busy = False` resets) — `state.add_transcript(
+  'assistant', CONSENT_ANNOUNCEMENT_LINE)`, `state.add_usage(*tts_only_cost(self.state.voice_provider,
+  CONSENT_ANNOUNCEMENT_LINE))` (a second TTS spend, or the call's cost under-reports it — same rule the greeting's
+  own TTS cost already follows), then `self.state.consent_announced = True` only after the audio actually played
+  (a TTS failure on this line degrades the same way the greeting's own failure does — logged, no crash, consent is
+  simply not marked announced, which `_finalize_session` will then honestly record). One-party consent
+  (`CONSENT_ONE_PARTY`) plays nothing extra — recording proceeds without a spoken notice, per the resolved basis.
+- [ ] **`_on_media()`** — right after `pcm8 = mulaw_to_pcm16(mulaw)`, add `self.waveform.add_caller_frame(pcm8)`.
+  Unconditional — cheap CPU, no branching on `is_playing` (the caller's inbound leg carries no agent echo to
+  filter, unlike the VAD's own `is_playing`-aware barge-in logic).
+- [ ] **`_play()`** — inside the existing per-frame loop, right after `self.playback_tracker.mark(frame)`, add
+  `self.waveform.add_bot_frame(frame)`. This one hook point covers every caller of `_play()` — the greeting, every
+  turn reply, the consent announcement, the fallback greeting, and the failed-transfer apology — so the bot
+  channel's peaks always reflect exactly what a real listener heard, barge-in truncation included.
+- [ ] **`_finalize_session()` — the guaranteed write, extending the existing `select_for_update()` transaction**
+  (not a second write, not a second transaction):
+  ```python
+  should_record = bool(self.state.consent_basis) and self.state.consent_basis != CONSENT_NOT_RECORDED
+  metadata['recorded'] = should_record
+  metadata['consent_basis'] = self.state.consent_basis or CONSENT_NOT_RECORDED
+  metadata['consent_announced'] = self.state.consent_announced
+  metadata['retention_days'] = settings.RECORDING_RETENTION_DAYS if should_record else 0
+  cs.recording_blob = get_recording_backend().finalize(cs, should_record=should_record) if should_record else ''
+  cs.waveform_peaks = self.waveform.finalize() if should_record else None
+  ```
+  appended alongside the EXISTING `metadata['ended_reason'] = reason` line (same `dict(cs.metadata or {})` copy,
+  one `cs.save(update_fields=[...])` call). `update_fields` grows to `['status', 'ended_at', 'metadata',
+  'recording_blob', 'waveform_peaks', 'updated_at']`. **Because this write lives inside the ONE guaranteed-teardown
+  path already reached by every termination** (`disconnect()`, Twilio `stop`, watchdog idle/max-duration close,
+  disabled/capacity declines, the post-transfer close), an abnormal drop gets the IDENTICAL recording+waveform
+  write a clean hangup gets — no separate "abnormal path" hardening is needed, because there is only one path.
+  This is the direct answer to the research's "finalize a partial recording rather than losing it" bullet: the
+  waveform is genuinely partial-but-real on an early drop (only the frames that actually arrived/played before
+  the drop were accumulated); the fake recorder's stub bytes are unrelated to call length by design (see above),
+  and a future live encoder inherits the same structural guarantee by living at this exact call site.
+
+## New management command — `apps/runtime/management/commands/purge_expired_recordings.py` (the retention surface)
+
+- [ ] `manage.py purge_expired_recordings [--tenant SLUG_OR_ID] [--location SLUG] [--dry-run]` — the observable
+  retention-compliance surface the research flags as REQUIRED and currently unimplemented anywhere in the repo (no
+  Celery/beat exists in this stack — `grep -i celery config/settings.py` → nothing — so a plain management command
+  runnable via OS cron/Task Scheduler is the right shape, consistent with every other one-shot job here).
+- [ ] Iterates `CallSession.objects.exclude(recording_blob='').iterator(chunk_size=200)` (optionally further
+  filtered by `--tenant`/`--location`, resolved the same slug-or-customer_id / slug pattern
+  `simulate_call.py._resolve_setting` already uses) — NOT a JSON-key DB filter (`metadata__retention_days`), same
+  "not portably expressible across MySQL and SQLite" reasoning `Diagnostics.py`'s own tally already documents;
+  expiry is computed in Python per row: `expires_at = row.started_at + timedelta(days=row.metadata.get(
+  'retention_days') or settings.RECORDING_RETENTION_DAYS)`.
+- [ ] A row past `expires_at`: delete the file via `apps.calls.storage.recording_storage.delete(path)` (swallow
+  `FileNotFoundError`/`OSError` — a file already gone is not an error here), then `row.recording_blob = ''`,
+  `row.metadata['purged_at'] = timezone.now().isoformat()`, `row.save(update_fields=['recording_blob', 'metadata',
+  'updated_at'])`. **Idempotent by construction**: a purged row's `recording_blob` is already `''`, so the very
+  first queryset filter (`.exclude(recording_blob='')`) excludes it on the next run — no double-delete, no
+  double-write, matching the Seed Command Rules' idempotency discipline even though this is not a seeder.
+- [ ] `--dry-run` reports (`self.stdout.write`) every row that WOULD be purged, with its `provider_call_sid` and
+  `expires_at`, and writes nothing.
+- [ ] Never touches a row with `recording_blob=''` already, and never touches a row whose `retention_days` is `0`
+  (an unrecorded call — nothing to purge). Prints a final tally (`N purged, M dry-run, K skipped (not yet
+  expired)`), matching the terse-but-informative style `seed_calls.py`'s own summary lines already use.
+
+## Diagnostics extension — `apps/runtime/views/InboundWebhook/Diagnostics.py` (touch, one shared bounded query)
+
+- [ ] Add `_DIAGNOSTICS_SAMPLE_LIMIT = 50` and materialize ONE bounded, tenant+location-scoped queryset ONCE:
+  `recent = list(scoped.order_by('-created_at').only('pk', 'provider_call_sid', 'status', 'metadata', 'logs',
+  'started_at')[:_DIAGNOSTICS_SAMPLE_LIMIT])` — reused by all three Python-side passes below instead of three
+  separate round trips for what is fundamentally one bounded read (the same discipline `_TRANSFER_TALLY_LIMIT`
+  already established, generalized to serve three panels instead of one).
+- [ ] **Ended-reason tally** — `Counter((cs.metadata or {}).get('ended_reason') for cs in recent if
+  isinstance(cs.metadata, dict))`, rendered through `ENDED_REASON_DISPLAY` (imported from `apps.runtime.agent`)
+  exactly the way `transfer_outcomes` is already rendered through `_TRANSFER_RESULT_DISPLAY` — same list-of-dicts
+  shape (`label`, `badge`, `count`), same "only non-zero rows" filter.
+- [ ] **Per-stage latency p50/p95** — one pass over `recent`'s `logs`, bucketing `raw_json.get('ms')` by
+  `category` for `category in {'asr', 'llm', 'tts'}`; a small `_percentile(values, pct)` helper (sort, index by
+  `round(pct/100 * (len-1))`) computes p50/p95 per stage. Rendered as "per-stage latency, most recent N calls" —
+  explicitly NOT claimed to equal CLAUDE.md's end-to-end ≤1.5s p50/≤3s p95 turn budget (that budget is the SUM of
+  a turn's stages, and `turn.py`'s log rows carry no shared turn-correlation id today to sum them by — an honest
+  per-stage figure, not an overclaimed combined one).
+- [ ] **Recent runtime errors panel** — same pass over `recent`'s `logs`, collecting entries with `level in
+  ('error', 'warning')` tagged with their owning session's `pk`/`provider_call_sid`, sorted by `occurred_at`
+  descending, capped at `_ERROR_PANEL_LIMIT = 20`. Each row links to `calls:callsession_detail` — reads
+  `CallSession.logs` across recent sessions (exactly what 5.3 already does per-session), **not** a new
+  `RuntimeError`/`ErrorLog` table (Invariant 2).
+- [ ] **Total cost today** — `today_qs = scoped.filter(started_at__gte=<local midnight via
+  active_location.tzinfo>).only('usage')`, `total_cost_today = sum(cs.total_cost_usd for cs in today_qs)` — reuses
+  the model's own already-shipped `total_cost_usd` derived property (DRY: cost is derived from `usage`, never
+  re-summed by a second, divergent formula) rather than reimplementing the breakdown-sum logic here.
+- [ ] The webhook-health / signature-failure panel researched and explicitly declined: **not built as a
+  persistent store**. Per research: stays on structured `logging` only; a UI panel (if ever wanted) would be an
+  in-process, non-persistent, per-worker ring buffer — deliberately NOT shipped this pass, since there is no
+  `CallSession` row for a declined call to hang a query off of and no operational need demonstrated yet.
+
+## Templates — `templates/runtime/diagnostics.html` (touch, no new page)
+
+- [ ] A fifth `stat-card` ("Today's cost", `${{ total_cost_today|floatformat:4 }}`, an icon consistent with the
+  existing four) — the grid classes grow to accommodate (`lg:grid-cols-4` already exists per 3.4's frontend-review
+  fix; extend the responsive breakpoint set as needed rather than letting a fifth card wrap alone).
+- [ ] A new `<aside>` card "Ended reasons" — same markup pattern as the existing "Transfer outcomes" card
+  (badge + count list, hidden entirely when the tally is empty via `{% if ended_reason_tally %}`).
+- [ ] A new `<aside>` card "Per-stage latency" — a small table/list of `asr`/`llm`/`tts` rows showing p50/p95 in
+  ms, with an explicit `{% if not latency_stats.asr.n %}` empty-state per stage (no calls yet logged that stage).
+- [ ] A new "Recent runtime errors" card in the main column (below "Recently resolved calls") — level badge
+  (`badge-red` for `error`, `badge-amber` for `warning`), title, a link to the owning call's detail page, an
+  `{% include "partials/_empty_state.html" %}` when empty.
+- [ ] No change to `templates/partials/_transfer_outcome.html` or any Module 5 template — this pass extends only
+  the diagnostics page.
+
+## `simulate_call` extension — no new `--script` choice (a deliberate simplification, not an omission)
+
+- [ ] Because consent resolution + the fake recorder + waveform binning are now WIRED INTO every call's
+  `_authorize_and_start`/`_greet`/`_finalize_session` path (not an opt-in tool a script has to arm), the existing
+  `--script chat|booking|transfer` choices ALREADY exercise the whole 3.5 path on every run — a fourth
+  `--script recording` value would just re-run `chat` with nothing extra to script, so **none is added**
+  (research's own alternative wording: "or a `--recording` flag" — this is that simpler alternative, chosen for
+  elegance over redundancy).
+- [ ] `apps/runtime/management/commands/simulate_call.py` (touch) — `Command._report()` gains, after the existing
+  cost/transcript/usage/logs output (unconditionally, for every script): the `metadata` block (`recorded`,
+  `consent_basis`, `consent_announced`, `retention_days`), `recording_blob`, and `waveform_peaks` (bin counts per
+  channel, not the full arrays — keep the console output readable).
+- [ ] Add a hard-failure assertion mirroring the existing `booking`/`transfer` scripts' own "a real defect, not a
+  warning" checks: if `session.metadata.get('recorded')` is `True`, assert
+  `apps.calls.storage.recording_exists(session.recording_blob)` and `raise CommandError(...)` if it is not — this
+  is 3.5's CI-checkable proof that the fake path never leaves a `recording_blob` pointing at nothing, for EVERY
+  script, not a single opt-in one.
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` — add `'3.5': {}` to `LIVE_LINKS`, the SAME posture as `'3.2'`/`'3.3'`/`'3.4'`:
+  this pass EXTENDS the already-linked `runtime:diagnostics` page (linked once, by `'3.1'`) rather than adding a
+  new one, and its other surfaces (`manage.py purge_expired_recordings`, the extended `simulate_call` report) are
+  not pages a signed-in user navigates to. Per the research's own documented convention: *"3.5 is the module's
+  last sub-module — after it, Module 3 is complete and `LIVE_LINKS['3.5']` will most likely stay `{}` too."*
+  One-line comment matching the existing `'3.2'`/`'3.3'`/`'3.4'` entries' style, closing out Module 3's sidebar
+  wiring (still Live via `'3.1'`).
+- [ ] `config/settings.py` — extend `RECORDING_RETENTION_DAYS`'s existing comment (do NOT change its shipped
+  default of 30) to note the HIPAA guidance the research surfaces: a PHI-bearing production deployment should set
+  `RECORDING_RETENTION_DAYS` (via `.env`) to a HIPAA-appropriate window (researched guidance: 6+ years / ~2190
+  days) rather than the dev default. This is an operator-tunable value, not a compliance choice this pass makes
+  unilaterally — "have a retention plan" is HIPAA's own rule, not a fixed number the code should silently impose.
+- [ ] No `config/urls.py` / `config/asgi.py` change — this pass adds no HTTP route and no websocket route.
+
+## Verify
+
+- [ ] `manage.py makemigrations runtime|calls|tenants|agents --check` → "No changes detected" for all four
+  (acceptance criterion, not a formality — this pass writes into existing columns only).
+- [ ] `manage.py migrate` — no-op. `manage.py check` clean.
+- [ ] Assert `PROVIDER_MODE=fake` in `config/settings_test.py` (already pinned) and in this pass's own test
+  fixtures/setup.
+- [ ] `pytest -q apps/runtime` — new/updated tests:
+  - [ ] `apps/runtime/tests/test_consent.py` (NEW) — `resolve_consent` for IL/OR/CO (matching the seeded demo
+    locations) and a non-`'US'` country, asserting the correct `CONSENT_*` value and that the two-party branch is
+    exactly `{'IL'} ∪ (non-US)` given `TWO_PARTY_CONSENT_STATES`.
+  - [ ] `apps/runtime/tests/test_audio.py` (touch) — `WaveformAccumulator`: empty input → `finalize()` returns
+    `None`; a handful of frames → correct bin count (≤ `WAVEFORM_TARGET_BINS`), values clamped to `[0, 1]`; the
+    bot channel only reflects frames actually `mark()`-ed (a cancelled/truncated playback's peaks are shorter than
+    the full synthesis would have produced).
+  - [ ] `apps/runtime/tests/test_recording.py` (NEW) — `FakeRecordingBackend.finalize(session, should_record=True)`
+    returns a path for which `apps.calls.storage.recording_exists`/`open_recording`/`recording_size` all succeed
+    (real bytes, not a dangling path); `should_record=False` returns `''` and writes nothing;
+    `get_recording_backend()` resolves to `FakeRecordingBackend` under non-live `PROVIDER_MODE`;
+    `LiveRecordingBackend()` raises `LiveModeError` outside live mode (mirrors the existing `test_providers.py`
+    pattern for `LiveTtsBackend`/`LiveSttBackend`).
+  - [ ] `apps/runtime/tests/test_media_consumer.py` (touch) — a full simulated call via `WebsocketCommunicator`
+    against an IL location (`AgentSetting.location.state == 'IL'`) ends with `CallSession.metadata.consent_basis
+    == 'announced_notice'`, `.consent_announced == True`, a transcript row containing
+    `CONSENT_ANNOUNCEMENT_LINE`, a non-empty `recording_blob` that `recording_exists()` confirms, and a non-null
+    `waveform_peaks` with both `caller`/`bot` lists populated; the SAME call against a CO location asserts
+    `consent_basis == 'one_party_notice'`, `consent_announced == False`, and NO consent-line transcript row.
+  - [ ] `apps/runtime/tests/test_media_consumer.py` (touch) — **replay rejection**: mint one stream token, connect
+    and authorize a first `WebsocketCommunicator` successfully, then attempt a SECOND `WebsocketCommunicator`
+    presenting the SAME token before the first disconnects → the second is rejected with `CLOSE_FORBIDDEN` and
+    creates zero additional side effects (no second recording written, `CallSession` touched by the first stream
+    only).
+  - [ ] `apps/runtime/tests/test_media_consumer.py` (touch) — an abnormal drop (the watchdog's idle/max-duration
+    close, or a bare `disconnect()` with no `stop` frame) still leaves a real (if short) `waveform_peaks` — the
+    partial-capture guarantee — and, when consent had already resolved before the drop, a real `recording_blob`.
+  - [ ] `apps/runtime/tests/test_purge_expired_recordings.py` (NEW) — a `CallSession` whose `started_at +
+    metadata.retention_days` is in the past gets its file deleted and `recording_blob` cleared; one still within
+    its window is untouched; `--dry-run` changes nothing; a re-run after a real purge is a no-op (idempotent);
+    `--tenant`/`--location` scoping never touches another tenant's/location's rows.
+  - [ ] `apps/runtime/tests/test_diagnostics.py` (touch) — the three new panels (ended-reason tally, per-stage
+    latency, recent errors) render correct, bounded, tenant+location-scoped data reusing the SAME `location_sessions`
+    resolution the existing transfer-outcomes assertion already checks; a session belonging to another tenant OR
+    another location never appears in any of the three new panels (the IDOR check, same posture 3.4's own
+    transfer-outcome test already established for that panel); `total_cost_today` excludes yesterday's sessions.
+  - [ ] `apps/runtime/tests/test_simulate_call.py` (touch) — the default `--script chat` run's `_report()` output
+    (or the underlying `CallSession` it produces) satisfies the new `recording_exists` hard-failure assertion
+    added to the command itself; a run targeted at an IL vs. a CO seeded location produces the two different
+    `consent_basis` values end to end under `PROVIDER_MODE=fake`.
+  - [ ] `apps/runtime/tests/test_call_state.py` (touch) — `set(_STATUS_BY_REASON) == {key for key, _, _ in
+    ENDED_REASON_DISPLAY}` — the drift guard named above.
+- [ ] Twilio webhook signature/idempotency — **unchanged this pass**; 3.5 touches no webhook code, so 3.1's
+  already-shipped signature-valid/invalid/wrong-location-token/duplicate-delivery tests remain the coverage,
+  re-run as part of the full suite (not re-derived here).
+- [ ] Websocket connect/reject — covered by the NEW replay-rejection test above (a valid session's first stream is
+  accepted; a replayed token's second stream is rejected with zero side effects); the existing
+  unauthorized/forbidden/not-found close-code tests from 3.2 are unchanged and re-run.
+- [ ] `temp/` smoke as `admin_acme` (password printed by `seed_accounts`) — sign in, switch to a Downtown (IL) and
+  a Lakeside (CO) location in turn, open `runtime:diagnostics` on each: the five stat cards render, the "Ended
+  reasons"/"Per-stage latency"/"Recent runtime errors" cards render (or show their empty state on a location with
+  no logged calls yet), no `{#`/`{% comment` leaks, no cross-tenant/cross-location data visible when switching
+  between Acme and Globex locations.
+- [ ] Sidebar: Module 3 still shows Live via `'3.1'`; `'3.5'` present in `LIVE_LINKS` (empty dict, no new row) —
+  Module 3 (all five sub-modules: 3.1-3.5) is now fully BUILT.
+
+## Close-out
+
+- [ ] Review agents in order: code-reviewer → explorer → frontend-reviewer → performance-reviewer →
+  realtime-reviewer (the load-bearing one for this pass again — the `cache.add` direct-call reasoning, the
+  single guaranteed-teardown-path claim for the recording/waveform write, async discipline on anything new) →
+  qa-smoke-tester → security-reviewer (the consent-basis write-gate, the stream-token replay fix, PII discipline
+  in the new diagnostics panels — no raw transcript/caller-number text in the recent-errors panel) → test-writer.
+- [ ] **Update** (not re-author) `.claude/skills/runtime/SKILL.md`: flip 3.5's row to **BUILT** (Module 3 now
+  fully built, 3.1-3.5), add `agent/consent.py` and `providers/recording.py` to the backend layout tree, document
+  the `WaveformAccumulator` extension to `providers/audio.py`, add the stream-token single-use claim and the
+  consent-gated recording write to **Realtime surfaces**, add `purge_expired_recordings` and the extended
+  `simulate_call` report to **Common tasks** / **Seeder** section (note it seeds nothing itself — it is a
+  maintenance command over data other passes write), add the `LIVE_LINKS['3.5'] = {}` posture to **Sidebar
+  wiring**.
+- [ ] README — note Module 3's fifth and final sub-module shipped; the call runtime now performs consent-gated
+  recording (jurisdiction-resolved, announced where required), captures a per-channel waveform, guarantees
+  teardown on every termination path (clean or abnormal), enforces a retention window via a management command,
+  closes the 3.2-era stream-token replay gap, and reports per-stage latency / ended-reason / recent-error /
+  today's-cost diagnostics — Module 3 (Call Runtime) is now fully built end to end.
+
+## Later passes / deferred
+
+- **`LiveRecordingBackend`'s real implementation** — actual carrier-side audio capture/encode/store against a
+  real vendor path (Twilio's own recording/media-fork capture, or transcoding the buffered PCM to a real audio
+  file) — needs real credentials, an integration exercise once `PROVIDER_MODE=live` is a real target.
+- **Cross-worker `MAX_CONCURRENT_CALLS` AND cross-worker stream-token claim** — both need a shared Redis/DB
+  counter/cache this stack has not yet declared beyond the default `LocMemCache`; the per-process `LocMemCache`
+  claim this pass ships closes the whole gap on a single-process deployment but not a worker fleet. Carried
+  together from 3.2's original deferral.
+- **The Twilio `<Dial action>` status-callback webhook** — carried from 3.4, still open; would give a TRUE
+  `no_answer`/`connected` distinction with a real `duration_seconds`.
+- **A per-location "record calls" toggle** — needs a new `AgentSetting` field → **2.1/2.3**'s call, not this
+  pass's; 3.5 defaults to "always record when consent allows."
+- **A queryable, persistent webhook-attempt/signature-failure health log** — deliberately kept off the model list
+  this pass, per research; revisit only on a real operational need, not a dashboard nicety.
+- **Worker/process health dashboard** (queue depth, CPU) — explicitly out of this product's stack (no
+  Redis/Prometheus dependency exists anywhere in `config/settings.py`); the honest answer researched competitors
+  themselves give is "connect to an external observability platform," not a bespoke build here.
+- **LLM-driven `CallSession.analysis` population** (summary/success-evaluation/extracted-data) — the column and
+  its shape already match Vapi's own documented convention, but no job populates it anywhere in the repo yet; not
+  this pass's job to add without a clearer trigger (which turn/event fires the analysis job is itself a design
+  question for whichever pass takes it on).
+- **Transcript-synced "jump to speaker turn" playback**, the recording player itself, the call-detail
+  transfer-outcome card → already shipped by **5.2/5.4** as view sub-modules reading `CallSession`'s JSON columns;
+  3.5 only had to keep `transcript[].offset` and `waveform_peaks` on the same time axis they already read (no
+  schema change needed to satisfy this).
+- **Exact two-party-consent state list validation against the live legal reference** — an implementation-time
+  detail per the research, not frozen here; `TWO_PARTY_CONSENT_STATES` should be spot-checked against
+  recordinglaw.com (or equivalent) whenever this module is next touched.
+- **Seeding real recording bytes in `seed_calls.py`** (today 6 of 11 seeded rows point at a `recording_blob` path
+  with no file behind it) — Module 5's seeder to fix, if ever, not this pass's file to edit; the REAL runtime path
+  this pass ships never repeats that gap.
+
+## Review notes
+(filled in at the end)
