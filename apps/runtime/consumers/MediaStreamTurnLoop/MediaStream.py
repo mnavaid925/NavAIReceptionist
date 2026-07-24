@@ -57,13 +57,20 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.agents.models import AgentSetting
+from apps.agents.services import resolve_transfer_number
 from apps.calls.models import CallSession
 from apps.runtime.agent import (
     FALLBACK_LINE,
+    REASON_BY_KIND,
+    RESULT_CONNECTED,
+    RESULT_FAILED,
     CallState,
     ProviderBundle,
     build_open_intervals,
+    build_transfer_record,
     build_variables,
+    looks_like_call_sid,
+    looks_like_e164,
     render_greeting,
     run_turn,
     tts_only_cost,
@@ -79,8 +86,9 @@ from apps.runtime.providers.audio import (
     pcm16_to_carrier_mulaw,
 )
 from apps.runtime.providers.llm import get_llm_backend
-from apps.runtime.providers.reliability import ProviderError
+from apps.runtime.providers.reliability import ProviderError, call_bounded
 from apps.runtime.providers.stt import get_stt_backend
+from apps.runtime.providers.telephony import get_backend
 from apps.runtime.providers.tts import get_tts_backend
 from apps.runtime.providers.tokens import verify_stream_token
 from apps.runtime.providers.vad import BARGE_IN, UTTERANCE_END, VadState
@@ -108,10 +116,10 @@ def group_name(tenant_id, location_id, session_id):
 
 # Terminal status by ended-reason. A clean hangup or the hard duration cap is a
 # completed call; caller silence is abandoned; a number disabled mid-ring, or a
-# consumer/provider crash, is failed. 'transferred' is 3.4's to set and is
-# deliberately absent here. ('error' is wired for a future fatal-error path — no
-# branch sets it yet; a turn crash logs and keeps the call up rather than ending
-# it — but the mapping is kept so that path lands on the right status when added.)
+# consumer/provider crash, is failed. ('error' is wired for a future fatal-error
+# path — no branch sets it yet; a turn crash logs and keeps the call up rather
+# than ending it — but the mapping is kept so that path lands on the right status
+# when added.)
 _STATUS_BY_REASON = {
     'hangup': CallSession.STATUS_COMPLETED,
     'max_duration': CallSession.STATUS_COMPLETED,
@@ -121,6 +129,11 @@ _STATUS_BY_REASON = {
     # timeout. That is a completed call, with a more specific ended-reason than
     # the plain 'hangup' default.
     'end_call': CallSession.STATUS_COMPLETED,
+    # 3.4's deferred transfer: the human/Spanish-line handoff ran (whether the
+    # redirect connected or failed, the media leg left this consumer's control) —
+    # `_execute_transfer` sets ended_reason='transferred' and the transfer JSON
+    # carries the connected/failed detail.
+    'transferred': CallSession.STATUS_TRANSFERRED,
     'disabled': CallSession.STATUS_FAILED,
     'capacity': CallSession.STATUS_FAILED,
     'error': CallSession.STATUS_FAILED,
@@ -163,6 +176,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         self.is_playing = False
         self.interruptible = True
         self.playback_tracker = None
+        # 3.4 single-fire guard: transport bookkeeping (like turn_busy/is_playing),
+        # NOT conversation state — so it lives on the consumer, not CallState. Set
+        # True synchronously before the redirect is awaited, so a concurrent turn
+        # or a redelivered signal can never double-execute the bridge.
+        self._transfer_started = False
 
         self.last_activity_at = time.monotonic()
         self.call_started_monotonic = time.monotonic()
@@ -452,21 +470,33 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             # transcript/usage of the turn must survive that cancellation.
             await self._flush()
             if not result.empty and result.reply_mulaw:
-                # A goodbye that precedes a hangup is played NON-interruptible, the
-                # same rule §9.3 gives the transfer handoff line. Otherwise a caller
-                # talking over "goodbye" (the most likely moment for them to) would
-                # barge-in, cancel this task before the check below, and strand
-                # `pending_hangup` unconsumed — the call would then hang on until
-                # the 45s idle timeout, mislabelled as an end_call.
-                await self._play(result.reply_mulaw,
-                                 interruptible=not self.state.pending_hangup)
-            # 3.3's end_call tool is a DEFERRED transport signal: the dispatcher
-            # only set a flag, so the goodbye line above is spoken in full and the
-            # socket closes after it. Checked whether or not audio was produced —
-            # a TTS-down or empty reply must still hang up when asked to.
+                # A goodbye that precedes a hangup — or the acknowledgement that
+                # precedes a transfer — is played NON-interruptible. Otherwise a
+                # caller talking over "goodbye"/"connecting you now" (the most
+                # likely moment for them to) would barge-in, cancel this task before
+                # the checks below, and strand `pending_hangup`/`pending_transfer`
+                # unconsumed — the call would hang on until the 45s idle timeout,
+                # mislabelled, and the armed transfer would never fire.
+                await self._play(
+                    result.reply_mulaw,
+                    interruptible=not (self.state.pending_hangup
+                                       or self.state.pending_transfer))
+            # DEFERRED transport signals (skill §9): the dispatcher only set a flag,
+            # so the acknowledgement/goodbye above is spoken in full and the
+            # transport acts here, after the audio. Checked whether or not audio was
+            # produced — a TTS-down or empty reply must still hang up / transfer.
             if self.state.pending_hangup:
+                # 3.3's end_call: close the socket after the goodbye. No REST call.
                 await self._finalize()
                 await self.close(code=1000)
+            elif self.state.pending_transfer:
+                # 3.4's transfer: single-fire guarded — `_transfer_started` is set
+                # synchronously BEFORE the redirect is awaited, so a concurrent turn
+                # (the queued-utterance drain path) or a redelivered signal can never
+                # double-execute the bridge against the same live call SID.
+                if not self._transfer_started:
+                    self._transfer_started = True
+                    await self._execute_transfer()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a turn crash must not kill the call
@@ -486,6 +516,145 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         self.pending_utterance = None
         self.turn_busy = True
         self.turn_task = asyncio.create_task(self._run_turn(utterance))
+
+    # -- deferred transfer execution (3.4) ---------------------------------- #
+
+    async def _execute_transfer(self):
+        """Execute the deferred human/Spanish-line transfer after its audio played.
+
+        Reached only from ``_run_turn``'s ``pending_transfer`` branch, behind the
+        ``_transfer_started`` single-fire guard. The dispatcher already gated
+        eligibility AND (for the human line) the working-hours window before arming
+        the signal, so this method's job is purely the transport: validate the
+        dialable values, drain the outbound buffer, issue the bounded REST redirect,
+        capture the outcome and end the call.
+
+        **An armed transfer always ends the call** — the outer guard maps any
+        unexpected failure to a ``failed`` outcome, so a redirect that never runs
+        can never leave the call hanging with the signal still set.
+        """
+        kind = self.state.pending_transfer
+        reason = REASON_BY_KIND.get(kind, 'Transfer requested.')
+        try:
+            record = await self._run_transfer_redirect(kind, reason)
+        except Exception as exc:  # noqa: BLE001 — an armed transfer MUST still end the call
+            logger.error('transfer execution failed (%s)', type(exc).__name__)
+            record = build_transfer_record(result=RESULT_FAILED, reason=reason)
+        await self._record_and_end_transfer(record)
+
+    async def _run_transfer_redirect(self, kind, reason):
+        """Do the redirect and return the transfer record — no finalize here."""
+        resolved = await database_sync_to_async(
+            self._resolve_transfer_target, thread_sensitive=False)(kind)
+        if resolved is None:
+            # The AgentSetting/CallSession vanished mid-call (anonymised/disabled) —
+            # a failed transfer, no REST call attempted.
+            return build_transfer_record(result=RESULT_FAILED, reason=reason)
+        setting, destination, call_sid = resolved
+
+        # TOLL-FRAUD / INJECTION DEFENSE (REQUIRED): the destination is dialed with
+        # the tenant's OWN Twilio credentials and the call SID is interpolated into
+        # the REST path / TwiML body, so both are shape-checked BEFORE any REST
+        # interpolation. A malformed value aborts to 'failed' without ever reaching
+        # redirect_call — the destination is server-resolved, never caller-supplied,
+        # but this is the belt-and-braces gate at the point it actually gets dialed.
+        if not (looks_like_e164(destination) and looks_like_call_sid(call_sid)):
+            self.state.add_log(
+                'error', 'transfer',
+                'Transfer aborted: destination or call reference invalid',
+                {'kind': kind, 'result': RESULT_FAILED})
+            return build_transfer_record(
+                result=RESULT_FAILED,
+                reason='Transfer destination or call reference was invalid.',
+                destination=destination)
+
+        # Let Twilio's carrier jitter buffer drain the handoff line's last frames
+        # before the redirect cuts the media leg (else the last word is clipped).
+        await asyncio.sleep(settings.TRANSFER_DRAIN_SECONDS)
+
+        initiated_at = timezone.now()
+        result = RESULT_CONNECTED
+        try:
+            # retries=0: a redirect is NOT idempotently retryable — a second REST
+            # call against an already-redirected call SID risks a second bridge.
+            outcome = await call_bounded(
+                lambda: get_backend().redirect_call(setting, call_sid, destination),
+                timeout=settings.PROVIDER_TIMEOUT_SECONDS, retries=0)
+            if not getattr(outcome, 'ok', False):
+                result = RESULT_FAILED
+        except Exception as exc:  # noqa: BLE001 — a failed redirect ends 'failed', never a crash
+            # Type only — a provider error's text can carry the SID/request body.
+            logger.error('transfer redirect failed (%s)', type(exc).__name__)
+            result = RESULT_FAILED
+
+        self.state.add_log(
+            'info' if result == RESULT_CONNECTED else 'error', 'transfer',
+            f'Transfer {result}', {'kind': kind, 'result': result})
+        return build_transfer_record(
+            result=result, reason=reason, destination=destination,
+            initiated_at=initiated_at, duration_seconds=0,
+            attempts=[{'destination': destination, 'result': result}])
+
+    def _resolve_transfer_target(self, kind):
+        """Sync ORM: re-resolve ``(setting, destination, call_sid)`` for the transfer.
+
+        Re-fetches ``AgentSetting``/``CallSession`` under the call's
+        ``(tenant, location, session)`` scope rather than trusting the connect()-time
+        cache — the same paranoia ``_resolve()`` applies at authorization time. The
+        destination is resolved SERVER-SIDE from a label (``primary``/``secondary``);
+        ``resolve_transfer_number`` never accepts a number as input (Invariant 3).
+        Returns None on any miss.
+        """
+        setting = (
+            AgentSetting.objects
+            .filter(tenant_id=self.state.tenant_id, location_id=self.state.location_id)
+            .first()
+        )
+        call_session = (
+            CallSession.objects
+            .filter(pk=self.state.session_id, tenant_id=self.state.tenant_id,
+                    location_id=self.state.location_id)
+            .first()
+        )
+        if setting is None or call_session is None:
+            return None
+        target = 'secondary' if kind == 'spanish' else 'primary'
+        return setting, resolve_transfer_number(setting, target), call_session.provider_call_sid
+
+    def _stamp_transfer(self, record):
+        """Sync: write ONLY the ``transfer`` column, row-locked (see the dispatcher).
+
+        A SEPARATE write from ``_finalize_session``'s status/ended_at stamp — never
+        combined into one ``save()`` — so a finalize failure can never silently drop
+        a transfer outcome that already landed.
+        """
+        with transaction.atomic():
+            cs = (
+                CallSession.objects.select_for_update()
+                .filter(pk=self.state.session_id, tenant_id=self.state.tenant_id,
+                        location_id=self.state.location_id)
+                .first()
+            )
+            if cs is None:
+                return
+            cs.transfer = record
+            cs.save(update_fields=['transfer', 'updated_at'])
+
+    async def _record_and_end_transfer(self, record):
+        """Persist the transfer outcome, then finalize the call as 'transferred'."""
+        try:
+            await database_sync_to_async(self._stamp_transfer, thread_sensitive=False)(record)
+        except Exception as exc:  # noqa: BLE001 — outcome capture must not crash teardown
+            logger.error('transfer outcome write failed (%s)', type(exc).__name__)
+        # ended_reason='transferred' regardless of `result` — a failed redirect still
+        # ends the call (the media leg is gone either way); the transfer JSON's
+        # `result` is what tells a reader whether the human actually got it. The
+        # existing _finalize()/_finalize_session() path stamps status via
+        # _STATUS_BY_REASON['transferred'], and its `!= IN_PROGRESS` guard leaves the
+        # separate `transfer` write above untouched.
+        self.state.ended_reason = 'transferred'
+        await self._finalize()
+        await self.close(code=1000)
 
     async def _play(self, mulaw, *, interruptible):
         """Pace μ-law onto the wire one 20 ms frame at a time (skill §4)."""
