@@ -145,6 +145,63 @@ def test_valid_signature_missing_callsid_is_400_zero_writes(
     assert CallSession.objects.count() == 0
 
 
+@pytest.mark.parametrize('bad_sid', [
+    '../../../../99/1/pwned',   # escapes its own tenant/location prefix
+    'CA/../elsewhere',          # a separator anywhere at all
+    'CA<script>',               # XML/TwiML injection characters
+    '   ',                      # whitespace-only
+])
+def test_valid_signature_malformed_callsid_is_400_zero_writes(
+    make_agent_setting, tenant_a, location_a1, bad_sid
+):
+    """A correctly SIGNED request still cannot smuggle a malformed CallSid.
+
+    `provider_call_sid` is persisted and then reused as data that carries
+    authority: it is interpolated into the transfer REST path (3.4) and into the
+    recording's storage path (3.5). A SID containing `../` would write a call's
+    audio outside its own `private/calls/{tenant}/{location}/` prefix — Django's
+    `safe_join` guards the PRIVATE_MEDIA_ROOT boundary but NOT the tenant and
+    location partition inside it. This is the gate that keeps every later
+    consumer of the value safe, so it is checked at ingestion, before the row
+    exists at all.
+    """
+    setting = make_agent_setting(tenant_a, location_a1)
+    params = {'To': setting.inbound_phone_number, 'From': '+13125550101',
+              'CallSid': bad_sid}
+    resp = _post_signed(Client(), setting.twilio_auth_token, params)
+    assert resp.status_code == 400
+    assert CallSession.objects.count() == 0
+
+
+def test_recording_path_refuses_a_traversal_call_sid(tenant_a, location_a1,
+                                                     make_call_session):
+    """Defense in depth: the path builder does not trust the stored row either.
+
+    The ingestion check above is the real gate. This one survives a future second
+    writer, a data migration or a hand-edited row — and it raises rather than
+    sanitizing, because a SID that fails here means an assumption broke upstream
+    and quietly writing the audio somewhere "close enough" would hide that.
+    """
+    from types import SimpleNamespace
+
+    from apps.runtime.providers.recording import (
+        FakeRecordingBackend,
+        recording_path_for,
+    )
+
+    hostile = SimpleNamespace(tenant_id=tenant_a.pk, location_id=location_a1.pk,
+                              provider_call_sid='../../../../99/1/pwned', pk=1)
+    with pytest.raises(ValueError):
+        recording_path_for(hostile)
+    with pytest.raises(ValueError):
+        FakeRecordingBackend().finalize(hostile, should_record=True)
+
+    ok = SimpleNamespace(tenant_id=tenant_a.pk, location_id=location_a1.pk,
+                         provider_call_sid='CAbeef', pk=1)
+    assert recording_path_for(ok) == (
+        f'private/calls/{tenant_a.pk}/{location_a1.pk}/CAbeef.wav')
+
+
 def test_get_is_method_not_allowed(db):
     assert Client().get(WEBHOOK_PATH).status_code == 405
 
