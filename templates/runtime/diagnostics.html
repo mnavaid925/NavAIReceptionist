@@ -44,7 +44,7 @@
   {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Runtime diagnostics are scoped to one location. Pick an active location to see how its inbound calls are being resolved." %}
 {% else %}
 
-  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
     <div class="stat-card">
       <span class="stat-icon blue" aria-hidden="true"><i data-lucide="radio"></i></span>
       <div class="stat-value">{{ stats.active }}</div>
@@ -70,6 +70,12 @@
       <div class="stat-value">{{ stats.transferred }}</div>
       <div class="stat-label">Transferred</div>
       <div class="stat-meta">Handed off to a person</div>
+    </div>
+    <div class="stat-card">
+      <span class="stat-icon green" aria-hidden="true"><i data-lucide="circle-dollar-sign"></i></span>
+      <div class="stat-value">${{ total_cost_today|floatformat:4 }}</div>
+      <div class="stat-label">Spend today</div>
+      <div class="stat-meta">Calls started today at this location</div>
     </div>
   </div>
 
@@ -112,6 +118,47 @@
             </div>
           {% else %}
             {% include "partials/_empty_state.html" with icon="phone-off" title="No calls resolved yet" message="When a call reaches this location's inbound number, the webhook creates its record and it appears here." %}
+          {% endif %}
+        </div>
+      </div>
+
+      {% comment %}
+        Recent runtime errors. Reads the `logs` JSON of the same bounded sample the
+        panels above use — the level, the stage and which call. Deliberately NOT
+        the log row's `raw_json`: it is redacted at write time but still describes
+        caller data, and triage needs what is failing, not who was on the line.
+      {% endcomment %}
+      <div class="card">
+        <div class="card-header">
+          <span>Recent runtime errors</span>
+          {% if recent_errors %}<span class="badge badge-red">{{ recent_errors|length }}</span>{% endif %}
+        </div>
+        <div class="card-body">
+          {% if recent_errors %}
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Level</th>
+                    <th>Stage</th>
+                    <th>What happened</th>
+                    <th>Call</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for entry in recent_errors %}
+                    <tr>
+                      <td><span class="badge {{ entry.badge }}">{{ entry.level }}</span></td>
+                      <td>{{ entry.category }}</td>
+                      <td>{{ entry.title }}</td>
+                      <td><a href="{% url 'calls:callsession_detail' entry.session_pk %}">{{ entry.call_sid }}</a></td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            {% include "partials/_empty_state.html" with icon="shield-check" title="No errors logged" message="Nothing failed on the calls sampled at this location. Errors and warnings the runtime records during a call show up here." %}
           {% endif %}
         </div>
       </div>
@@ -166,6 +213,66 @@
           </div>
         </div>
       {% endif %}
+
+      {% if ended_reasons %}
+        <div class="card">
+          <div class="card-header"><span>Ended reasons</span></div>
+          <div class="card-body">
+            <ul class="grid gap-2" style="margin: 0; padding: 0; list-style: none;">
+              {% for reason in ended_reasons %}
+                <li class="flex items-center justify-between">
+                  <span class="badge {{ reason.badge }}">{{ reason.label }}</span>
+                  <span class="text-sm font-medium">{{ reason.count }}</span>
+                </li>
+              {% endfor %}
+            </ul>
+            <p class="text-sm text-muted" style="margin: 12px 0 0;">
+              Last {{ sample_limit }} calls at this location.
+            </p>
+          </div>
+        </div>
+      {% endif %}
+
+      {% comment %}
+        Per-stage latency. These are the individual ASR / model / synthesis legs,
+        NOT the end-to-end "caller stopped speaking to first agent audio" budget —
+        that figure is the sum of a turn's stages, and the log rows carry no shared
+        turn id to sum them by. The label says per stage so the number is not read
+        as a claim about the budget.
+      {% endcomment %}
+      <div class="card">
+        <div class="card-header"><span>Per-stage latency</span></div>
+        <div class="card-body">
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Stage</th>
+                  <th>p50</th>
+                  <th>p95</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for stage in latency_stats %}
+                  <tr>
+                    <td>{{ stage.label }}</td>
+                    {% if stage.n %}
+                      <td>{{ stage.p50|floatformat:0 }} ms</td>
+                      <td>{{ stage.p95|floatformat:0 }} ms</td>
+                    {% else %}
+                      <td colspan="2"><span class="text-muted">No samples yet</span></td>
+                    {% endif %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <p class="text-sm text-muted" style="margin: 12px 0 0;">
+            Each leg on its own, over the last {{ sample_limit }} calls — not the
+            end-to-end turn budget.
+          </p>
+        </div>
+      </div>
 
       {% if readiness_issues %}
         <div class="card">
