@@ -52,6 +52,7 @@ import json
 import logging
 import time
 
+from asgiref.sync import sync_to_async
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.conf import settings
@@ -282,23 +283,28 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         #     resolve: the cheapest possible reject point, with zero side effect —
         #     no query, no row bound, no group joined, no capacity slot taken.
         #
-        #     Called directly on the event loop deliberately: the default
-        #     LocMemCache is an in-process dict behind a threading.Lock — no ORM, no
-        #     network, no file I/O — the same class of safe direct call this file
-        #     already makes for the codec/VAD math.
-        #     WARNING: on a NETWORKED cache backend (Redis, for a real multi-worker
-        #     deployment) this becomes a network call and must move off-loop, and
-        #     only then does the claim span the worker fleet. Per-process today,
-        #     which is the whole gap on a single-process Daphne run. Tracked with
-        #     the cross-worker MAX_CONCURRENT_CALLS deferral in
-        #     .claude/tasks/todo.md.
+        #     Taken OFF the event loop even though the configured backend today is
+        #     LocMemCache (an in-process dict behind a threading.Lock, which would
+        #     be safe to call directly). The intended fix for the cross-worker gap
+        #     below is a shared Redis cache — and that would silently turn this
+        #     line into a network call on the authorization path of every call,
+        #     with nothing to catch the regression. One thread hop once per call
+        #     costs nothing measurable and makes the line correct under any
+        #     backend, which beats documenting a footgun.
+        #
+        #     Per-process today: a LocMemCache claim does not span a worker fleet,
+        #     so this closes the whole replay gap on a single-process Daphne run
+        #     and the first worker's share of it otherwise. Carried with the
+        #     cross-worker MAX_CONCURRENT_CALLS deferral in .claude/tasks/todo.md.
         #
         #     No release on disconnect: the claim expires with the token's own TTL,
         #     and a genuinely new call mints a fresh token via 3.1's webhook, so
         #     holding the key for its full life costs nothing and releasing it early
         #     would re-open the very window this closes.
-        if not cache.add(f'runtime:stream-claim:{session_id}', True,
-                         timeout=STREAM_TOKEN_TTL_SECONDS):
+        claimed = await sync_to_async(cache.add, thread_sensitive=False)(
+            f'runtime:stream-claim:{session_id}', True,
+            timeout=STREAM_TOKEN_TTL_SECONDS)
+        if not claimed:
             await self.close(code=CLOSE_FORBIDDEN)
             return
 
@@ -1033,6 +1039,14 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
                     self.call_session, should_record=True)
             except Exception as exc:  # noqa: BLE001 — teardown must still land
                 logger.error('recording finalize failed (%s)', type(exc).__name__)
+                should_record = False
+            if not blob:
+                # A backend that returned an empty path without raising has
+                # recorded nothing, whatever it claimed. Say so, rather than
+                # writing `recorded: True` beside an empty `recording_blob` — the
+                # exact inconsistency the structural gate exists to make
+                # impossible, and one only the write path can prevent.
+                logger.error('recording backend returned no path; recording nothing')
                 should_record = False
         # Peaks are derived from LIVE per-frame DSP, not from the stored audio, so
         # they are genuinely partial-but-real on an early drop.
