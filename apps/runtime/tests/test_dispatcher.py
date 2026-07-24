@@ -498,6 +498,11 @@ async def test_transfer_refuses_when_transfer_is_disabled(
     result = await apply_tool_call(state, 'transfer_call', {})
     assert result['ok'] is False and result['error']['code'] == 'not_permitted'
     assert state.pending_transfer is None
+    # The ineligible path is NOT the off-hours fallback: zero callbacks, no
+    # transfer record written at all.
+    assert await amake(CallbackRequest.objects.count) == 0
+    refreshed = await amake(CallSession.objects.get, pk=session.pk)
+    assert refreshed.transfer == {}
 
 
 async def test_transfer_refuses_when_enabled_but_destination_blank(
@@ -510,6 +515,9 @@ async def test_transfer_refuses_when_enabled_but_destination_blank(
     result = await apply_tool_call(state, 'transfer_call', {})
     assert result['ok'] is False and result['error']['code'] == 'not_permitted'
     assert state.pending_transfer is None
+    assert await amake(CallbackRequest.objects.count) == 0
+    refreshed = await amake(CallSession.objects.get, pk=session.pk)
+    assert refreshed.transfer == {}
 
 
 async def test_transfer_refuses_with_no_matching_agent_setting_row(
@@ -522,6 +530,117 @@ async def test_transfer_refuses_with_no_matching_agent_setting_row(
     result = await apply_tool_call(state, 'transfer_call', {})
     assert result['ok'] is False and result['error']['code'] == 'not_permitted'
     assert state.pending_transfer is None
+    assert await amake(CallbackRequest.objects.count) == 0
+    refreshed = await amake(CallSession.objects.get, pk=session.pk)
+    assert refreshed.transfer == {}
+
+
+# --------------------------------------------------------------------------- #
+# 3.4 — the off-hours gate + its per-call de-dup, the open-hours happy path,
+# and the Spanish line's deliberate hours-gate skip
+# --------------------------------------------------------------------------- #
+
+#: Every weekday disabled — `is_transfer_available` reads this as "never open".
+_ALL_HOURS_DISABLED = {
+    day: {'enabled': False}
+    for day in ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
+}
+
+
+async def test_transfer_call_off_hours_writes_off_hours_record_and_logs_one_callback(
+    tenant_a, location_a1, make_agent_setting, make_call_session,
+):
+    setting = await amake(
+        make_agent_setting, tenant_a, location_a1,
+        transfer_enabled=True, transfer_phone_number='+13125550101',
+        transfer_working_hours=_ALL_HOURS_DISABLED,
+    )
+    session = await amake(make_call_session, tenant_a, location_a1)
+    state = _state(tenant_a, location_a1, session, agent_setting_id=setting.pk)
+
+    result = await apply_tool_call(state, 'transfer_call', {})
+    assert result['ok'] is True and result['error'] is None
+    assert set(result['data'].keys()) == {'transfer', 'status', 'reopens_at'}
+    assert result['data']['transfer'] is None
+    assert result['data']['status'] == 'off_hours'
+    assert state.pending_transfer is None
+
+    refreshed = await amake(CallSession.objects.get, pk=session.pk)
+    assert refreshed.transfer['result'] == 'off_hours'
+
+    callbacks = await amake(lambda: list(
+        CallbackRequest.objects.filter(tenant=tenant_a, location=location_a1)))
+    assert len(callbacks) == 1
+    assert callbacks[0].source == CallbackRequest.SOURCE_AI_PHONE
+    assert callbacks[0].status == CallbackRequest.STATUS_PENDING
+
+
+async def test_transfer_call_off_hours_dedups_the_callback_across_repeated_calls(
+    tenant_a, location_a1, make_agent_setting, make_call_session,
+):
+    """The model may call `transfer_call` several times in one call (the
+    tool-iteration cap allows up to 4/turn) — only ONE CallbackRequest, ever,
+    per call, guarded by `state.offhours_callback_logged`."""
+    setting = await amake(
+        make_agent_setting, tenant_a, location_a1,
+        transfer_enabled=True, transfer_phone_number='+13125550101',
+        transfer_working_hours=_ALL_HOURS_DISABLED,
+    )
+    session = await amake(make_call_session, tenant_a, location_a1)
+    state = _state(tenant_a, location_a1, session, agent_setting_id=setting.pk)
+
+    for _ in range(3):
+        result = await apply_tool_call(state, 'transfer_call', {})
+        assert result['ok'] and result['data']['status'] == 'off_hours'
+
+    assert await amake(
+        CallbackRequest.objects.filter(tenant=tenant_a, location=location_a1).count) == 1
+    assert state.offhours_callback_logged is True
+
+
+async def test_transfer_call_open_hours_arms_pending_transfer_with_zero_callbacks(
+    tenant_a, location_a1, make_agent_setting, make_call_session,
+):
+    """Transfer-available (empty `transfer_working_hours` = always open): the
+    tool arms the deferred signal and touches neither `CallbackRequest` nor
+    `CallSession.transfer` — the transport (3.4's consumer) writes those."""
+    setting = await amake(
+        make_agent_setting, tenant_a, location_a1,
+        transfer_enabled=True, transfer_phone_number='+13125550101',
+    )
+    session = await amake(make_call_session, tenant_a, location_a1)
+    state = _state(tenant_a, location_a1, session, agent_setting_id=setting.pk)
+
+    result = await apply_tool_call(state, 'transfer_call', {})
+    assert result['ok'] is True
+    assert result['error'] is None
+    assert result['data'] == {'transfer': 'human', 'status': 'connecting'}
+    assert state.pending_transfer == 'human'
+
+    assert await amake(CallbackRequest.objects.count) == 0
+    refreshed = await amake(CallSession.objects.get, pk=session.pk)
+    assert refreshed.transfer == {}
+
+
+async def test_transfer_call_spanish_skips_the_hours_gate(
+    tenant_a, location_a1, make_agent_setting, make_call_session,
+):
+    """The Spanish line is a separate line, not the human team — it is gated
+    ONLY on being configured, never on `transfer_working_hours`."""
+    setting = await amake(
+        make_agent_setting, tenant_a, location_a1,
+        transfer_enabled=True, transfer_phone_number='+13125550101',
+        transfer_secondary_number='+13125550102',
+        transfer_working_hours=_ALL_HOURS_DISABLED,   # would refuse the human line
+    )
+    session = await amake(make_call_session, tenant_a, location_a1)
+    state = _state(tenant_a, location_a1, session, agent_setting_id=setting.pk)
+
+    result = await apply_tool_call(state, 'transfer_call_spanish', {})
+    assert result['ok'] is True
+    assert result['data'] == {'transfer': 'spanish', 'status': 'connecting'}
+    assert state.pending_transfer == 'spanish'
+    assert await amake(CallbackRequest.objects.count) == 0
 
 
 async def test_transfer_and_end_call_only_set_deferred_flags(
