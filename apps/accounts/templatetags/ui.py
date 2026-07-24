@@ -120,7 +120,7 @@ def peaks_dom_id(prefix, pk):
 
 # The tool-call event log renders the arguments the agent passed to a function —
 # and by CLAUDE.md's own example a `create_contact` args payload is a full name
-# and a date of birth. Redaction on WRITE is Module 3's job (unbuilt). This is
+# and a date of birth. Redaction on WRITE is Module 3's job (3.3's dispatcher). This is
 # the belt to that suspenders: a value the write path forgot to redact is still
 # hidden at DISPLAY, because a log surface must never be the place a caller's DOB
 # leaks. Substrings, not exact keys — one entry catches every spelling
@@ -262,10 +262,18 @@ def iso_time(value):
         return text
 
 
+#: The three basis values the runtime actually writes. `apps/runtime/agent/
+#: consent.py` is the authority — these keys must match its `CONSENT_*`
+#: constants exactly, and `apps/calls/tests/test_ui_filters.py` asserts they do,
+#: because a label map that has drifted fails SILENTLY (the filter falls through
+#: to the raw value and a compliance badge reads `one_party_notice`).
+#:
+#: The keys are literals rather than an import: this is a foundation-app template
+#: filter and importing a module app would invert the dependency direction. The
+#: test carries the coupling instead.
 _CONSENT_BASIS_LABELS = {
     'announced_notice': 'Recorded — consent announced',
-    'two_party': 'Recorded — two-party consent',
-    'one_party': 'Recorded — one-party consent',
+    'one_party_notice': 'Recorded — one-party consent',
     'not_recorded': 'Not recorded',
 }
 
