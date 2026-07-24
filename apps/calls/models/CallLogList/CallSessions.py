@@ -326,8 +326,9 @@ class CallSession(TenantLocationOwned):  # noqa: F405
             # `json.loads` accepts `NaN`/`Infinity`, and both propagate through the
             # sum and out to `floatformat`, printing `$nan`/`$inf` on a billing
             # figure. A non-finite cost is a corrupted row, not a real charge —
-            # skip it. (Not reachable until Module 3 writes this column; the
-            # right long-term guard is a validator on the write path.)
+            # skip it. (Module 3's turn loop writes this column from computed
+            # floats, so a non-finite value would have to arrive from outside the
+            # runtime; the right long-term guard is still a write-path validator.)
             if math.isfinite(value):
                 total += value
         return round(total, 4)
