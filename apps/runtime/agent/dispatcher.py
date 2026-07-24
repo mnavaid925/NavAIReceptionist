@@ -747,6 +747,11 @@ def _transfer_offhours_fallback(state, setting):
         duration_seconds=0,
     )
 
+    # The callback is logged at most ONCE per call: the model may call transfer_call
+    # several times in a turn (tool-iteration cap 4) or across turns, and each
+    # off-hours pass must not spam a near-duplicate CallbackRequest. The off_hours
+    # transfer record is idempotent (same content), so it is refreshed every time.
+    created_callback = False
     with transaction.atomic():
         cs = (
             CallSession.objects.select_for_update()
@@ -756,21 +761,27 @@ def _transfer_offhours_fallback(state, setting):
         if cs is not None:
             cs.transfer = record
             cs.save(update_fields=['transfer', 'updated_at'])
-        CallbackRequest.objects.create(
-            tenant=tenant, location=location, contact=contact,
-            caller_name=(contact.display_name if contact else ''),
-            caller_phone=(state.variables or {}).get('from_e164', '') or '',
-            reason='Caller asked to be transferred outside working hours.',
-            status=CallbackRequest.STATUS_PENDING,
-            source=CallbackRequest.SOURCE_AI_PHONE,
-        )
+        if not state.offhours_callback_logged:
+            CallbackRequest.objects.create(
+                tenant=tenant, location=location, contact=contact,
+                caller_name=(contact.display_name if contact else ''),
+                caller_phone=(state.variables or {}).get('from_e164', '') or '',
+                reason='Caller asked to be transferred outside working hours.',
+                status=CallbackRequest.STATUS_PENDING,
+                source=CallbackRequest.SOURCE_AI_PHONE,
+            )
+            created_callback = True
 
-    # A distinct 'transfer'-category log row. This path does NOT go through
-    # apply_tool_call's generic redaction wrapper, so the raw_json is kept
-    # explicitly PII-free here — no caller name, no number (CLAUDE.md rule 5).
-    state.add_log('warning', 'transfer',
-                  'Transfer requested off-hours; callback logged',
-                  {'kind': 'human', 'result': RESULT_OFF_HOURS})
+    # Flip the per-call flag only after the transaction commits, so a rolled-back
+    # create is retried cleanly on a later off-hours pass.
+    if created_callback:
+        state.offhours_callback_logged = True
+        # A distinct 'transfer'-category log row. This path does NOT go through
+        # apply_tool_call's generic redaction wrapper, so the raw_json is kept
+        # explicitly PII-free here — no caller name, no number (CLAUDE.md rule 5).
+        state.add_log('warning', 'transfer',
+                      'Transfer requested off-hours; callback logged',
+                      {'kind': 'human', 'result': RESULT_OFF_HOURS})
 
     return ok({'transfer': None, 'status': 'off_hours', 'reopens_at': reopens})
 
