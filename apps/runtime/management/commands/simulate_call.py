@@ -286,6 +286,9 @@ class Command(BaseCommand):
         if not connected:
             raise CommandError('The media-stream consumer refused the connection.')
 
+        # 3.4's transfer path lets the consumer close the socket itself; the drains
+        # flip this so we do not send `stop` into a socket that is already gone.
+        self._socket_closed = False
         stream_sid = f'MZ{uuid.uuid4().hex[:30]}'
         await communicator.send_json_to({'event': 'connected', 'protocol': 'Call',
                                          'version': '1.0.0'})
@@ -304,27 +307,42 @@ class Command(BaseCommand):
         # the caller "speaks", so it is not swallowed by the echo guard.
         await self._drain(communicator)
 
-        # One synthetic caller utterance: speech then silence to endpoint it.
-        for _ in range(_SPEECH_FRAMES):
-            await communicator.send_json_to(
-                {'event': 'media', 'media': {'payload': _speech_payload()}})
-        for _ in range(_SILENCE_FRAMES):
-            await communicator.send_json_to(
-                {'event': 'media', 'media': {'payload': _silence_payload()}})
+        if not self._socket_closed:
+            # One synthetic caller utterance: speech then silence to endpoint it.
+            for _ in range(_SPEECH_FRAMES):
+                await communicator.send_json_to(
+                    {'event': 'media', 'media': {'payload': _speech_payload()}})
+            for _ in range(_SILENCE_FRAMES):
+                await communicator.send_json_to(
+                    {'event': 'media', 'media': {'payload': _silence_payload()}})
 
-        # Let the reply turn run and play back.
-        await self._drain(communicator)
+            # Let the reply turn run and play back (the transfer path self-closes here).
+            await self._drain(communicator)
 
-        await communicator.send_json_to({'event': 'stop'})
+        # The transfer scenario's consumer already closed the socket; only send
+        # `stop` when it is still open (chat/booking end on this command's own stop).
+        if not self._socket_closed:
+            await communicator.send_json_to({'event': 'stop'})
         await communicator.disconnect()
 
     async def _drain(self, communicator, quiet=0.6, cap=2000):
-        """Read outbound frames until the wire goes quiet for ``quiet`` seconds."""
+        """Read outbound frames until the wire goes quiet, OR the consumer closes it.
+
+        3.4's transfer path closes the socket ITSELF once the redirect resolves
+        (`_record_and_end_transfer` → `close(1000)`), unlike chat/booking which wait
+        for this command's own `stop`. So a drain must tolerate a `websocket.close`
+        arriving mid-poll rather than asserting on it — `receive_from()` expects only
+        `websocket.send` and raises on a close frame. Sets `self._socket_closed` so
+        `_run` skips sending `stop` into an already-closed socket.
+        """
         received = 0
         while received < cap:
             if await communicator.receive_nothing(timeout=quiet):
                 return received
-            await communicator.receive_from()
+            message = await communicator.receive_output(timeout=quiet)
+            if message.get('type') == 'websocket.close':
+                self._socket_closed = True
+                return received
             received += 1
         return received
 
