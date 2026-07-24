@@ -24,7 +24,9 @@ tool envelope §8, deferred transfer §9, providers/PROVIDER_MODE §12, what the
 | **3.2** | **Media Stream & Turn Loop** | **BUILT** — the media-stream consumer (`connect`/`receive`/`disconnect`), the audio codec chain, VAD/barge-in + echo guard, the agent package (state, prompt/variable rendering, turn loop), bounded STT/TTS/LLM adapters + fakes, and the `simulate_call` observable surface |
 | **3.3** | **Tools & Dispatcher** | **BUILT** — the 12 tool declarations, the `{ok,data,error}` envelope over a closed 8-code set, and `apply_tool_call` (identity from server state only). Wraps 4.3's `scheduling/availability.py` booking engine rather than reinventing it |
 | **3.4** | **Transfer Execution** | **BUILT** — the dispatcher hours/target gate (human gated on `is_transfer_available`, off-hours → an `off_hours` `CallSession.transfer` record + a de-duped `CallbackRequest`; Spanish skips the hours gate), the consumer's deferred `_execute_transfer` (single-fire guard, E.164/SID validation, drained bounded `redirect_call`, outcome capture, spoken apology + callback on failure), the telephony `get_backend()`/`redirect_call` handoff, and a diagnostics transfer-outcome summary |
-| 3.5 | Recording, Teardown & Diagnostics | not built — consent-gated recording, teardown, waveform/cost capture, the fuller diagnostics page |
+| **3.5** | **Recording, Teardown & Diagnostics** | **BUILT** — the location-jurisdiction consent resolver + the spoken notice, the recording adapter and its real fake, the two-channel waveform accumulator, the consent-gated recording/waveform write inside the one guaranteed-teardown path, the single-use stream-token claim (closing 3.2's replay deferral), the `purge_expired_recordings` retention job, and the fuller diagnostics page (ended-reason tally, per-stage latency, recent errors, spend today) |
+
+**Module 3 is complete: 3.1–3.5 all built.**
 
 ## Models
 
@@ -39,9 +41,14 @@ the acceptance signal). It touches two existing models:
   columns** — it appends `transcript`/`logs`/`usage` at per-turn checkpoints and, in `disconnect()`, stamps
   `ended_at` + a terminal `status` (`completed`/`abandoned`/`failed`) and `metadata.ended_reason`. **3.4 writes
   the `transfer` JSON column** (`{result, reason, destination, initiated_at, duration_seconds}`, the shape 5.4's
-  `_transfer_outcome.html` reads) and sets `status='transferred'` via `ended_reason='transferred'`. Also **writes
-  `scheduling.CallbackRequest`** on the off-hours and failed-transfer fallbacks. `makemigrations runtime` →
-  "No changes detected" still holds (3.4 adds no model — it writes existing columns).
+  `_transfer_outcome.html` reads) and sets `status='transferred'` via `ended_reason='transferred'`. **3.5 writes
+  `recording_blob`, `waveform_peaks` and the consent keys on `metadata`** (`recorded`, `consent_basis`,
+  `consent_announced`, `retention_days`) — all in the SAME `save()` as the terminal status, which is what makes the
+  consent gate structural. Also **writes `scheduling.CallbackRequest`** on the off-hours and failed-transfer
+  fallbacks. `makemigrations runtime` → "No changes detected" still holds through 3.5 (no sub-module of Module 3
+  adds a model — they write existing columns).
+- **Reads** `tenants.Location.state` / `.country` (3.5) for the recording consent jurisdiction. Read-only, no new
+  field — the jurisdiction is the LOCATION's, never the caller's number.
 
 ## URLs / routes
 
@@ -61,6 +68,13 @@ the acceptance signal). It touches two existing models:
   media-stream `wss://` URL, a **transfer-outcome tally card** (3.4, per-result counts with the same badge colours as
   `_transfer_outcome.html`, rendered only when there are transfers), and a readiness-issues card.
   Guidance empty-state when there is no active location. Never `|safe`s caller data.
+  **3.5 added four panels to this same page** (no new template): a fifth **Spend today** stat card (the card spans
+  both columns at the 2-col tier so five cards never orphan one at half width), an **Ended reasons** badge tally
+  driven by `agent.state.ENDED_REASON_DISPLAY`, a **Per-stage latency** p50/p95 table (labelled per stage — it is
+  deliberately NOT the end-to-end turn budget, since the log rows carry no turn-correlation id to sum by), and a
+  **Recent runtime errors** table linking each row to `calls:callsession_detail`. The errors panel surfaces
+  `level`/`category`/`title`/`call_sid` only — **never `raw_json`**, which is redacted at write time but still
+  describes caller data.
 
 ## Backend package layout (as built)
 
@@ -78,6 +92,11 @@ apps/runtime/
                      async redirect_call(setting, call_sid, destination); live wraps the REST call in asyncio.to_thread
     tokens.py        signed short-TTL opaque stream token: mint_stream_token / verify_stream_token
     audio.py         (3.2) μ-law⇄PCM16 codec, stateful inbound Resampler, iter_mulaw_frames, PlaybackTracker — pure DSP
+                     (3.5) WaveformAccumulator — per-CALL two-lane energy capture, binned at teardown
+    recording.py     (3.5) RecordingBackend + FakeRecordingBackend (writes a real stub WAV through
+                     apps.calls.storage.save_recording) + LiveRecordingBackend + get_recording_backend();
+                     recording_path_for() shape-checks the SID. DELIBERATELY SYNC — its only call site is
+                     already off-loop; read the module docstring before "fixing" the asymmetry
     vad.py           (3.2) energy VAD/endpointing, sustained-speech barge-in, echo guard — named constants + VadState
     reliability.py   (3.2) call_bounded(): timeout + retry, RateLimited(backoff) vs transient; timeout is TERMINAL
     stt.py           (3.2) SttBackend + FakeSttBackend + LiveSttBackend + get_stt_backend() — transcribe(pcm,rate)->str
@@ -93,10 +112,16 @@ apps/runtime/
                      (3.4) transfer hours-gate + off-hours callback fallback in _transfer_call/_transfer_call_spanish
     transfer.py      (3.4) PURE — build_transfer_record() (the ONE CallSession.transfer shape builder, both writers),
                      looks_like_e164/looks_like_call_sid (injection gates), RESULT_* vocabulary, REASON_BY_KIND
+    consent.py       (3.5) PURE, no ORM — resolve_consent(location) -> CONSENT_TWO_PARTY|CONSENT_ONE_PARTY from the
+                     LOCATION's state/country; TWO_PARTY_CONSENT_STATES, US_STATE_CODES, CONSENT_ANNOUNCEMENT_LINE
   consumers/         (3.2) fifth backend layer — <SubModule>/<Entity>.py, re-exported in __init__
     MediaStreamTurnLoop/MediaStream.py   MediaStreamConsumer (connect/receive/disconnect + group_name());
                      (3.4) _execute_transfer — the deferred transport transfer executed after the ack audio
+                     (3.5) the single-use stream claim, _announce_recording, the two waveform hooks,
+                     _discard_recording, and the recording/waveform/consent write in _finalize_session
   management/commands/simulate_call.py   (3.2) observable surface — drives a full fake call through the real consumer
+                     (3.5) reports the recording block and hard-fails a `recorded` row whose blob has no bytes
+  management/commands/purge_expired_recordings.py   (3.5) the retention job — per-row retention_days, idempotent
   views/
     _common.py       re-exports apps.accounts.views._common
     _helpers.py      recent_location_sessions(request) — delegates to apps.calls.views._helpers.location_sessions
@@ -203,15 +228,63 @@ redacted by an **allow-list** (`_LOG_SAFE_ARGS`): ids/counts/dates verbatim, pho
   (never dead air). **`_finalize()` must NOT cancel the turn_task while `_transfer_started`** — CancelledError is a
   BaseException that would skip the outcome write, losing the transfer JSON. `no_answer` needs a `<Dial action>`
   status callback (deferred); the live redirect's 2xx is a provisional `connected`.
+- **Single-use stream claim (built, 3.5)** — closes 3.2's tracked replay deferral. In `_authorize_and_start`, right
+  after the `sessionId` cross-check and **before** the DB resolve (cheapest reject, zero side effect),
+  `cache.add('runtime:stream-claim:{session_id}', True, timeout=STREAM_TOKEN_TTL_SECONDS)` claims the session; a
+  second socket presenting the same still-valid token is closed `4403`. `cache.add` is Django's atomic SETNX. It
+  goes through `sync_to_async(..., thread_sensitive=False)` **even though the configured backend is `LocMemCache`**:
+  the intended fix for the cross-worker gap is a shared Redis cache, which would silently turn this into a network
+  call on every call's authorization path. One thread hop once per call beats a documented footgun. The claim is
+  never released — it expires with the token's own TTL, and a genuinely new call mints a fresh token.
+  **Still per-process**: a `LocMemCache` claim does not span a worker fleet (carried with the cross-worker
+  `MAX_CONCURRENT_CALLS` deferral).
+- **Consent-gated recording + guaranteed teardown (built, 3.5)** — the last realtime surface.
+  `agent/consent.py:resolve_consent(location)` runs **once**, in `_authorize_and_start` **after** the
+  enabled/capacity gates (so a declined call never resolves a basis and finalizes as `not_recorded`). If the basis is
+  two-party, `_greet` follows the opener with `_announce_recording()` — a second **non-interruptible** utterance. It
+  sets `self.interruptible = False` **before the TTS synthesize await**, because `_play`'s `finally` resets it the
+  instant the greeting's audio ends; without that, caller speech in the gap would barge-in, cancel the `_greet` task
+  and skip the disclosure. Restored in a `finally` on every path. `consent_announced` is set only **after** the audio
+  really played — and `CallState.should_record` **requires it** in a two-party jurisdiction, so a call whose notice
+  never reached the caller is simply not recorded, and the row says so honestly (`basis=announced_notice`,
+  `announced=False`, `recorded=False`).
+  `_finalize_session` is the ONE guaranteed-teardown write reached by every termination path, so an abnormal drop
+  persists exactly what a clean hangup does. The recorder runs **before** `transaction.atomic()` (never hold
+  `select_for_update` across file I/O), with `_discard_recording(blob)` deleting the orphan if the guarded write
+  finds a vanished or already-terminal row. The recording path, the waveform and the four consent metadata keys all
+  land in **one `save()`** — that is what makes the gate structural rather than merely documented.
+- **Waveform capture (built, 3.5)** — `providers/audio.py:WaveformAccumulator`, ONE instance per call (created in
+  `connect()`, unlike `PlaybackTracker` which `_play` recreates per blob). `add_caller_frame` on every inbound frame;
+  `add_bot_frame` at the same per-frame point as `playback_tracker.mark`, so the agent lane shows only audio
+  actually sent and inherits barge-in accuracy for free. `finalize()` **snapshots each lane with `list()` before
+  binning** — it runs on the teardown worker thread while a cancelled playback can still be appending on the event
+  loop, and `_bin` reads `len()` repeatedly.
 
 ## Seeder
 
-**None.** Neither 3.1 nor 3.2 adds data of its own; the diagnostics page reads the `calls.CallSession` rows that
-`seed_calls` already creates (through the fake provider). 3.2's observable surface is instead a **management
-command** — `manage.py simulate_call [--tenant <slug> --location <slug>]` drives one full fake call through the real
-consumer under `PROVIDER_MODE=fake` (creating one live `CallSession` per run) and prints its finalized
-transcript/logs/usage/status. If a later runtime sub-module needs seeded demo data, add an idempotent `seed_runtime`
-then — do not duplicate CallSession writes across two seeders.
+**None.** No sub-module of Module 3 adds data of its own; the diagnostics page reads the `calls.CallSession` rows
+that `seed_calls` already creates (through the fake provider). 3.5's one seeder change lives in **Module 5's**
+`seed_calls._build_metadata` — it now stamps `metadata['ended_reason']` from each spec's terminal status, because
+without it the new ended-reason tally renders empty on a freshly seeded demo while the real path populates it.
+Module 3's observable surfaces are **management commands** instead:
+
+- `manage.py simulate_call [--tenant <slug> --location <slug>] [--script chat|booking|transfer]` (3.2) — drives one
+  full fake call through the real consumer under `PROVIDER_MODE=fake` (one live `CallSession` per run) and prints
+  its finalized transcript/logs/usage/status. **3.5 added the recording block** (consent basis, whether the notice
+  announced, retention window, blob path, waveform bin counts) plus a **hard failure** when a row claims
+  `recorded` but `recording_exists()` finds no bytes. No new `--script` value: consent/recording/waveform are wired
+  into every call's authorize/greet/finalize path, so every existing script already exercises them. Run it against
+  locations in different states to see both consent branches (seeded Downtown/Uptown are IL — two-party;
+  Riverside/Lakeside are OR/CO — one-party).
+- `manage.py purge_expired_recordings [--tenant …] [--location …] [--dry-run]` (3.5) — the retention job. Not a
+  seeder: it is maintenance over data other passes write. Per-ROW `metadata['retention_days']`, stamped at teardown
+  from the setting in force at call time, so lowering `RECORDING_RETENTION_DAYS` never retroactively expires older
+  recordings. Idempotent by construction (`.exclude(recording_blob='')` is both the driving filter and the guard),
+  chunked `.iterator()`, file deleted **before** the row is cleared so a storage failure can never orphan bytes the
+  row-walking job could not come back for.
+
+If a later runtime sub-module needs seeded demo data, add an idempotent `seed_runtime` then — do not duplicate
+CallSession writes across two seeders.
 
 ## Conventions & gotchas
 
@@ -296,6 +369,32 @@ then — do not duplicate CallSession writes across two seeders.
 - **`set_fake_script` is process-global** (a ContextVar was tried and does NOT reach the ASGI application task).
   It refuses to arm over an existing script; always clear it in a `finally`.
 
+### 3.5 recording/consent gotchas
+
+- **A two-party consent basis is a REQUIREMENT, not a permission.** `CallState.should_record` returns False until
+  `consent_announced` is True, so a TTS failure on the notice means the call is not recorded. Do not "simplify" it
+  back to `bool(consent_basis)` — recording a two-party call whose disclosure never played is the failure this whole
+  sub-module exists to prevent.
+- **The consent vocabulary is persisted data shared with Module 5.** `announced_notice` / `one_party_notice` /
+  `not_recorded` — `apps/runtime/agent/consent.py` is the authority, `seed_calls` writes the same strings, and
+  `apps/accounts/templatetags/ui.py:_CONSENT_BASIS_LABELS` maps them for display. Rename one and old rows stop
+  matching; drift here fails **silently** (the label filter falls back to the raw value), so
+  `apps/calls/tests/test_ui_filters.py` asserts the map covers every constant.
+- **`provider_call_sid` is a path component.** The webhook shape-checks it with `looks_like_call_sid` at ingestion,
+  and `recording_path_for` checks it again. `safe_join` guards the `PRIVATE_MEDIA_ROOT` boundary but **not** the
+  `private/calls/{tenant}/{location}/` partition inside it, so a `../`-bearing SID would write outside its own
+  prefix. Both gates are load-bearing; `apps/runtime/tests/test_webhook.py` regression-covers them.
+- **`ENDED_REASON_DISPLAY` (state.py) and `_STATUS_BY_REASON` (the consumer) describe the same closed key set** for
+  two different purposes. Add a reason to one and forget the other and it silently falls through the status default
+  AND vanishes from the diagnostics tally —
+  `test_call_state.test_ended_reason_vocabulary_matches_the_consumer_status_map` is the guard.
+- **`recording.py` is deliberately SYNC** while every other adapter here is async. Its one call site
+  (`_finalize_session`) is already off-loop via `database_sync_to_async`; making it async would drive an event loop
+  from inside a worker thread for no benefit. The module docstring says so — do not "fix" the asymmetry.
+- **The waveform is NOT derived from the recorded audio.** It comes from live per-frame DSP energy, which is why an
+  early drop still yields genuinely partial-but-real peaks while the fake recorder's stub bytes are unrelated to
+  call length. Two independent write paths that merely finalize together.
+
 ## Common tasks
 
 - **Run a call end-to-end (3.2):** `venv\Scripts\python.exe manage.py simulate_call` (fake providers, no real call).
@@ -314,8 +413,21 @@ then — do not duplicate CallSession writes across two seeders.
   (no carrier). The gate lives in `agent/dispatcher.py:_transfer_call` (reuses `apps.agents.services`
   `is_transfer_available`/`resolve_transfer_number` — never reinvent the hours logic); the execution + outcome write
   live in `consumers/…/MediaStream.py:_execute_transfer`; the record shape in `agent/transfer.py`.
-- **Extend the diagnostics page (3.5):** add to `runtime_diagnostics_view` + `templates/runtime/diagnostics.html`;
-  keep every query tenant+location scoped through the audited helper.
+- **Extend the diagnostics page:** add to `runtime_diagnostics_view` + `templates/runtime/diagnostics.html`; keep
+  every query tenant+location scoped through the audited `location_sessions` helper. **Reuse the shared `recent`
+  sample** rather than adding a fourth query for a fourth panel — 3.5's three panels all read one bounded 50-row
+  list. If a panel genuinely needs its own read, narrow it (`select_related(None).only(...)`, `.iterator()`) the way
+  the uncapped spend-today query does, and update the query-budget test in `apps/runtime/tests/test_diagnostics.py`
+  (currently 8) with the reason.
+- **Change the recording behaviour (3.5):** the consent basis is `agent/consent.py`; whether a call is recorded at
+  all is `CallState.should_record`; where the bytes go is `providers/recording.py` (through
+  `apps.calls.storage.save_recording` — never a raw `open()`); when they are deleted is
+  `manage.py purge_expired_recordings`. Verify with `manage.py simulate_call --location downtown` (IL → two-party,
+  announces) vs `--location riverside` (OR → one-party, no notice).
+- **Add a live provider backend:** implement `LiveRecordingBackend.finalize` (it currently `require_live()`s then
+  raises `NotImplementedError`, matching `LiveTtsBackend`/`LiveSttBackend`). A live encode/upload crosses the
+  network, so wrap it in `providers.reliability.call_bounded` at its call site — the sync interface is correct only
+  because the fake's I/O is local.
 
 ## Sidebar wiring
 
@@ -328,4 +440,10 @@ shows Live via 3.1's link. `LIVE_LINKS['3.3'] = {}` for the same reason — a to
 panel on the call detail page renders. `LIVE_LINKS['3.4'] = {}` for the same reason — transfer execution is
 transport behaviour, not a page; what 3.4 makes visible is the `CallSession.transfer` outcome (5.4's transfer card
 on the call detail page), the transfer-outcome summary on 3.1's diagnostics page, and `simulate_call --script
-transfer`. Pointing 3.4 at `runtime:diagnostics` would just duplicate 3.1's row. 3.5 adds its own entry.
+transfer`. Pointing 3.4 at `runtime:diagnostics` would just duplicate 3.1's row. `LIVE_LINKS['3.5'] = {}` closes
+Module 3 out on the same posture: 3.5 **extends** the diagnostics page 3.1 already links (four new panels) rather
+than adding one, and its other surfaces — the recorder inside the consumer's teardown and
+`purge_expired_recordings` — are not pages either.
+
+**All five keys `3.1`–`3.5` are present, so Module 3 is fully BUILT.** It shows Live in the sidebar through 3.1's
+single link, which is the whole module's navigable surface by design.
