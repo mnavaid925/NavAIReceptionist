@@ -66,14 +66,28 @@ def test_decline_twiml_shape():
     assert '<Say' in xml and '<Hangup' in xml
 
 
-def test_no_get_backend_symbol_yet():
-    # 3.1 deliberately does not define get_backend; the backend handoff is 3.4.
-    assert not hasattr(telephony, 'get_backend')
+def test_get_backend_exists_and_is_fake_off_live():
+    # 3.4 defines get_backend here (3.1 deliberately did not). Off live it resolves
+    # to the fake, which imports no twilio and opens no socket.
+    assert hasattr(telephony, 'get_backend')
+    backend = telephony.get_backend()
+    assert isinstance(backend, telephony.FakeTelephonyBackend)
+    assert backend.mode == 'fake'
+    assert backend.simulated is True
+    # The new transfer method the live call path needs, absent from 3.1's helpers.
+    assert hasattr(backend, 'redirect_call')
 
 
-def test_agents_get_backend_still_falls_through_to_fake():
+def test_agents_get_backend_delegates_to_runtime_backend():
+    # Module 2's get_backend import-guards for THIS module's get_backend; now that
+    # 3.4 defines it, agents.telephony delegates through it with no Module-2
+    # call-site change. The runtime backend subclasses Module 2's fake, so
+    # check_connection/place_test_call are inherited verbatim (mode/simulated
+    # unchanged) and redirect_call is added.
     from apps.agents.telephony import get_backend
 
     backend = get_backend()
+    assert isinstance(backend, telephony.FakeTelephonyBackend)
     assert backend.mode == 'fake'
     assert backend.simulated is True
+    assert hasattr(backend, 'redirect_call')
