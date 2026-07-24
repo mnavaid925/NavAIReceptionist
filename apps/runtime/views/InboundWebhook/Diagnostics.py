@@ -11,15 +11,39 @@ It is the seed of the fuller diagnostics page 3.5 grows (per-stage latency,
 ended-reason codes, live-call count). Tenant AND location scoped on every query —
 the session rows come through the single audited scoping helper.
 """
+from collections import Counter
+
 from apps.agents.models import AgentSetting
 from apps.calls.models import CallSession
 from django.db.models import Count, Q
 
+from apps.runtime.agent.transfer import (
+    RESULT_CONNECTED,
+    RESULT_DISABLED,
+    RESULT_FAILED,
+    RESULT_NO_ANSWER,
+    RESULT_OFF_HOURS,
+)
 from apps.runtime.providers.telephony import media_stream_ws_url
 from apps.runtime.views._common import *  # noqa: F401,F403
 from apps.runtime.views._helpers import location_sessions, recent_location_sessions
 
 __all__ = ['runtime_diagnostics_view']
+
+#: Display order + label + badge for the transfer-outcome tally. Badge colours
+#: match `templates/partials/_transfer_outcome.html` exactly — one colour map for
+#: the one vocabulary, never a second one invented here.
+_TRANSFER_RESULT_DISPLAY = [
+    (RESULT_CONNECTED, 'Connected', 'badge-green'),
+    (RESULT_OFF_HOURS, 'Off hours', 'badge-amber'),
+    (RESULT_NO_ANSWER, 'No answer', 'badge-amber'),
+    (RESULT_FAILED, 'Failed', 'badge-red'),
+    (RESULT_DISABLED, 'Disabled', 'badge-muted'),
+]
+#: Bounds the Python-side tally so the page cost does not grow with call volume. A
+#: JSON-key aggregate is not portably expressible across MySQL and SQLite (the test
+#: DB), so the tally is done in Python over this bounded, most-recent slice.
+_TRANSFER_TALLY_LIMIT = 200
 
 
 @login_required  # noqa: F405
@@ -47,8 +71,27 @@ def runtime_diagnostics_view(request):
     stats = scoped.aggregate(
         active=Count('pk', filter=Q(status=CallSession.STATUS_IN_PROGRESS)),
         total=Count('pk'),
+        # 3.4: calls that handed off to a person (connected OR failed both end
+        # 'transferred' — the media leg left the consumer either way).
+        transferred=Count('pk', filter=Q(status=CallSession.STATUS_TRANSFERRED)),
     )
     sessions = list(recent_location_sessions(request))
+
+    # Per-result transfer tally (includes off-hours attempts, which do NOT end as
+    # status='transferred' — the call continued after the callback fallback), over
+    # a bounded most-recent slice, counted in Python for cross-DB portability.
+    # `values_list` (not `.only`) so it does not collide with `location_sessions`'s
+    # own `select_related('location')` — a deferred field cannot also be traversed.
+    result_counts = Counter(
+        transfer.get('result')
+        for transfer in scoped.order_by('-created_at').values_list(
+            'transfer', flat=True)[:_TRANSFER_TALLY_LIMIT]
+        if isinstance(transfer, dict) and transfer.get('result')
+    )
+    transfer_outcomes = [
+        {'label': label, 'badge': badge, 'count': result_counts[key]}
+        for key, label, badge in _TRANSFER_RESULT_DISPLAY if result_counts.get(key)
+    ]
 
     # The URL Twilio must POST the inbound call to. Built from the public tunnel
     # base when set (what a real Twilio number needs), else the current host so
@@ -65,6 +108,7 @@ def runtime_diagnostics_view(request):
         'readiness_issues': setting.readiness_issues() if setting else [],
         'sessions': sessions,
         'stats': stats,
+        'transfer_outcomes': transfer_outcomes,
         'webhook_url': webhook_url,
         'stream_ws_url': media_stream_ws_url(),
         'provider_mode': provider_mode,
