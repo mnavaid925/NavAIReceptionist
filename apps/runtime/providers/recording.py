@@ -50,9 +50,26 @@ def recording_path_for(call_session, extension='wav'):
     loaded at teardown, and an id cannot change under a rename the way a slug
     can), keyed on the provider call SID — which is unique across the table, so
     two calls can never collide on one file.
+
+    **The SID is shape-checked here even though the webhook already rejects a
+    malformed one.** It is provider-supplied text on a stored row, and this
+    function turns it into a path component: a SID containing `../` would land
+    the file outside its own tenant/location prefix, and `safe_join` would not
+    stop it — that guard defends the PRIVATE_MEDIA_ROOT boundary, not the
+    partition inside it. The ingestion check is the real gate; this is the one
+    that survives a future second writer, a data migration, or a hand-edited row.
+
+    Raises ``ValueError`` rather than silently sanitizing: a SID that fails this
+    check means an assumption broke upstream, and writing the audio somewhere
+    "close enough" would hide that.
     """
+    from apps.runtime.agent.transfer import looks_like_call_sid
+
+    sid = call_session.provider_call_sid or ''
+    if not looks_like_call_sid(sid):
+        raise ValueError('provider_call_sid is not a safe path component')
     return (f'private/calls/{call_session.tenant_id}/{call_session.location_id}/'
-            f'{call_session.provider_call_sid}.{extension}')
+            f'{sid}.{extension}')
 
 
 class RecordingBackend(abc.ABC):
