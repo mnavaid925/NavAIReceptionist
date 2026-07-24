@@ -1,10 +1,12 @@
 """Provider helpers — URL building, signature verification, TwiML, mode fail-safe.
 
-Also pins the deliberate Module 2 integration: ``apps/runtime/providers/telephony``
-defines NO ``get_backend``, so ``apps.agents.telephony.get_backend`` keeps falling
-through to Module 2's own fake backend rather than a runtime one that cannot yet
-place a call.
+Also pins the 3.4 Module 2 handoff: ``apps/runtime/providers/telephony`` now
+defines ``get_backend`` + the transfer ``redirect_call``, so
+``apps.agents.telephony.get_backend`` delegates to the runtime backend (which
+subclasses Module 2's fake, inheriting ``check_connection``/``place_test_call``
+verbatim), and the fake ``redirect_call`` reaches no carrier.
 """
+import pytest
 from django.test import RequestFactory
 from twilio.request_validator import RequestValidator
 
@@ -91,3 +93,53 @@ def test_agents_get_backend_delegates_to_runtime_backend():
     assert backend.mode == 'fake'
     assert backend.simulated is True
     assert hasattr(backend, 'redirect_call')
+
+
+# --------------------------------------------------------------------------- #
+# FakeTelephonyBackend.redirect_call — the fake transfer redirect contract
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(autouse=True)
+def _clear_redirect_script():
+    """`_scripted_ok` is process-global class state — never leak it between tests."""
+    telephony.FakeTelephonyBackend.clear_redirect_script()
+    yield
+    telephony.FakeTelephonyBackend.clear_redirect_script()
+
+
+async def test_fake_redirect_call_connects_by_default():
+    backend = telephony.FakeTelephonyBackend()
+    result = await backend.redirect_call(None, 'CA1', '+13125550101')
+    assert result.ok is True
+    assert result.mode == 'fake'
+    assert result.data['destination'] == '+13125550101'
+
+
+async def test_fake_redirect_call_can_be_scripted_to_fail():
+    telephony.FakeTelephonyBackend.script_redirect(ok=False)
+    backend = telephony.FakeTelephonyBackend()
+    result = await backend.redirect_call(None, 'CA1', '+13125550101')
+    assert result.ok is False
+
+
+async def test_fake_redirect_call_script_clears_back_to_connecting():
+    telephony.FakeTelephonyBackend.script_redirect(ok=False)
+    telephony.FakeTelephonyBackend.clear_redirect_script()
+    backend = telephony.FakeTelephonyBackend()
+    result = await backend.redirect_call(None, 'CA1', '+13125550101')
+    assert result.ok is True
+
+
+async def test_fake_redirect_call_never_imports_twilio(monkeypatch):
+    """The fake backend must not need the `twilio` package to simulate a
+    redirect — it reaches no carrier, so it cannot even import the SDK that
+    would let it reach one."""
+    import sys
+
+    # A `None` entry in sys.modules makes any `import twilio` (or `from twilio
+    # import ...`) inside this call raise ImportError, per the import system —
+    # the reliable way to prove a code path never imports a given module.
+    monkeypatch.setitem(sys.modules, 'twilio', None)
+    backend = telephony.FakeTelephonyBackend()
+    result = await backend.redirect_call(None, 'CA1', '+13125550101')
+    assert result.ok is True
