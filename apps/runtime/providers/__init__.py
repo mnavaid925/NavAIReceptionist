@@ -27,8 +27,14 @@ mulaw_to_pcm16``); this package is a namespace, not a re-export surface.
   interfaces, their **fakes** (real contract implementations, not mocks) and the
   ``get_*_backend()`` resolvers (3.2). Non-live modes resolve to the fake; live
   refuses to initialize without a real integration.
+* ``recording``  — the call-recording adapter (3.5): ``get_recording_backend()``
+  and ``finalize(session, should_record=…)``, writing through
+  ``apps.calls.storage``. Deliberately SYNC (its one call site is already off the
+  event loop) — see the module docstring before "fixing" the asymmetry.
 
 The 12-tool dispatcher arrived with 3.3; the transfer redirect + ``get_backend()``
-handoff with 3.4. A live warm-transfer/whisper leg and a ``<Dial action>`` status
-callback (for a true ``no_answer`` vs ``connected`` outcome) remain deferred.
+handoff with 3.4; the recorder and ``audio.WaveformAccumulator`` with 3.5. A live
+warm-transfer/whisper leg, a ``<Dial action>`` status callback (for a true
+``no_answer`` vs ``connected`` outcome) and the live recording capture/encode
+integration remain deferred.
 """
