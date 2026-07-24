@@ -51,10 +51,16 @@ __all__ = [
 ]
 
 #: The `CallSession.transfer.result` vocabulary `_transfer_outcome.html` badges.
-#: `no_answer` is declared here (the reader renders it, the seeder seeds it) but is
-#: NOT written by this pass's code — distinguishing no-answer from connected needs
-#: the deferred Twilio `<Dial action>` status callback; until then a redirect that
-#: Twilio accepts is recorded provisionally as `connected`. See todo.md 3.4.
+#: Two of the five are part of the reader/seeder vocabulary but are NOT written by
+#: this pass's code, and that is deliberate, not an omission:
+#:   * `no_answer` — distinguishing no-answer from connected needs the deferred
+#:     Twilio `<Dial action>` status callback; until then a redirect Twilio accepts
+#:     is recorded provisionally as `connected`.
+#:   * `disabled` — a transfer to a switched-off or unconfigured line is refused by
+#:     the dispatcher with an `not_permitted` envelope and writes NO transfer record
+#:     (a structurally-unavailable line must not read as an attempted handoff). The
+#:     value stays in the vocabulary for the reader and the seeder's demo rows.
+#: Both are seeded by `seed_calls` so the reader's badges are exercised. See todo.md 3.4.
 RESULT_CONNECTED = 'connected'
 RESULT_NO_ANSWER = 'no_answer'
 RESULT_OFF_HOURS = 'off_hours'
