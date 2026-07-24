@@ -385,9 +385,25 @@ agent. `spanish` skips this gate entirely.
    hours/gate problem — say so in the log rather than sending the reader to the schedule.
 10. Redirect failed → apologize once, keep the guard set (do not retry a configuration bug on every turn), keep
     serving.
-11. Record the outcome into `CallSession.transfer` — `{reason, destination_kind, outcome, at}` where `outcome` is
-    `connected` / `failed` / `off_hours` / `disabled` — so the call detail page can show where a bridge broke.
-    Record the destination **kind** (`primary` / `secondary`), not the raw number.
+11. Record the outcome into `CallSession.transfer` — the **as-built** shape (5.4's `_transfer_outcome.html` reader
+    and `seed_calls` define it, and the code is truth) is `{result, reason, destination, initiated_at,
+    duration_seconds}` (+ an optional `attempts: [{destination, result}]` list, omitted for a single try). `result`
+    ∈ `connected` / `failed` / `off_hours` / `disabled` / `no_answer`. **`destination` is the real E.164 number**
+    (the reader renders it through `phone_e164`), NOT a `primary`/`secondary` kind — this earlier wording predated
+    the model's finalized shape. Build it through the ONE helper `apps/runtime/agent/transfer.py:build_transfer_record`.
+
+> **As-built reconciliation (3.4).** The code diverges from the numbered spec above in ways worth knowing:
+> the **hours/target gate lives in the dispatcher** (`_transfer_call`), not the transport — so the tool result the
+> model speaks from is already accurate ("connecting you now" vs "we're closed, I've logged a callback"), and the
+> **acknowledgement IS the model's reply** (played non-interruptibly), not a separate fixed handoff line. Off-hours
+> (only `human` is hours-gated; `spanish` skips it) writes an `off_hours` record + a **de-duped `CallbackRequest`**
+> (`CallState.offhours_callback_logged`) and does NOT arm the signal. The consumer's `_execute_transfer` sets
+> `ended_reason='transferred'` **before any await** and `_finalize()` **does not cancel the in-flight transfer
+> task** — otherwise a racing `stop`/`disconnect` `CancelledError` (a BaseException) would skip the outcome write
+> and lose the transfer JSON. The SID validator is **permissive** (`^[A-Za-z0-9_-]{2,64}$`), not `^[A-Za-z0-9]{34}$`,
+> because `PROVIDER_MODE=fake` never mints a real 34-char SID (`simulate_call` uses `SIM-…`). A **failed** redirect
+> speaks an apology + logs a callback (never dead air). `no_answer` needs the deferred `<Dial action>` status
+> callback; until then a redirect Twilio accepts (2xx) is recorded provisionally as `connected`.
 
 An **explicit `end_call` tool** ends the call deterministically for wrong-number and caller-done outcomes —
 waiting on a silence timeout burns minutes and looks broken.
@@ -436,9 +452,13 @@ waiting on a silence timeout burns minutes and looks broken.
 Every external dependency sits behind an adapter in `apps/runtime/providers/` — telephony, STT, TTS, LLM, storage.
 Consumers and tools call the adapter interface, never an SDK directly.
 
-- Interfaces are narrow and async: `telephony.redirect_call / hangup`, `stt.transcribe(pcm, rate)`,
-  `tts.synthesize(text) -> (pcm, rate)`, `llm.generate(history, system, tools) -> (text, tool_calls, usage)`.
-  The interface has **no dial-out method** — the only call the runtime touches is one the caller placed.
+- Interfaces are narrow and async. As built (3.4): `telephony.get_backend().redirect_call(setting, call_sid,
+  destination) -> TelephonyResult` (the transfer redirect — `.ok` is transport success, the consumer maps it to
+  `connected`/`failed`; the runtime backends subclass Module 2's Fake/Live, adding this method), plus
+  `stt.transcribe(pcm, rate)`, `tts.synthesize(text) -> (pcm, rate)`,
+  `llm.generate(history, system, tools) -> (text, tool_calls, usage)`. `redirect_call` REDIRECTS an in-progress
+  inbound call to a person — it is **not** dial-out origination; the only call the runtime touches is one the caller
+  placed. (A separate `hangup` is unneeded — `end_call` closes the websocket, no REST call.)
 - **Every adapter ships its fake in the same pass.** The fake is a real implementation of the interface —
   deterministic synthetic audio, canned transcripts, scripted tool calls — not a mock. Tests and seeders run
   against the fakes so the **adapter contract itself** is exercised; SDK-level mocking hides contract drift.
@@ -541,11 +561,13 @@ migrations, an idempotent seeder if it adds data, and tests.
   `{"ok": false, …}` and writes nothing; a model-supplied `appointment_id` from another tenant **or another
   location** is rejected; a `slot_token` not offered in this session is rejected; an expired `slot_token` returns
   `slot_expired`; **every tool is tested through both runtime paths**.
-- **Transfer:** a silence turn (`had_real_transcript=False`) never triggers; an explicit Spanish request routes to
-  the secondary number even outside working hours; a human request inside hours redirects and records
-  `outcome='connected'`; outside hours it speaks the notice once, clears the signal and records `off_hours`; a
-  non-E.164 configured destination aborts without dialing; the destination is **never** taken from caller
-  speech — assert it equals the configured number.
+- **Transfer:** an explicit Spanish request routes to the secondary number even outside working hours; a human
+  request inside hours redirects and records `transfer.result == 'connected'` + `status == 'transferred'`; outside
+  hours the dispatcher returns `status:'off_hours'` WITHOUT arming, records `transfer.result == 'off_hours'` and
+  logs exactly one (de-duped) `CallbackRequest`; a failed redirect records `result == 'failed'`, speaks an apology
+  and logs a callback (never dead air); a non-E.164 configured destination (or an injection-shaped call SID) aborts
+  without dialing; a racing `stop` during the redirect still records the outcome (the finalize race); the
+  destination is **never** taken from caller speech — assert it equals the configured number.
 - **Cost:** a call appends one `usage` entry per turn and the summed total matches them.
 
 ## 17. Adding to this layer — the checklist
