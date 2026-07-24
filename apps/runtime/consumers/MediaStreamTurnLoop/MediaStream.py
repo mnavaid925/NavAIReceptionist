@@ -41,7 +41,9 @@ utterance. The greeting is non-interruptible.
 **Teardown is guaranteed and never raises.** ``disconnect()`` (and a Twilio
 ``stop``) both route through one ``_finalize()`` that flushes the buffered
 transcript/logs/usage, stamps ``ended_at`` and a terminal ``status``, and runs even
-on an abnormal drop — a carrier hangup is the normal case, not the exception.
+on an abnormal drop — a carrier hangup is the normal case, not the exception. 3.5
+hangs the consent-gated recording and the two-channel waveform off that same one
+path, so an abnormal drop persists exactly what a clean hangup does.
 """
 import asyncio
 import base64
@@ -53,6 +55,7 @@ import time
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
 
@@ -60,6 +63,8 @@ from apps.agents.models import AgentSetting
 from apps.agents.services import resolve_transfer_number
 from apps.calls.models import CallSession
 from apps.runtime.agent import (
+    CONSENT_ANNOUNCEMENT_LINE,
+    CONSENT_NOT_RECORDED,
     FALLBACK_LINE,
     REASON_BY_KIND,
     RESULT_CONNECTED,
@@ -72,6 +77,7 @@ from apps.runtime.agent import (
     looks_like_call_sid,
     looks_like_e164,
     render_greeting,
+    resolve_consent,
     run_turn,
     tts_only_cost,
 )
@@ -81,16 +87,18 @@ from apps.runtime.providers.audio import (
     PlaybackTracker,
     Resampler,
     STT_SAMPLE_RATE,
+    WaveformAccumulator,
     iter_mulaw_frames,
     mulaw_to_pcm16,
     pcm16_to_carrier_mulaw,
 )
 from apps.runtime.providers.llm import get_llm_backend
+from apps.runtime.providers.recording import get_recording_backend
 from apps.runtime.providers.reliability import ProviderError, call_bounded
 from apps.runtime.providers.stt import get_stt_backend
 from apps.runtime.providers.telephony import get_backend
 from apps.runtime.providers.tts import get_tts_backend
-from apps.runtime.providers.tokens import verify_stream_token
+from apps.runtime.providers.tokens import STREAM_TOKEN_TTL_SECONDS, verify_stream_token
 from apps.runtime.providers.vad import BARGE_IN, UTTERANCE_END, VadState
 
 logger = logging.getLogger(__name__)
@@ -146,9 +154,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
     #: Per-worker-process count of live authorized calls, for the MAX_CONCURRENT_CALLS
     #: capacity gate (cost is a security control, skill §11). Touched only from the
     #: single-threaded event loop, so a plain += is safe. This bounds ONE worker;
-    #: cross-worker enforcement needs a shared Redis/DB counter — 3.5's worker-health
-    #: pass. A per-process ceiling is still the right first layer (and the whole
-    #: ceiling on a single-process dev/Daphne run).
+    #: cross-worker enforcement needs a shared Redis/DB counter, which this stack
+    #: has not declared (the default cache is LocMemCache) — carried as a tracked
+    #: deferral alongside the cross-worker stream-token claim below. A per-process
+    #: ceiling is still the right first layer, and the whole ceiling on a
+    #: single-process dev/Daphne run.
     _active_calls = 0
 
     async def connect(self):
@@ -168,6 +178,10 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         self.inbound_resampler = Resampler(CARRIER_SAMPLE_RATE, STT_SAMPLE_RATE)
         self.vad = VadState(rate=STT_SAMPLE_RATE)
+        # 3.5: ONE accumulator for the whole call — unlike `playback_tracker`,
+        # which `_play()` recreates per blob. A per-playback instance would keep
+        # only the last reply's peaks and silently discard the conversation.
+        self.waveform = WaveformAccumulator()
 
         self.turn_busy = False
         self.pending_utterance = None
@@ -244,15 +258,6 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         session_param = params.get('sessionId')
 
         # 1. Verify the signed token FIRST. Identity comes only from its payload.
-        # WARNING: single-use/replay protection is a tracked deferral, not shipped
-        # here. The token is signed and short-TTL (300 s) and is never logged or
-        # echoed by this app, so a replay needs an already-leaked valid token; but a
-        # second socket presenting the same still-valid token would authorize a
-        # second stream on one CallSession. The fix (a single-use claim marker) is
-        # deferred to 3.5 because it wants either a CallSession field — a migration
-        # this service sub-module must not add — or a shared cache SETNX claim, a
-        # design choice better made with 3.5's recording/teardown pass. Tracked in
-        # .claude/tasks/todo.md.
         payload = verify_stream_token(token)
         if not payload:
             await self.close(code=CLOSE_UNAUTHORIZED)
@@ -264,6 +269,36 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         # 2. The sessionId custom param must match the token's sid — never trust
         #    the higher-value one, never silently reconcile a mismatch.
         if session_param is not None and str(session_param) != str(session_id):
+            await self.close(code=CLOSE_FORBIDDEN)
+            return
+
+        # 2b. SINGLE-USE CLAIM (3.5 — closes 3.2's tracked replay deferral). The
+        #     token is signed and short-TTL, so a replay needs an already-leaked
+        #     valid token; but until now a second socket presenting the same
+        #     still-valid token would have authorized a SECOND stream against one
+        #     CallSession — two turn loops writing one row. `cache.add` is Django's
+        #     atomic SETNX (True only on first insert), so the first stream claims
+        #     the session and any later one is refused. Placed here, before the DB
+        #     resolve: the cheapest possible reject point, with zero side effect —
+        #     no query, no row bound, no group joined, no capacity slot taken.
+        #
+        #     Called directly on the event loop deliberately: the default
+        #     LocMemCache is an in-process dict behind a threading.Lock — no ORM, no
+        #     network, no file I/O — the same class of safe direct call this file
+        #     already makes for the codec/VAD math.
+        #     WARNING: on a NETWORKED cache backend (Redis, for a real multi-worker
+        #     deployment) this becomes a network call and must move off-loop, and
+        #     only then does the claim span the worker fleet. Per-process today,
+        #     which is the whole gap on a single-process Daphne run. Tracked with
+        #     the cross-worker MAX_CONCURRENT_CALLS deferral in
+        #     .claude/tasks/todo.md.
+        #
+        #     No release on disconnect: the claim expires with the token's own TTL,
+        #     and a genuinely new call mints a fresh token via 3.1's webhook, so
+        #     holding the key for its full life costs nothing and releasing it early
+        #     would re-open the very window this closes.
+        if not cache.add(f'runtime:stream-claim:{session_id}', True,
+                         timeout=STREAM_TOKEN_TTL_SECONDS):
             await self.close(code=CLOSE_FORBIDDEN)
             return
 
@@ -321,6 +356,12 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             tts=get_tts_backend(agent_setting.voice_provider),
             llm=get_llm_backend(agent_setting.voice_provider),
         )
+        # 3.5: resolve the recording consent basis ONCE, here. Deliberately AFTER
+        # the enabled/capacity gates above — a declined call never reaches this
+        # line, so its `consent_basis` stays None and `_finalize_session` records
+        # `not_recorded` for a call that was never really answered, rather than
+        # claiming a basis for a conversation that never happened.
+        self.state.consent_basis = resolve_consent(location)
         self.stream_sid = start.get('streamSid') or message.get('streamSid')
         self.group_name = group_name(tenant_id, location_id, session_id)
         await self.channel_layer.group_add(self.group_name, self.channel_name)
@@ -391,6 +432,7 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             await self._flush()
             if mulaw:
                 await self._play(mulaw, interruptible=False)
+            await self._announce_recording()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — never let the greeting die in silence
@@ -402,6 +444,38 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             self.turn_task = None
             self.last_activity_at = time.monotonic()
             self._maybe_drain_pending()
+
+    async def _announce_recording(self):
+        """Speak the recording notice when the location's jurisdiction needs one.
+
+        Runs inside ``_greet``'s task, immediately after the opener and before
+        ``turn_busy`` is released, so it is non-interruptible and lands before the
+        caller's first turn — a disclosure the caller talks over is not a
+        disclosure. One-party locations play nothing extra and this returns at once.
+
+        ``consent_announced`` is set only AFTER the audio actually played, so a TTS
+        failure leaves it False and the finalized row says honestly that the
+        announcement did not happen. Claiming an announcement that never played
+        would be worse than recording no claim at all — so this is deliberately not
+        set optimistically up front.
+        """
+        if not self.state.requires_announcement:
+            return
+        try:
+            pcm, rate = await self.providers.tts.synthesize(CONSENT_ANNOUNCEMENT_LINE)
+        except ProviderError:
+            self.state.add_log('error', 'tts', 'Recording notice synthesis failed')
+            return
+        self.state.add_transcript('assistant', CONSENT_ANNOUNCEMENT_LINE)
+        self.state.history.append({'role': 'assistant', 'text': CONSENT_ANNOUNCEMENT_LINE})
+        # A second TTS spend — recorded, or the call's cost under-reports it (the
+        # same rule the greeting's own TTS cost already follows).
+        self.state.add_usage(*tts_only_cost(self.state.voice_provider,
+                                            CONSENT_ANNOUNCEMENT_LINE))
+        await self._flush()
+        await self._play(pcm16_to_carrier_mulaw(pcm, rate), interruptible=False)
+        self.state.consent_announced = True
+        self.state.add_log('info', 'call', 'Recording notice played')
 
     async def _speak_fallback_greeting(self):
         """Best-effort spoken fallback when the greeting itself crashed."""
@@ -424,6 +498,11 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
 
         self.last_activity_at = time.monotonic()
         pcm8 = mulaw_to_pcm16(mulaw)
+        # 3.5 waveform, caller lane. Unconditional and un-branched on is_playing:
+        # Twilio's `media` event carries only the caller's leg, so unlike the VAD's
+        # echo guard there is no agent audio here to filter out. Pure CPU (an RMS
+        # over 160 bytes), safe on the event loop.
+        self.waveform.add_caller_frame(pcm8)
         pcm16 = self.inbound_resampler.resample(pcm8)
         event, utterance = self.vad.feed(pcm16, self.is_playing)
 
@@ -731,6 +810,13 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             for frame in iter_mulaw_frames(mulaw):
                 await self._send_media(frame)
                 self.playback_tracker.mark(frame)
+                # 3.5 waveform, agent lane — fed from the SAME "frames actually
+                # sent" point as the tracker, so a barge-in that cancels this loop
+                # leaves peaks for exactly what the caller heard, not the whole
+                # synthesized reply. One hook covers every caller of _play():
+                # the greeting, the recording notice, each turn's reply, the
+                # fallback greeting and the failed-transfer apology.
+                self.waveform.add_bot_frame(frame)
                 await asyncio.sleep(FRAME_SECONDS)
         finally:
             self.is_playing = False
@@ -895,9 +981,25 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             logger.error('call finalize failed (%s)', type(exc).__name__)
 
     def _finalize_session(self):
-        """Sync: stamp the terminal status, ended_at and ended-reason on the row."""
+        """Sync: stamp the terminal status, ended-reason, recording and waveform.
+
+        **This is the one guaranteed-teardown write.** Every termination routes
+        here through ``_finalize()`` — a clean hangup, Twilio's ``stop``, the
+        watchdog's idle/max-duration close, a disabled/capacity decline, the
+        post-transfer close — so an abnormal drop gets the IDENTICAL recording and
+        waveform write a clean hangup gets. There is no separate "abnormal path" to
+        harden because there is no separate path; that is the whole design.
+
+        The consent gate is STRUCTURAL: ``should_record`` decides both whether a
+        recording path is produced AND what ``consent_basis`` says, in one
+        ``save()``, so no code path can persist a ``recording_blob`` without the
+        basis that justified it landing in the same write — the application-level
+        rule the model's own docstring asks for (a JSON sub-key CheckConstraint is
+        not portable across MySQL and SQLite).
+        """
         reason = self.state.ended_reason or 'hangup'
         status = _STATUS_BY_REASON.get(reason, CallSession.STATUS_COMPLETED)
+        should_record = self.state.should_record
         with transaction.atomic():
             cs = (
                 CallSession.objects.select_for_update()
@@ -915,5 +1017,26 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             cs.ended_at = timezone.now()
             metadata = dict(cs.metadata or {})
             metadata['ended_reason'] = reason
+            metadata['recorded'] = should_record
+            metadata['consent_basis'] = self.state.consent_basis or CONSENT_NOT_RECORDED
+            metadata['consent_announced'] = self.state.consent_announced
+            metadata['retention_days'] = (
+                settings.RECORDING_RETENTION_DAYS if should_record else 0)
             cs.metadata = metadata
-            cs.save(update_fields=['status', 'ended_at', 'metadata', 'updated_at'])
+            # A recorder failure must not strand the row in_progress — the status
+            # stamp below matters more than the audio. Log the TYPE only: a storage
+            # error's text carries the path, which embeds tenant and call ids.
+            if should_record:
+                try:
+                    cs.recording_blob = get_recording_backend().finalize(
+                        cs, should_record=True)
+                except Exception as exc:  # noqa: BLE001 — teardown must still land
+                    logger.error('recording finalize failed (%s)', type(exc).__name__)
+                    cs.recording_blob = ''
+                    metadata['recorded'] = False
+                    cs.metadata = metadata
+                # Peaks are derived from LIVE per-frame DSP, not from the stored
+                # audio, so they are genuinely partial-but-real on an early drop.
+                cs.waveform_peaks = self.waveform.finalize()
+            cs.save(update_fields=['status', 'ended_at', 'metadata',
+                                   'recording_blob', 'waveform_peaks', 'updated_at'])
