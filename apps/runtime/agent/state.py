@@ -24,7 +24,33 @@ from dataclasses import dataclass, field
 
 from django.utils import timezone
 
-__all__ = ['CallState']
+from apps.runtime.agent.consent import CONSENT_NOT_RECORDED, CONSENT_TWO_PARTY
+
+__all__ = ['CallState', 'ENDED_REASON_DISPLAY', 'ENDED_REASON_KEYS']
+
+#: The closed set of ended-reason codes, with a staff-facing label and a
+#: ``theme.css`` badge class for 3.5's diagnostics tally. Display order is
+#: rough frequency order — the ordinary endings first, the failures last.
+#:
+#: This is the SHARED vocabulary: the consumer's ``_STATUS_BY_REASON`` maps the
+#: same keys to a terminal ``CallSession.status`` (a different concern — one is
+#: "why did it end", the other "what does the row read as"), and a test asserts
+#: the two key sets are identical. Without that, a ninth reason string typo'd into
+#: ``ended_reason`` would fall through ``_STATUS_BY_REASON``'s default AND vanish
+#: from the tally, silently, on both sides at once.
+ENDED_REASON_DISPLAY = [
+    ('hangup', 'Caller hung up', 'badge-slate'),
+    ('end_call', 'Agent ended the call', 'badge-green'),
+    ('transferred', 'Transferred', 'badge-info'),
+    ('idle_timeout', 'Idle timeout', 'badge-muted'),
+    ('max_duration', 'Max duration reached', 'badge-amber'),
+    ('capacity', 'Declined — at capacity', 'badge-red'),
+    ('disabled', 'Declined — number disabled', 'badge-red'),
+    ('error', 'Runtime error', 'badge-red'),
+]
+
+#: Just the keys, for membership checks and the drift guard.
+ENDED_REASON_KEYS = frozenset(key for key, _label, _badge in ENDED_REASON_DISPLAY)
 
 
 @dataclass
@@ -79,9 +105,22 @@ class CallState:
     #: handles the hangup, which needs no REST call.
     pending_transfer: str = None
     pending_hangup: bool = False
-    #: Why the call ended, stamped at teardown ('hangup', 'idle_timeout',
-    #: 'max_duration', 'error') — the seed of 3.5's ended-reason diagnostics.
+    #: Why the call ended, stamped at teardown — one of ENDED_REASON_DISPLAY's
+    #: keys, which 3.5's diagnostics tally reads back off the finalized row.
     ended_reason: str = None
+    #: 3.5 recording consent. Resolved ONCE at authorization from the location's
+    #: jurisdiction (`agent.consent.resolve_consent`) and never recomputed
+    #: mid-call — the policy that applies is the policy at the time of the call,
+    #: which is exactly why CallSession stores it per row. None means consent was
+    #: never resolved at all (a declined call), which finalize records as
+    #: `not_recorded` rather than leaving the key absent.
+    consent_basis: str = None
+    #: Whether the two-party announcement actually PLAYED. Deliberately separate
+    #: from `consent_basis`: the basis is what the jurisdiction requires, this is
+    #: what the caller really heard, and a TTS failure makes them differ. Recording
+    #: the difference honestly is the point — a row claiming an announcement that
+    #: never played would be worse than no claim at all.
+    consent_announced: bool = False
     #: Call start, read from CallSession.started_at, used for transcript offsets.
     started_at: object = None
 
@@ -91,6 +130,31 @@ class CallState:
     #: call instead. init=False — internal, not a constructor argument.
     _transcript_seq: int = field(default=0, init=False)
     _log_seq: int = field(default=0, init=False)
+
+    # -- derived ------------------------------------------------------------ #
+
+    @property
+    def requires_announcement(self):
+        """Whether this call owes the caller a spoken recording notice.
+
+        DERIVED from ``consent_basis`` rather than stored as a third flag: two
+        booleans describing one policy are two things that can drift apart, and
+        the one that matters (did we announce?) is already
+        ``consent_announced``.
+        """
+        return self.consent_basis == CONSENT_TWO_PARTY
+
+    @property
+    def should_record(self):
+        """Whether a recording may be persisted for this call.
+
+        The structural half of the model's own rule that a non-empty
+        ``recording_blob`` REQUIRES a resolved consent basis: finalize computes
+        the recording path and the ``consent_basis`` metadata key from THIS one
+        boolean, in one ``save()``, so no code path can write a recording without
+        the basis that justified it landing in the same write.
+        """
+        return bool(self.consent_basis) and self.consent_basis != CONSENT_NOT_RECORDED
 
     # -- buffer helpers (in-memory only; no ORM) ---------------------------- #
 
