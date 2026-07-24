@@ -86,6 +86,13 @@ LIVE_LINKS = {
     # (category='tool'), which the call detail page 5.1's 'Call Logs' link already
     # reaches renders through 5.3's event-log surface.
     '3.3': {},
+    # BUILT, empty for the same reason as 3.2/3.3: transfer execution is transport
+    # behaviour, not a page. 3.4's visible output is the transfer outcome it writes
+    # into CallSession.transfer (rendered by 5.4's transfer-outcome card on the call
+    # detail page), plus a transfer-outcome summary added to 3.1's diagnostics page
+    # and the `simulate_call --script transfer` command. Pointing this at
+    # runtime:diagnostics would just duplicate 3.1's row.
+    '3.4': {},
     '4.1': {'Contacts': 'scheduling:contact_list'},
     '4.2': {'Services': 'scheduling:service_list',
             'Resources': 'scheduling:resource_list'},
