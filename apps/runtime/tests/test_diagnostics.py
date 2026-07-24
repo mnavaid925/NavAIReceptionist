@@ -12,6 +12,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.db.models import Count, Q
 from django.test import Client, RequestFactory
 from django.urls import reverse
+from django.utils import timezone
 
 from apps.agents.models import AgentSetting
 from apps.calls.models import CallSession
@@ -289,3 +290,37 @@ def test_diagnostics_view_direct_call_query_count_bounded(
         response = runtime_diagnostics_view(request)
 
     assert response.status_code == 200
+
+
+def test_diagnostics_spend_query_does_not_pull_the_big_json_columns(
+    tenant_a, location_a1, admin_user, make_agent_setting,
+):
+    """The spend-today query is the ONE read on this page with no row cap.
+
+    It is narrowed instead — `only('pk', 'usage')` — because `total_cost_usd`
+    reads exactly one JSON column, while a full row drags `transcript` and `logs`
+    (the largest columns on the table) along for every call the location took
+    today. A query COUNT assertion cannot catch that regression: widening this
+    back to `SELECT *` keeps the count at 8 and quietly multiplies the bytes. So
+    this asserts on the SQL itself.
+    """
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    make_agent_setting(tenant_a, location_a1)
+    _mk_session(tenant_a, location_a1, 'CA-cost-0001',
+                started_at=timezone.now(),
+                usage=[{'turn_sequence': 1, 'cost_breakdown': {}, 'cost_usd': 0.25}])
+
+    request = _direct_request('/runtime/diagnostics/', admin_user, tenant_a, location_a1)
+    with CaptureQueriesContext(connection) as captured:
+        assert runtime_diagnostics_view(request).status_code == 200
+
+    spend_queries = [
+        entry['sql'] for entry in captured.captured_queries
+        if '"usage"' in entry['sql'] and '"transcript"' not in entry['sql']
+    ]
+    assert spend_queries, 'no narrowed spend query ran — did only() get dropped?'
+    for sql in spend_queries:
+        assert '"logs"' not in sql
+        assert '"analysis"' not in sql
