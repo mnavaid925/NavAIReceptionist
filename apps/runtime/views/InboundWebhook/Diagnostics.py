@@ -176,10 +176,18 @@ def runtime_diagnostics_view(request):
         for key, label, badge in _TRANSFER_RESULT_DISPLAY if result_counts.get(key)
     ]
 
+    # `location_sessions` is the ONE audited scoping surface, so 3.5's reads go
+    # through it too — but it prefetches `booked_appointments__service` for the
+    # call-log list, and nothing on this page renders a booking. `prefetch_related(
+    # None)` drops that per-query cost while keeping the tenant+location filter
+    # exactly as audited; forking a second filtered queryset to save a query would
+    # be a second place for a cross-location leak to hide.
+    diagnostic = scoped.prefetch_related(None)
+
     # 3.5's three panels share ONE bounded read. These rows carry `logs`, the
     # largest JSON column on the table, so this is materialized once and passed to
     # each pass rather than re-queried three times for what is one sample.
-    recent = list(scoped.order_by('-created_at')[:_DIAGNOSTICS_SAMPLE_LIMIT])
+    recent = list(diagnostic.order_by('-created_at')[:_DIAGNOSTICS_SAMPLE_LIMIT])
 
     reason_counts = Counter(
         (session.metadata or {}).get('ended_reason')
@@ -202,7 +210,7 @@ def runtime_diagnostics_view(request):
         midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         total_cost_today = sum(
             session.total_cost_usd
-            for session in scoped.filter(started_at__gte=midnight)
+            for session in diagnostic.filter(started_at__gte=midnight)
         )
 
     # The URL Twilio must POST the inbound call to. Built from the public tunnel
