@@ -34,8 +34,9 @@ __all__ = ['CallState', 'ENDED_REASON_DISPLAY', 'ENDED_REASON_KEYS']
 #:
 #: This is the SHARED vocabulary: the consumer's ``_STATUS_BY_REASON`` maps the
 #: same keys to a terminal ``CallSession.status`` (a different concern — one is
-#: "why did it end", the other "what does the row read as"), and a test asserts
-#: the two key sets are identical. Without that, a ninth reason string typo'd into
+#: "why did it end", the other "what does the row read as"), and
+#: ``test_call_state.test_ended_reason_vocabulary_matches_the_consumer_status_map``
+#: asserts the two key sets are identical. Without that, a ninth reason typo'd into
 #: ``ended_reason`` would fall through ``_STATUS_BY_REASON``'s default AND vanish
 #: from the tally, silently, on both sides at once.
 ENDED_REASON_DISPLAY = [
@@ -153,8 +154,21 @@ class CallState:
         the recording path and the ``consent_basis`` metadata key from THIS one
         boolean, in one ``save()``, so no code path can write a recording without
         the basis that justified it landing in the same write.
+
+        **In a two-party jurisdiction the basis is satisfied only once the notice
+        has actually PLAYED.** A resolved basis of ``announced_notice`` is a
+        requirement, not a permission — so if synthesis failed, or the notice was
+        cut short, this returns False and the call is not recorded. The row then
+        says exactly what happened: basis ``announced_notice``, announced False,
+        recorded False. Recording a two-party call whose disclosure never reached
+        the caller is the failure this whole sub-module exists to prevent, and
+        "we resolved that we had to announce" is not a substitute for announcing.
         """
-        return bool(self.consent_basis) and self.consent_basis != CONSENT_NOT_RECORDED
+        if not self.consent_basis or self.consent_basis == CONSENT_NOT_RECORDED:
+            return False
+        if self.consent_basis == CONSENT_TWO_PARTY:
+            return self.consent_announced
+        return True
 
     # -- buffer helpers (in-memory only; no ORM) ---------------------------- #
 
