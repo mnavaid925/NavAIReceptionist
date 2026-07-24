@@ -273,7 +273,13 @@ def _recording_context(obj):
     retention_date = None
     retention_days = metadata.get('retention_days')
     if isinstance(retention_days, int) and retention_days > 0:
-        retention_date = obj.created_at + timedelta(days=retention_days)
+        # Anchored on `started_at`, falling back to `created_at` — the SAME anchor
+        # `runtime.management.commands.purge_expired_recordings._expires_at` uses
+        # to decide when the file actually goes. Two anchors would mean this page
+        # promises a date the job does not honour; for an ordinary call they are
+        # seconds apart, but "seconds apart" is not the same as "the same date".
+        anchor = obj.started_at or obj.created_at
+        retention_date = anchor + timedelta(days=retention_days)
 
     return {
         'recording_url': recording_url,
