@@ -678,7 +678,19 @@ def _get_location_hours(state, args):
 # Handlers — deferred transport signals (no ORM, no side effect here)
 # --------------------------------------------------------------------------- #
 
-def _transfer_eligible(state, destination_field):
+_UNSET = object()
+
+
+def _load_agent_setting(state):
+    """This call's `AgentSetting`, scoped by tenant AND location. None on a miss."""
+    from apps.agents.models import AgentSetting
+
+    return AgentSetting.objects.filter(
+        pk=state.agent_setting_id, tenant_id=state.tenant_id,
+        location_id=state.location_id).first()
+
+
+def _transfer_eligible(state, destination_field, setting=_UNSET):
     """True when this location really has that transfer line configured.
 
     `active_tools()` already withholds the tool at OFFER time, but the dispatcher
@@ -686,39 +698,128 @@ def _transfer_eligible(state, destination_field):
     non-conforming response (or a later refactor that widens what is passed) would
     otherwise set a transfer signal for a location that has transfer switched off
     or no destination. Re-checking here means the only thing that can arm a
-    handoff is the configuration, at the moment of action.
+    handoff is the configuration, at the moment of action. `setting` may be passed
+    pre-fetched so a caller that already loaded the row (3.4's human path, which
+    also needs it for the hours gate) does not query `AgentSetting` twice.
     """
-    from apps.agents.models import AgentSetting
-
-    setting = AgentSetting.objects.filter(
-        pk=state.agent_setting_id, tenant_id=state.tenant_id,
-        location_id=state.location_id).first()
+    if setting is _UNSET:
+        setting = _load_agent_setting(state)
     if setting is None or not setting.transfer_enabled:
         return False
     return bool((getattr(setting, destination_field, '') or '').strip())
 
 
-def _transfer_call(state, args):
-    """Set the deferred human-transfer signal and acknowledge (skill §9).
+def _write_transfer_record(state, tenant, location, record):
+    """Write ONLY the `transfer` column on this call's CallSession, row-locked.
 
-    Sets a flag; it does NOT dial. The working-hours gate, the single-fire guard,
-    the drain interval and the actual Twilio redirect are 3.4's, executed by the
-    transport after this turn's audio has finished playing. The destination is
-    always the configured `AgentSetting.transfer_phone_number` — this tool takes
-    no arguments precisely so nothing the caller says can influence where it goes.
+    Uses the same `select_for_update()`-inside-`atomic()` discipline the consumer's
+    `_flush_buffers`/`_finalize_session` use, and touches no other field — so this
+    off-hours write never races the consumer's transcript/logs/usage flush.
     """
-    if not _transfer_eligible(state, 'transfer_phone_number'):
+    from django.db import transaction
+
+    from apps.calls.models import CallSession
+
+    with transaction.atomic():
+        cs = (
+            CallSession.objects.select_for_update()
+            .filter(pk=state.session_id, tenant=tenant, location=location)
+            .first()
+        )
+        if cs is None:
+            return
+        cs.transfer = record
+        cs.save(update_fields=['transfer', 'updated_at'])
+
+
+def _transfer_offhours_fallback(state, setting):
+    """Gate FAIL for a human transfer: record `off_hours`, log a callback, keep the call.
+
+    Reached only when the line is enabled AND has a destination but the working-hours
+    window is closed (skill §9.2's scope bullet: "falls back to a callback request
+    when closed"). It does NOT arm `pending_transfer`, so the transport never dials;
+    the model speaks accurately from the returned envelope instead of promising a
+    handoff the gate just refused.
+    """
+    from apps.agents import services as agent_services
+    from apps.scheduling.models import CallbackRequest
+
+    from apps.runtime.agent.transfer import RESULT_OFF_HOURS, build_transfer_record
+
+    tenant, location = _scope(state)
+    reopens = agent_services.next_transfer_window(setting) or ''
+
+    _write_transfer_record(state, tenant, location, build_transfer_record(
+        result=RESULT_OFF_HOURS,
+        reason=('Transfer requested outside working hours'
+                + (f'; next opens {reopens}.' if reopens else '.')),
+        destination='',
+        duration_seconds=0,
+    ))
+
+    # Fall back to a callback so the caller's request survives the closed window,
+    # even if the model does not itself call create_callback_request. contact is
+    # None when nobody was identified — Invariant 1 holds, no second identity table.
+    contact = _identified_contact(state, tenant)
+    CallbackRequest.objects.create(
+        tenant=tenant, location=location, contact=contact,
+        caller_name=(contact.display_name if contact else ''),
+        caller_phone=(state.variables or {}).get('from_e164', '') or '',
+        reason='Caller asked to be transferred outside working hours.',
+        status=CallbackRequest.STATUS_PENDING,
+        source=CallbackRequest.SOURCE_AI_PHONE,
+    )
+
+    # A distinct 'transfer'-category log row. This path does NOT go through
+    # apply_tool_call's generic redaction wrapper, so the raw_json is kept
+    # explicitly PII-free here — no caller name, no number (CLAUDE.md rule 5).
+    state.add_log('warning', 'transfer',
+                  'Transfer requested off-hours; callback logged',
+                  {'kind': 'human', 'result': RESULT_OFF_HOURS})
+
+    return ok({'transfer': None, 'status': 'off_hours', 'reopens_at': reopens})
+
+
+def _transfer_call(state, args):
+    """Arm the deferred human transfer, or fall back to a callback when closed (skill §9).
+
+    Gates BEFORE the acknowledgement is spoken, so the tool result the model speaks
+    from is accurate: on a pass it sets a flag (the transport dials after this
+    turn's audio finishes — 3.4's `_execute_transfer`), and off-hours it logs a
+    callback instead of promising a handoff. It never dials here, and the
+    destination is always the configured `AgentSetting.transfer_phone_number` —
+    this tool takes no arguments precisely so nothing the caller says can influence
+    where it goes (Invariant 3).
+    """
+    from apps.agents import services as agent_services
+
+    setting = _load_agent_setting(state)
+    # Not offered / hallucinated / structurally unavailable: refuse with no side
+    # effect. This is NOT the off-hours path — a disabled line or a blank
+    # destination must never be recorded as 'off_hours' or trigger a callback.
+    if not _transfer_eligible(state, 'transfer_phone_number', setting=setting):
         return err('not_permitted', "I'm not able to transfer you right now.")
+
+    # Eligibility already confirmed enabled + destination present, so a False here
+    # can ONLY be the working-hours window closing — the gate this bullet is about.
+    if not agent_services.is_transfer_available(setting):
+        return _transfer_offhours_fallback(state, setting)
+
     state.pending_transfer = 'human'
-    return ok({'transfer': 'human'})
+    return ok({'transfer': 'human', 'status': 'connecting'})
 
 
 def _transfer_call_spanish(state, args):
-    """Same as `_transfer_call`, routed to the configured secondary line."""
+    """Arm the deferred Spanish-line transfer, routed to the secondary number.
+
+    The Spanish line is a separate language line, not the human team, so it is NOT
+    gated on the human-transfer working-hours window (skill §9.2) — only on being
+    configured. Like `_transfer_call` it sets a flag and never dials here.
+    """
     if not _transfer_eligible(state, 'transfer_secondary_number'):
         return err('not_permitted', "I'm not able to transfer you right now.")
     state.pending_transfer = 'spanish'
-    return ok({'transfer': 'spanish'})
+    return ok({'transfer': 'spanish', 'status': 'connecting'})
 
 
 def _end_call(state, args):
