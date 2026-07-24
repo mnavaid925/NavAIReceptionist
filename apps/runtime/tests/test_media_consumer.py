@@ -18,6 +18,8 @@ import pytest
 from channels.layers import get_channel_layer
 
 from apps.calls.models import CallSession
+from apps.calls.storage import recording_exists
+from apps.runtime.agent import CONSENT_ANNOUNCEMENT_LINE
 from apps.runtime.consumers.MediaStreamTurnLoop.MediaStream import (
     MediaStreamConsumer,
     group_name,
@@ -395,3 +397,142 @@ def test_resolve_returns_none_on_any_mismatch(
     consumer = MediaStreamConsumer()
     assert consumer._resolve(tenant_b.pk, location_a1.pk, session.pk) is None
     assert consumer._resolve(tenant_a.pk, location_a1.pk, session.pk + 999999) is None
+
+
+# --------------------------------------------------------------------------- #
+# 3.5 — recording, consent, single-use replay rejection, partial capture
+# --------------------------------------------------------------------------- #
+
+async def test_two_party_location_completed_call_records_with_announcement(
+    tenant_a, location_a1, make_agent_setting, make_call_session,
+):
+    """`location_a1` has a BLANK `state` (root `conftest.py`) — `resolve_consent`
+    treats an unrecognised jurisdiction as two-party (announce), so a completed
+    call there must play the notice, transcript it, and only THEN record."""
+    await amake(make_agent_setting, tenant_a, location_a1)
+    session = await amake(make_call_session, tenant_a, location_a1)
+    token = mint_stream_token(session.pk, session.tenant_id, session.location_id)
+
+    comm = await connect(token, session.pk)
+    await drain(comm)  # greeting + the two-party recording notice
+    await speak_utterance(comm)
+    await drain(comm)
+    await comm.send_json_to({'event': 'stop'})
+    await comm.disconnect()
+
+    session = await arefresh(session)
+    assert session.status != CallSession.STATUS_IN_PROGRESS
+    assert session.metadata['consent_basis'] == 'announced_notice'
+    assert session.metadata['consent_announced'] is True
+    assert session.metadata['recorded'] is True
+
+    consent_turns = [t for t in session.transcript if t['text'] == CONSENT_ANNOUNCEMENT_LINE]
+    assert len(consent_turns) == 1
+
+    assert session.recording_blob
+    assert recording_exists(session.recording_blob) is True
+
+    assert session.waveform_peaks is not None
+    assert session.waveform_peaks['caller']  # the spoken utterance was captured
+    assert session.waveform_peaks['bot']  # greeting + notice + reply
+
+
+async def test_one_party_location_completed_call_records_without_announcement(
+    tenant_a, location_a1, make_agent_setting, make_call_session,
+):
+    """The SAME call shape at a ONE-party jurisdiction: recorded, but with no
+    spoken notice and no consent-line transcript turn at all."""
+    location_a1.state = 'OR'
+    await amake(location_a1.save, update_fields=['state'])
+
+    await amake(make_agent_setting, tenant_a, location_a1)
+    session = await amake(make_call_session, tenant_a, location_a1)
+    token = mint_stream_token(session.pk, session.tenant_id, session.location_id)
+
+    comm = await connect(token, session.pk)
+    await drain(comm)  # greeting only — no notice at a one-party location
+    await speak_utterance(comm)
+    await drain(comm)
+    await comm.send_json_to({'event': 'stop'})
+    await comm.disconnect()
+
+    session = await arefresh(session)
+    assert session.status != CallSession.STATUS_IN_PROGRESS
+    assert session.metadata['consent_basis'] == 'one_party_notice'
+    assert session.metadata['consent_announced'] is False
+    assert session.metadata['recorded'] is True
+
+    consent_turns = [t for t in session.transcript if t['text'] == CONSENT_ANNOUNCEMENT_LINE]
+    assert consent_turns == []
+
+    assert session.recording_blob
+    assert recording_exists(session.recording_blob) is True
+
+
+async def test_replay_same_stream_token_second_socket_rejected_4403_zero_side_effects(
+    tenant_a, location_a1, make_agent_setting, make_call_session,
+):
+    """A second socket presenting the SAME still-valid token must be refused —
+    the single-use claim (3.5) that closes 3.2's tracked replay deferral — and
+    must leave the first stream's row exactly as it was: no second greeting, no
+    extra transcript/log rows, no group re-join."""
+    await amake(make_agent_setting, tenant_a, location_a1)
+    session = await amake(make_call_session, tenant_a, location_a1)
+    token = mint_stream_token(session.pk, session.tenant_id, session.location_id)
+
+    first = await connect(token, session.pk)
+    await drain(first)  # the first stream's greeting has landed and flushed
+
+    baseline = await arefresh(session)
+    baseline_transcript_len = len(baseline.transcript)
+    baseline_logs_len = len(baseline.logs)
+    assert baseline.status == CallSession.STATUS_IN_PROGRESS  # still live
+
+    second = await open_socket()
+    await second.send_json_to({'event': 'start', 'start': {'streamSid': 'MZ2',
+        'customParameters': {'streamToken': token, 'sessionId': str(session.pk)}}})
+    output = await second.receive_output(timeout=1)
+    assert output['type'] == 'websocket.close' and output.get('code') == 4403
+    await second.disconnect()
+
+    after_reject = await arefresh(session)
+    assert after_reject.status == CallSession.STATUS_IN_PROGRESS  # unchanged
+    assert len(after_reject.transcript) == baseline_transcript_len  # no 2nd greeting
+    assert len(after_reject.logs) == baseline_logs_len
+
+    # The first stream is still perfectly usable — the reject did not disturb it.
+    await first.send_json_to({'event': 'stop'})
+    await first.disconnect()
+
+    final = await arefresh(session)
+    assert final.status != CallSession.STATUS_IN_PROGRESS
+    greetings = [t for t in final.transcript if t['role'] == 'assistant']
+    assert len(greetings) >= 1  # exactly the first stream's own turns, nothing doubled
+
+
+async def test_abnormal_drop_without_stop_frame_still_finalizes_with_partial_waveform(
+    tenant_a, location_a1, make_agent_setting, make_call_session,
+):
+    """A bare `disconnect()` with no Twilio `stop` frame — the ordinary shape of a
+    real carrier hangup — must still run the ONE guaranteed-teardown path: a
+    terminal status, and REAL (if short) waveform peaks from whatever audio
+    actually played before the drop, not a null/empty placeholder."""
+    await amake(make_agent_setting, tenant_a, location_a1)
+    session = await amake(make_call_session, tenant_a, location_a1)
+    token = mint_stream_token(session.pk, session.tenant_id, session.location_id)
+
+    comm = await connect(token, session.pk)
+    await drain(comm)  # greeting (+ the two-party notice) plays before the drop
+    await comm.disconnect()  # abnormal drop: no 'stop' event ever sent
+
+    session = await arefresh(session)
+    assert session.status != CallSession.STATUS_IN_PROGRESS
+    assert session.ended_at is not None
+    assert session.metadata.get('ended_reason') == 'hangup'
+
+    assert session.waveform_peaks is not None
+    assert session.waveform_peaks['bins'] > 0
+    assert session.waveform_peaks['bot']  # the greeting's audio was captured
+    # No caller speech was ever sent before the drop — a short, real, un-padded
+    # capture, not a fabricated one.
+    assert session.waveform_peaks['caller'] == []
