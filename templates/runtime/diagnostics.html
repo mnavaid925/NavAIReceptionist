@@ -44,7 +44,7 @@
   {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Runtime diagnostics are scoped to one location. Pick an active location to see how its inbound calls are being resolved." %}
 {% else %}
 
-  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
     <div class="stat-card">
       <span class="stat-icon blue" aria-hidden="true"><i data-lucide="radio"></i></span>
       <div class="stat-value">{{ stats.active }}</div>
