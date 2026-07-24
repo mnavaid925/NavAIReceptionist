@@ -42,6 +42,9 @@ __all__ = [
     'iter_mulaw_frames',
     'frame_energy',
     'PlaybackTracker',
+    'WAVEFORM_TARGET_BINS',
+    'WAVEFORM_ENERGY_CEILING',
+    'WaveformAccumulator',
 ]
 
 #: The carrier (Twilio) leg is always 8 kHz μ-law mono, 20 ms/160-byte frames.
@@ -166,9 +169,9 @@ class PlaybackTracker:
 
     Barge-in cancels the outbound task mid-blob, so the agent channel of a
     recording must reflect only the frames that really went out, not the whole
-    synthesized reply (skill §4). 3.2 only *tracks* this — the trimmed audio is
-    persisted into ``CallSession.recording_blob`` by 3.5. Kept here so the number
-    is correct from the first frame this sub-module ever sends.
+    synthesized reply (skill §4). 3.2 only *tracks* this; 3.5 acts on it — its
+    :class:`WaveformAccumulator` is fed from the same per-frame call site, so the
+    agent lane of the waveform is barge-in-accurate for free.
     """
 
     def __init__(self, sample_rate=CARRIER_SAMPLE_RATE, width=SAMPLE_WIDTH):
@@ -187,3 +190,87 @@ class PlaybackTracker:
         """Seconds of audio actually sent — bytes / (rate * width)."""
         denom = self.sample_rate * self.width
         return self.bytes_sent / denom if denom else 0.0
+
+
+#: How many buckets a finished channel is reduced to. Sized for the call-detail
+#: waveform lane (``templates/partials/_audio_player.html``), which renders one
+#: ``<span>`` per peak — enough bars to read as a shape, few enough to stay a
+#: small JSON column on a 15-minute call.
+WAVEFORM_TARGET_BINS = 60
+#: The RMS value normalized to 1.0. Deliberately the same amplitude
+#: ``FakeTtsBackend._AMPLITUDE`` and ``simulate_call._TONE_AMPLITUDE`` synthesize
+#: at, so a fake-mode call produces peaks in a realistic 0..1 spread rather than a
+#: flat row of 0.01s that would make the waveform look broken under test.
+WAVEFORM_ENERGY_CEILING = 8000
+
+
+class WaveformAccumulator:
+    """Accumulates per-frame energy for both channels, binned at teardown (3.5).
+
+    One instance per CALL, not per playback — unlike :class:`PlaybackTracker`,
+    which the consumer recreates for each blob. The waveform spans the whole
+    conversation, so a per-turn instance would silently keep only the last reply.
+
+    Two independent channels:
+
+    * **caller** — every inbound 20 ms frame, unconditionally. Twilio's ``media``
+      event carries only the caller's leg, so there is no agent echo to filter.
+    * **bot** — only frames :meth:`PlaybackTracker.mark`'s call site actually put
+      on the wire. A barge-in cancels playback mid-blob, and the agent lane must
+      show what a listener really heard, not what was synthesized.
+
+    Pure DSP — no ORM, no I/O, no clock — so it is safe to call from the event
+    loop on every frame, and testable without a call.
+    """
+
+    def __init__(self, target_bins=WAVEFORM_TARGET_BINS, ceiling=WAVEFORM_ENERGY_CEILING):
+        self.target_bins = max(1, int(target_bins))
+        self.ceiling = ceiling or WAVEFORM_ENERGY_CEILING
+        self._caller = []
+        self._bot = []
+
+    def add_caller_frame(self, pcm16_bytes):
+        """Record one inbound PCM16 frame's energy (already μ-law-decoded)."""
+        if pcm16_bytes:
+            self._caller.append(frame_energy(pcm16_bytes))
+
+    def add_bot_frame(self, mulaw_frame_bytes):
+        """Record one outbound μ-law frame's energy — call once per frame SENT."""
+        if mulaw_frame_bytes:
+            self._bot.append(frame_energy(mulaw_to_pcm16(mulaw_frame_bytes)))
+
+    def _bin(self, energies):
+        """Reduce one channel's per-frame energies to normalized 0..1 buckets.
+
+        At most ``target_bins`` buckets, and FEWER on a short call — never padded
+        with zeros, because a zero is a real value here (silence) and inventing
+        one would draw silence the call never contained. Buckets are averaged, not
+        peak-picked, so a single loud frame cannot dominate a bar.
+        """
+        if not energies:
+            return []
+        bins = min(self.target_bins, len(energies))
+        out = []
+        for index in range(bins):
+            chunk = energies[index * len(energies) // bins:
+                             (index + 1) * len(energies) // bins]
+            if not chunk:
+                continue
+            level = (sum(chunk) / len(chunk)) / self.ceiling
+            out.append(round(min(1.0, max(0.0, level)), 2))
+        return out
+
+    def finalize(self):
+        """``{'caller': [...], 'bot': [...], 'bins': N}``, or None if nothing ran.
+
+        ``None`` — not an empty dict — when neither channel captured a single
+        frame, matching ``CallSession.waveform_peaks``'s own contract that absent
+        means "never computed", which is not the same claim as a silent call.
+        ``bins`` is the wider of the two lanes: the reader draws each list
+        independently, so it is the rendered width, not a shared time axis.
+        """
+        caller = self._bin(self._caller)
+        bot = self._bin(self._bot)
+        if not caller and not bot:
+            return None
+        return {'caller': caller, 'bot': bot, 'bins': max(len(caller), len(bot))}
