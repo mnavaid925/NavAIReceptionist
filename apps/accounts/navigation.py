@@ -93,6 +93,14 @@ LIVE_LINKS = {
     # and the `simulate_call --script transfer` command. Pointing this at
     # runtime:diagnostics would just duplicate 3.1's row.
     '3.4': {},
+    # BUILT, empty like 3.2/3.3/3.4 — and with this Module 3 is complete. 3.5
+    # EXTENDS the diagnostics page 3.1 already links (ended-reason tally, per-stage
+    # latency, recent errors, spend today) rather than adding a page of its own;
+    # its other surfaces — the consent-gated recorder inside the consumer's
+    # teardown and the `purge_expired_recordings` retention command — are not
+    # pages a signed-in user navigates to. Pointing this at runtime:diagnostics
+    # would just duplicate 3.1's row.
+    '3.5': {},
     '4.1': {'Contacts': 'scheduling:contact_list'},
     '4.2': {'Services': 'scheduling:service_list',
             'Resources': 'scheduling:resource_list'},
