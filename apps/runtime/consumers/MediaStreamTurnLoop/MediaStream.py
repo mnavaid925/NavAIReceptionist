@@ -548,7 +548,50 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         except Exception as exc:  # noqa: BLE001 — an armed transfer MUST still end the call
             logger.error('transfer execution failed (%s)', type(exc).__name__)
             record = build_transfer_record(result=RESULT_FAILED, reason=reason)
+        if record.get('result') == RESULT_FAILED:
+            # NEVER dead air (CLAUDE.md realtime rule 4): the caller already heard the
+            # acknowledgement, so a failed redirect must be spoken, not silent — and a
+            # callback is logged so the caller's request survives the failed handoff,
+            # mirroring the off-hours fallback the dispatcher already makes.
+            await self._handle_failed_transfer()
         await self._record_and_end_transfer(record)
+
+    #: Spoken when a transfer was acknowledged but the redirect did not connect —
+    #: keeps the failure from being dead air. A platform constant, never caller text.
+    _TRANSFER_FAILED_LINE = ("I'm sorry, I wasn't able to connect you just now. "
+                             "I've made a note for someone to call you back.")
+
+    async def _handle_failed_transfer(self):
+        """Log a callback and speak an apology after a redirect fails to connect."""
+        try:
+            await database_sync_to_async(
+                self._log_failed_transfer_callback, thread_sensitive=False)()
+        except Exception as exc:  # noqa: BLE001 — the apology still matters if this fails
+            logger.error('failed-transfer callback write failed (%s)', type(exc).__name__)
+        try:
+            pcm, rate = await self.providers.tts.synthesize(self._TRANSFER_FAILED_LINE)
+            self.state.add_transcript('assistant', self._TRANSFER_FAILED_LINE)
+            await self._play(pcm16_to_carrier_mulaw(pcm, rate), interruptible=False)
+        except Exception:  # noqa: BLE001 — TTS may be the thing that broke; never crash teardown
+            logger.exception('failed-transfer apology could not be spoken')
+
+    def _log_failed_transfer_callback(self):
+        """Sync: a CallbackRequest for a caller whose transfer failed to connect."""
+        from apps.scheduling.models import CallbackRequest, Contact
+
+        contact = None
+        if self.state.contact_id:
+            contact = Contact.objects.filter(
+                pk=self.state.contact_id, tenant_id=self.state.tenant_id).first()
+        CallbackRequest.objects.create(
+            tenant_id=self.state.tenant_id, location_id=self.state.location_id,
+            contact=contact,
+            caller_name=(contact.display_name if contact else ''),
+            caller_phone=(self.state.variables or {}).get('from_e164', '') or '',
+            reason='Transfer to a person failed to connect.',
+            status=CallbackRequest.STATUS_PENDING,
+            source=CallbackRequest.SOURCE_AI_PHONE,
+        )
 
     async def _run_transfer_redirect(self, kind, reason):
         """Do the redirect and return the transfer record — no finalize here."""
@@ -664,8 +707,17 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             await database_sync_to_async(self._stamp_transfer, thread_sensitive=False)(record)
         except Exception as exc:  # noqa: BLE001 — outcome capture must not crash teardown
             logger.error('transfer outcome write failed (%s)', type(exc).__name__)
+        # Flush the transfer log entries explicitly: if a racing stop/disconnect
+        # already ran _finalize() (and its flush), the transfer's own _finalize()
+        # below no-ops, so without this its 'Transfer <result>' log would be stranded
+        # in the buffer. _flush() captures-and-clears synchronously, so a double call
+        # is a safe no-op.
+        await self._flush()
         await self._finalize()
-        await self.close(code=1000)
+        try:
+            await self.close(code=1000)
+        except Exception as exc:  # noqa: BLE001 — the transport may already be gone (race)
+            logger.error('transfer socket close failed (%s)', type(exc).__name__)
 
     async def _play(self, mulaw, *, interruptible):
         """Pace μ-law onto the wire one 20 ms frame at a time (skill §4)."""
@@ -809,7 +861,19 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         # no later path can ever finalize the row and it is stranded `in_progress`
         # with a dead watchdog.
         current = asyncio.current_task()
-        for task in (self.turn_task, self.watchdog_task):
+        # An armed transfer in flight OWNS the turn_task and must run to completion:
+        # it still has to write CallSession.transfer and close the socket itself.
+        # Cancelling it here — when a racing `stop`/`disconnect` finalize arrives from
+        # a DIFFERENT task while `_execute_transfer` is awaiting the drain/redirect —
+        # would deliver CancelledError, a BaseException that skips `_execute_transfer`'s
+        # `except Exception` guard, and the transfer outcome JSON would be lost
+        # entirely, leaving a `transferred` row with an empty transfer panel. So the
+        # transfer task is not cancelled; it no-ops this `_finalize()` when it reaches
+        # its own (`self.finalized` is already True), and closes the socket defensively.
+        cancellable = [self.watchdog_task]
+        if not self._transfer_started:
+            cancellable.append(self.turn_task)
+        for task in cancellable:
             if task is not None and task is not current and not task.done():
                 task.cancel()
 
