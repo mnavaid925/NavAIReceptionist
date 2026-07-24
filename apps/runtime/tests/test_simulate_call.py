@@ -147,3 +147,47 @@ def test_script_booking_falls_back_to_chat_with_no_bookable_service(
     assert 'falling back to --script chat' in text, text
     assert 'Simulating a chat call' in text, text
     assert Appointment.objects.count() == 0
+
+
+# --------------------------------------------------------------------------- #
+# --script transfer — sub-module 3.4's deferred human handoff, driven through
+# the real command (guards the qa-smoke bug that was just fixed: the consumer
+# self-closes the socket after the redirect, so `_drain` must tolerate a
+# `websocket.close` frame instead of asserting only on `websocket.send`).
+# --------------------------------------------------------------------------- #
+
+def test_script_transfer_completes_with_a_transferred_connected_session(
+    tenant_a, location_a1, make_agent_setting,
+):
+    """A transfer-available location (`transfer_enabled` + a destination + no
+    restrictive `transfer_working_hours`) drives `transfer_call` through the
+    REAL consumer to a `transferred` / `connected` session — no carrier, the
+    fake redirect always connects."""
+    make_agent_setting(tenant_a, location_a1,
+                       transfer_enabled=True, transfer_phone_number='+13125550101')
+    text = _run(script='transfer')
+
+    assert 'CallSession SIM-' in text, text
+    status = text.split('status=')[1].split()[0]
+    assert status == CallSession.STATUS_TRANSFERRED, text
+
+    session = CallSession.objects.latest('created_at')
+    assert session.status == CallSession.STATUS_TRANSFERRED
+    assert session.transfer.get('result') == 'connected'
+    assert session.transfer.get('destination') == '+13125550101'
+    assert session.metadata.get('ended_reason') == 'transferred'
+
+
+def test_script_transfer_falls_back_to_chat_with_no_available_transfer_line(
+    tenant_a, location_a1, make_agent_setting,
+):
+    """No location has a usable transfer line -> the command degrades to
+    --script chat rather than reporting a misleading transfer failure."""
+    make_agent_setting(tenant_a, location_a1, transfer_enabled=False)
+    text = _run(script='transfer')
+
+    assert 'falling back to --script chat' in text, text
+    assert 'Simulating a chat call' in text, text
+
+    session = CallSession.objects.latest('created_at')
+    assert session.transfer == {}
