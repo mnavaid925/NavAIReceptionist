@@ -355,6 +355,13 @@ TTS_SAMPLE_RATE = env_int('TTS_SAMPLE_RATE', 24000)
 
 RECORDING_STORAGE_BUCKET = env('RECORDING_STORAGE_BUCKET', 'navai-recordings-dev')
 RECORDING_RETENTION_DAYS = env_int('RECORDING_RETENTION_DAYS', 30)
+# Stamped onto each CallSession at teardown (3.5) and enforced by
+# `manage.py purge_expired_recordings` — per ROW, from the value in force when the
+# call happened, so lowering this never retroactively expires older recordings.
+# 30 days is a dev default, not a compliance position: a deployment handling PHI
+# should raise it via `.env` to a HIPAA-appropriate window (guidance runs to 6+
+# years / ~2190 days). HIPAA's own rule is "have a retention plan", so the number
+# is the operator's to set, not one this code should silently impose.
 # Long enough to outlast the recording it serves. The URL is minted at page load
 # and its clock starts then, not at first play — so a 300s TTL would 404 mid-stream
 # on any recording over ~5 min (calls run to a 15-min hard cap) or one left idle
