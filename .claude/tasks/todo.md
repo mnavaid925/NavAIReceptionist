@@ -5437,3 +5437,393 @@ diagnostics page and a rendered tool-call trace → 3.5; `provider_error`/`rate_
 until a tool calls an external provider; live native-audio tool-calling once `LiveLlmBackend` exists; a
 per-location tool-call rate ceiling (needs an `AgentSetting` field → 2.1). Also carried: a cancelled turn cannot
 stop an in-flight handler thread, so a late write can land with no log entry — documented in `dispatcher.py`.
+
+---
+# Sub-module 3.4 — Transfer Execution (Module 3: Call Runtime, `runtime`) — plan from research-runtime-3.4.md (2026-07-24)
+
+## Shape: SERVICE — zero models, zero migrations attributable to 3.4
+
+Confirmed by grep: `apps/runtime/models/` still does not exist, and `manage.py makemigrations runtime --check`
+must keep reporting "No changes detected" throughout this pass. 3.4 writes into two already-built models it does
+not own — `calls.CallSession.transfer`/`.status` (5.1) and `scheduling.CallbackRequest` (4.5) — and reads two more
+it does not own — `agents.AgentSetting` (2.3) and the pure, hot-path-safe functions in `apps.agents.services`
+(`is_transfer_available`, `next_transfer_window`, `resolve_transfer_number`), confirmed by reading the file: 3.4 is
+their **first caller** under `apps/runtime/`. `apps.runtime.agent.dispatcher._transfer_call`/`_transfer_call_spanish`
+(3.3) already exist and today only call `_transfer_eligible` (enabled + non-blank destination); their own docstring
+says the hours gate, single-fire guard, drain interval and actual Twilio redirect are 3.4's. No twelfth model is
+invented to hit a count target — this pass's build surface is dispatcher gating logic, a deferred-transport branch
+in the consumer, one new provider-adapter method + its fake, and a diagnostics extension.
+
+## Models: NONE — service sub-module. Tables read/written (all pre-existing, re-verified by grep)
+
+- `calls.CallSession` — `apps/calls/models/CallLogList/CallSessions.py` (tenant+location scoped). `.transfer`
+  JSONField already carries the fixed, already-rendered shape `{result, reason, destination, initiated_at,
+  duration_seconds, attempts}` — consumed by `templates/partials/_transfer_outcome.html` (badges on
+  `connected`/`off_hours`/`disabled`/`failed`/`no_answer`, `destination` through the `phone_e164` filter) and
+  populated in `seed_calls.py`. `.status` gains `STATUS_TRANSFERRED` (already declared on the model, in
+  `STATUS_CHOICES`) as a real write target for the first time — `_STATUS_BY_REASON` in `MediaStream.py` currently
+  has no `'transferred'` key, and its own comment says so explicitly.
+- `scheduling.CallbackRequest` — `apps/scheduling/models/CallbackRequests/CallbackRequests.py` (tenant+location
+  scoped; `contact` nullable `SET_NULL`; `source` defaults to `SOURCE_AI_PHONE`). 3.3's `create_callback_request`
+  tool already writes this model directly; 3.4 is a **second, independent, transport-level writer** on the
+  off-hours-gate-fail path — not a new model, not a behavior change to the existing tool.
+- `agents.AgentSetting` — `apps/agents/models/AgentConfiguration/AgentSettings.py` (read-only:
+  `transfer_enabled`, `transfer_phone_number`, `transfer_secondary_number`, `transfer_working_hours`,
+  `transfer_timezone`, `twilio_account_sid`/encrypted `twilio_auth_token`).
+- `apps.agents.services` — `apps/agents/services.py` (pure, no ORM, no network — hot-path safe):
+  `is_transfer_available(setting, now=)`, `next_transfer_window(setting, now=)`,
+  `resolve_transfer_number(setting, target='primary'|'secondary')`. Confirmed: `is_transfer_available` returns
+  `True` when `transfer_working_hours` is an empty/missing dict ("no restriction, always available" — its own
+  docstring), and returns `False` only for disabled/no-destination/outside-window, all three collapsed into one
+  boolean — see the dispatcher gating design below for how 3.4 tells "not offered at all" apart from "genuinely
+  off-hours" without re-implementing the hours logic.
+
+## Backend — `apps/runtime/agent/transfer.py` (NEW — the one source of truth for the record shape)
+
+- [ ] `apps/runtime/agent/transfer.py` (new, pure — no ORM, no Channels import; only `django.utils.timezone` for a
+  default timestamp):
+  - `RESULT_CONNECTED = 'connected'`, `RESULT_NO_ANSWER = 'no_answer'`, `RESULT_OFF_HOURS = 'off_hours'`,
+    `RESULT_DISABLED = 'disabled'`, `RESULT_FAILED = 'failed'`, `RESULT_CHOICES = frozenset({...the five...})` —
+    this is the `CallSession.transfer.result` vocabulary `_transfer_outcome.html` already renders a badge for.
+    **Not the same closed set as the 8 tool-envelope error codes** (`not_found`, `invalid_argument`, …) — keep the
+    two vocabularies visibly separate in the module (different constant names, no shared import), so a future
+    edit cannot accidentally wire one into the other's assertion.
+  - `build_transfer_record(*, result, reason='', destination='', initiated_at=None, duration_seconds=0,
+    attempts=None) -> dict` — asserts `result in RESULT_CHOICES` (loud in dev, per the envelope's own `err()`
+    precedent in `envelope.py`), returns exactly `{result, reason, destination, initiated_at: <isoformat>,
+    duration_seconds}` plus `attempts` only when a caller supplies one (empty/omitted stays out of the dict,
+    matching `seed_calls.py`'s "most rows have no `attempts` key" convention). **This is the ONE function both
+    writers call** — the dispatcher's off-hours-gate-fail path (below) and the consumer's post-redirect
+    outcome-capture path (below) — so the shape can never drift into two ad-hoc dict literals.
+  - `looks_like_e164(value) -> bool` and `looks_like_call_sid(value) -> bool` — pure shape checks run BEFORE
+    either value is interpolated into a REST call / TwiML string (toll-fraud + XML/URL-injection defense,
+    REQUIRED). **Grounded gotcha for the build, not a hypothetical**: `PROVIDER_MODE=fake` never produces a
+    byte-exact Twilio call SID — `simulate_call`'s own `provider_call_sid` is
+    `f'SIM-{uuid.uuid4().hex[:24]}'` (`apps/runtime/management/commands/simulate_call.py:112`) and existing test
+    fixtures use `'CA1'` / `'TURN-1'` / `'PROMPT-1'` (grepped across `apps/runtime/tests/*.py`,
+    `apps/runtime/tests/conftest.py`'s own generator is `f'CA{uuid.uuid4().hex[:30]}'`, itself only
+    *loosely* Twilio-shaped). `looks_like_call_sid` MUST accept these fake/test shapes — implement it as a
+    permissive-but-safe character-class check (e.g. `^[A-Za-z0-9_-]{2,64}$`, blocking `<`, `&`, whitespace and
+    other XML/URL-special characters) rather than Twilio's strict production `^CA[0-9a-f]{32}$` pattern. The
+    job of this check is blocking injection characters from a misconfigured/corrupted value, not authenticating
+    the SID's issuer — a strict production-only pattern would reject every fake/simulated call and make this
+    whole pass untestable under `PROVIDER_MODE=fake`. `looks_like_e164` mirrors
+    `apps.scheduling.services.normalize_e164`'s own shape contract (`+` followed by 7–15 digits) — reuse that
+    module's digit-count constants rather than re-declaring them.
+
+## Backend — dispatcher gating (`apps/runtime/agent/dispatcher.py`, touch)
+
+- [ ] `_transfer_call` (human) — both transfer handlers already run OFF-LOOP via `database_sync_to_async`
+  (`_NO_ORM_TOOLS = frozenset({'end_call'})` does not include the transfer pair, confirmed by reading the file —
+  they are already ORM-capable today via `_transfer_eligible`'s own `AgentSetting` fetch):
+  1. Fetch `setting` once (the existing `AgentSetting.objects.filter(pk=state.agent_setting_id,
+     tenant_id=state.tenant_id, location_id=state.location_id).first()` query `_transfer_eligible` already runs).
+  2. If `setting is None` or `not setting.transfer_enabled` or `transfer_phone_number` is blank → **unchanged**
+     `err('not_permitted', "I'm not able to transfer you right now.")`, no side effect, `state.pending_transfer`
+     untouched — this is the "not offered / hallucinated call" path (`active_tools()` should have withheld the
+     tool already; this is the paranoid re-check 3.3 already documented), and it must NOT create a callback or
+     write `CallSession.transfer` — that would misrepresent a structurally-unavailable line as "off hours".
+  3. Otherwise call `apps.agents.services.is_transfer_available(setting)`. Because step 2 already confirmed
+     enabled+destination, a `False` here can only mean the **working-hours window** is closed — this is how 3.4
+     tells "not offered at all" apart from "genuinely off-hours" without re-implementing
+     `is_transfer_available`'s own hours logic. On `False` (the gate FAIL this scope bullet is about):
+     - Build `transfer.build_transfer_record(result=transfer.RESULT_OFF_HOURS, reason=f"Transfer requested "
+       f"outside working hours; next opens "
+       f"{apps.agents.services.next_transfer_window(setting) or 'unknown'}.", destination='',
+       duration_seconds=0)`.
+     - Write it onto **this call's** `CallSession.transfer` — a `select_for_update()` inside `transaction.atomic()`
+       scoped by `pk=state.session_id, tenant=tenant, location=location` (the same row-lock discipline
+       `_flush_buffers`/`_finalize_session` in `MediaStream.py` already use), `save(update_fields=['transfer',
+       'updated_at'])` — touching ONLY the `transfer` column, never colliding with the consumer's own
+       transcript/logs/usage flush.
+     - Create a `scheduling.CallbackRequest(tenant=tenant, location=location,
+       contact=_identified_contact(state, tenant)` (the existing helper — `None` when nobody was identified,
+       Invariant 1 holds), `caller_phone=(state.variables or {}).get('from_e164', '')`,
+       `reason='Caller asked to be transferred outside working hours.'`, `status=CallbackRequest.STATUS_PENDING,
+       source=CallbackRequest.SOURCE_AI_PHONE)`.
+     - `state.add_log('warning', 'transfer', 'Transfer requested off-hours; callback logged', <redacted>)` —
+       `category='transfer'`, matching `seed_calls.py`'s own crafted off-hours log rows, distinct from the
+       generic `category='tool'` log the bottom of `apply_tool_call` always appends regardless.
+     - Do **NOT** set `state.pending_transfer`.
+     - Return `ok({'transfer': None, 'status': 'off_hours', 'reopens_at':
+       apps.agents.services.next_transfer_window(setting) or ''})` — the model speaks accurately from this
+       envelope ("we're closed, I've logged a callback"), never promising a handoff the gate just refused.
+  4. On gate PASS: `state.pending_transfer = 'human'`; return `ok({'transfer': 'human', 'status':
+     'connecting'})`.
+- [ ] `_transfer_call_spanish` — **unchanged eligibility shape** (`_transfer_eligible(state,
+  'transfer_secondary_number')`), **no hours call at all** — per skill §9.2's separate-language-line rule, the
+  Spanish line is "another agent, not the human team" and bypasses the working-hours gate entirely. On pass:
+  `state.pending_transfer = 'spanish'`; return `ok({'transfer': 'spanish', 'status': 'connecting'})` — the
+  `'status': 'connecting'` key is new on this branch too, for envelope-shape consistency with the human path
+  (a 3.3-era assertion checking only `result['ok']` is unaffected; one asserting the dict's exact keys needs
+  updating — see Verify).
+- [ ] Refactor note (small, additive): give `_transfer_eligible` an optional pre-fetched `setting=` parameter (or
+  add a sibling `_transfer_eligible_setting(setting, destination_field)`) so `_transfer_call`'s human path does
+  not fetch `AgentSetting` twice — once for eligibility, once for `is_transfer_available` — one query, reused.
+- [ ] `apps/runtime/agent/state.py` — **NOT touched.** `pending_transfer: str = None` already exists (3.2/3.3);
+  3.4 needs no new `CallState` field.
+
+## Realtime & agent surface — the deferred-transport branch (`apps/runtime/consumers/MediaStreamTurnLoop/MediaStream.py`, touch)
+
+- [ ] `connect()` — add `self._transfer_started = False` alongside the existing `self.turn_busy = False` /
+  `self.is_playing = False` initialization block. **Transport state, not `CallState`** — matches the established
+  `turn_busy`/`is_playing` split (conversation state lives on `CallState`; transport-only flags live on the
+  consumer instance), per the research's Single-Fire Guard section.
+- [ ] `_run_turn` — after the existing `if self.state.pending_hangup:` block (which already `await
+  self._finalize()` + `await self.close(code=1000)`), add:
+  ```python
+  elif self.state.pending_transfer:
+      if not self._transfer_started:
+          self._transfer_started = True
+          await self._execute_transfer()
+  ```
+  The boolean is set **synchronously, before the `await`** — this is the single-fire guard: a concurrent turn (the
+  queued-utterance drain path 3.2 built) or a redelivered signal must never double-execute the bridge, which
+  would either double-bill the carrier minute or attempt two REST redirects against the same live call SID.
+- [ ] The reply-playback interruptibility kwarg changes from `interruptible=not self.state.pending_hangup` to
+  `interruptible=not (self.state.pending_hangup or self.state.pending_transfer)` — so a caller talking over "I'm
+  connecting you now" cannot barge-in and strand the transfer, the exact rule the existing goodbye-line precedent
+  already applies to `pending_hangup`.
+- [ ] New `async def _execute_transfer(self):`
+  1. `database_sync_to_async` re-fetch `agent_setting`/`call_session` scoped by `tenant_id`/`location_id`/
+     `session_id` (never trusts the objects cached at `connect()`-time without re-confirming they still resolve —
+     the same paranoia `_resolve()` already applies at authorization time).
+  2. `destination = resolve_transfer_number(agent_setting, 'secondary' if self.state.pending_transfer ==
+     'spanish' else 'primary')`; `call_sid = call_session.provider_call_sid`.
+  3. Validate **both** `transfer.looks_like_e164(destination)` and `transfer.looks_like_call_sid(call_sid)`
+     BEFORE any REST interpolation (toll-fraud/injection defense, REQUIRED). On failure: build
+     `transfer.build_transfer_record(result=transfer.RESULT_FAILED, reason='Transfer destination or call '
+     'reference was invalid.', destination=destination)`, write it (step 6 below), skip straight to step 7 — no
+     REST call is ever attempted with an unvalidated value.
+  4. `await asyncio.sleep(settings.TRANSFER_DRAIN_SECONDS)` — drains Twilio's carrier jitter buffer so the
+     handoff line's last word is not clipped (REQUIRED per the research's non-interruptible-handoff-line finding).
+  5. `initiated_at = timezone.now()`; call `await call_bounded(lambda: get_backend().redirect_call(agent_setting,
+     call_sid, destination), timeout=settings.PROVIDER_TIMEOUT_SECONDS, retries=0)` — **`retries=0`, not the
+     default 1**: a redirect is NOT idempotently retryable (a second REST call against an already-redirected
+     `call_sid` risks a second bridge attempt), applying `providers/reliability.py`'s own "timeout is terminal"
+     policy with extra force. The outcome's `.ok` → `result = RESULT_CONNECTED` else `RESULT_FAILED`; any raised
+     exception (timeout, provider error) also maps to `RESULT_FAILED` — log the exception **type only**
+     (`type(exc).__name__`), never `str(exc)` (PII/credential discipline, matching `_flush`'s own precedent).
+  6. Build `transfer.build_transfer_record(result=result, reason=reason_or_blank, destination=destination,
+     initiated_at=initiated_at, duration_seconds=0, attempts=[{'destination': destination, 'result': result}])`
+     and write it onto `CallSession.transfer` via its own `select_for_update()` + `transaction.atomic()` helper,
+     scoped by `pk=state.session_id, tenant_id=, location_id=`, `save(update_fields=['transfer', 'updated_at'])` —
+     a SEPARATE write from step 7's status stamp, never combined into one `save()` call, so a `_finalize()`
+     failure can never silently drop a transfer outcome that already landed.
+  7. `self.state.ended_reason = 'transferred'` (set regardless of `result` — a failed redirect still ends the
+     call; the media stream leaves this consumer's control either way, and `result` is what tells a reader
+     whether the human actually answered); `await self._finalize()`; `await self.close(code=1000)`.
+- [ ] `_STATUS_BY_REASON` gains `'transferred': CallSession.STATUS_TRANSFERRED` — exactly where `MediaStream.py`'s
+  own comment already anticipates it (*"'transferred' is 3.4's to set and is deliberately absent here"*).
+  `_finalize_session()`'s existing `if cs.status != STATUS_IN_PROGRESS: return` guard (already written
+  anticipating 3.4) means the transfer-JSON write (step 6, its own earlier save) and the status/`ended_at` stamp
+  (via the unmodified `_finalize()` → `_finalize_session()` path) stay two distinct, sequential writes to the
+  same row.
+- [ ] `apps/runtime/agent/__init__.py` — re-export `build_transfer_record`, `looks_like_e164`,
+  `looks_like_call_sid`, and the five `RESULT_*` constants (from `transfer.py`), alongside the existing 3.2/3.3
+  exports.
+
+## Provider adapter (`apps/runtime/providers/telephony.py`, touch) — `get_backend()` + `redirect_call` + its fake
+
+- [ ] Add `get_backend()` to this module for the first time — its own docstring today explains why it is
+  deliberately absent (*"the real backend handoff … lands with 3.4"*) and `apps.agents.telephony.get_backend()`
+  already import-guards for exactly this name, so **no Module-2 call site changes**.
+- [ ] `class FakeTelephonyBackend(apps.agents.telephony.FakeTelephonyBackend)` — inherits `check_connection`/
+  `place_test_call` **verbatim** (zero Module 2 behavior change), adds `async def redirect_call(self, setting,
+  call_sid, destination)`. Never imports `twilio`, opens no socket — structurally incapable of reaching a
+  carrier, matching the base class's own safety property. Returns a deterministic `TelephonyResult(ok=True,
+  summary='Redirect simulated: connected', mode='fake', data={'call_sid': call_sid, 'destination': destination,
+  'result': 'connected'})` by default, with a class-level scriptable override (e.g. a `script(result)` classmethod
+  setting a class attribute the instance reads) so tests/`simulate_call` can exercise the `'failed'` outcome path
+  deterministically under `PROVIDER_MODE=fake` without a real status-callback webhook.
+- [ ] `class LiveTelephonyBackend(apps.agents.telephony.LiveTelephonyBackend)` — inherits the `__init__` guard
+  (refuses to initialize outside `PROVIDER_MODE == 'live'`) and `_client(setting)` verbatim, adds `async def
+  redirect_call(self, setting, call_sid, destination)`. The Twilio SDK call
+  (`client.calls(call_sid).update(twiml=f'<Response><Dial answerOnBridge="true" '
+  f'timeout="25">{destination}</Dial></Response>')`) is **synchronous** — wrap it in `asyncio.to_thread(...)`,
+  never call it bare inside this `async def` (CLAUDE.md realtime rule 1: no blocking SDK call on the event loop —
+  a blocking call here freezes audio for every concurrent call on the worker, not just this one). 2xx →
+  `TelephonyResult(ok=True, ...)`; any exception → log the exception **type only**, `TelephonyResult(ok=False,
+  ...)`, never echo the provider's exception text (it can carry the SID/request body).
+- [ ] `def get_backend() -> BaseTelephonyBackend` — `PROVIDER_MODE == 'live'` → `LiveTelephonyBackend()`; anything
+  else → `FakeTelephonyBackend()` — mirrors `apps.agents.telephony.get_backend()`'s own fail-safe-toward-fake
+  posture exactly.
+- [ ] `apps/runtime/providers/__init__.py` — update the module docstring's forward-reference line (currently
+  *"arrive with 3.4; the 12-tool dispatcher with 3.3"*) to reflect that `telephony.get_backend`/`.redirect_call`
+  now exist.
+
+## Prompt / variables
+
+- [ ] **None new this pass.** No new `{{variable}}` is added to the runtime var set; the off-hours envelope's
+  `reopens_at` is tool-response data (spoken by the model from the tool result), not a prompt variable. The prompt
+  continues to name no tool and no tool parameter.
+
+## CallSession.usage cost lines
+
+- [ ] **None new this pass.** A Twilio REST redirect is not an LLM/STT/TTS turn, so it appends nothing to
+  `usage` — the same reasoning 3.3's tool calls already established (local DB reads/writes append nothing;
+  provider-round-trip turns already account for their own cost via `turn.py`'s existing per-turn append).
+  Metering the bridged call's own carrier-minute cost is explicitly out of scope this pass (see Deferred).
+
+## Wire-up
+
+- [ ] `apps/accounts/navigation.py` — add `'3.4': {}` to `LIVE_LINKS`, same posture as `'3.2'`/`'3.3'`: transfer
+  execution is transport behavior, not a navigable page — its observable surface is the diagnostics extension
+  below and `manage.py simulate_call --script transfer`. One-line comment matching the existing entries' style.
+- [ ] `config/settings.py` — add `TRANSFER_DRAIN_SECONDS = env_float('TRANSFER_DRAIN_SECONDS', 0.6)` (or the
+  project's existing `env_*` helper pattern — match whatever `PROVIDER_TIMEOUT_SECONDS`/`IDLE_TIMEOUT_SECONDS`
+  already use) alongside the other runtime timing constants (~line 389-398) — **do not hardcode `0.6` inline** in
+  `MediaStream.py`.
+- [ ] No `config/urls.py` or `config/asgi.py` change — this pass adds no HTTP route and no websocket route (the
+  optional status-callback webhook, if shipped, is a Should-tier addition — see below).
+
+## Templates
+
+**None new — service sub-module, no CRUD templates.** `templates/partials/_transfer_outcome.html` (5.1/5.4,
+already shipped) needs **zero edits**: it already renders exactly the `result`/`reason`/`destination`/
+`initiated_at`/`duration_seconds`/`attempts` keys this pass writes.
+
+## Observable surface — extend `templates/runtime/diagnostics.html` + `manage.py simulate_call`
+
+- [ ] `apps/runtime/views/InboundWebhook/Diagnostics.py` (touch) — extend the existing `stats` aggregate with
+  `transferred=Count('pk', filter=Q(status=CallSession.STATUS_TRANSFERRED))` (one more `Count(..., filter=...)`
+  term alongside the existing `active`/`total`, same aggregate call, no extra query). Add a small Python-side
+  tally of `transfer.result` values — `Counter(cs.transfer.get('result') for cs in scoped.filter(
+  status=CallSession.STATUS_TRANSFERRED).only('transfer')[:200])` (a JSON-key aggregate is not portably
+  expressible across MySQL/SQLite, so tally in Python over a bounded slice, not in the query) — passed to the
+  template as `transfer_result_counts`.
+- [ ] `templates/runtime/diagnostics.html` (touch) — add a fourth `stat-card` ("Transferred" /
+  `stats.transferred`, an icon consistent with the existing three) to the existing `grid gap-4 sm:grid-cols-2
+  lg:grid-cols-3` row, and a small card in the `<aside>` column listing `transfer_result_counts` per result
+  (badge-per-row using the SAME badge-color map `_transfer_outcome.html` already uses — `connected`→green,
+  `off_hours`→amber, `disabled`→muted, `failed`→red, `no_answer`→amber — do not invent a second color mapping for
+  the same vocabulary). Both reuse the tenant+location-scoped `scoped` queryset the view already builds — no new
+  query pattern introduced.
+- [ ] `apps/runtime/management/commands/simulate_call.py` (touch) — add `'transfer'` to the `--script` choices
+  tuple (currently `('chat', 'booking')`). The scenario resolves an `AgentSetting` with `transfer_enabled=True`,
+  a non-blank `transfer_phone_number`, and **no restrictive `transfer_working_hours`** (empty/missing dict — "no
+  restriction, always available" per `is_transfer_available`'s own contract) — falling back to `--script chat`
+  with a warning when none exists, mirroring the existing `booking` scenario's no-service fallback — so the
+  scripted call is deterministic regardless of the wall-clock hour the command happens to run, never flaky.
+  Scripts `set_fake_script(tool_calls=[[{'name': 'transfer_call', 'args': {}}], []], replies=[...])`; after the
+  run, report the resulting `CallSession.status` and `.transfer` dict alongside the existing transcript/logs/usage
+  output, and `raise CommandError(...)` if `status != CallSession.STATUS_TRANSFERRED` or
+  `transfer.get('result') != 'connected'` (mirroring the booking scenario's own "no appointment produced" hard
+  failure). Still refuses `PROVIDER_MODE=live` outright (unchanged guard).
+
+## Should, not Must this pass — deferred, tracked
+
+- [ ] **Not built this pass** (tracked in Deferred below): the Twilio `<Dial action="...">` status-callback
+  webhook that would correct a provisional "redirect accepted" outcome into a true `connected`/`no_answer`/
+  `failed` result with a real `duration_seconds`. The redirect's own 2xx/timeout/4xx is the provisional
+  outcome-of-record for this pass — clearly a provisional value, not silently treated as ground truth.
+
+## Verify
+
+- [ ] `manage.py makemigrations runtime --check` → "No changes detected" (acceptance criterion, not a formality).
+- [ ] `manage.py makemigrations scheduling|calls --check` → "No changes detected" (this pass writes into existing
+  columns only, no field/model change to either app).
+- [ ] `manage.py migrate` — no-op for all three apps.
+- [ ] `manage.py check` clean.
+- [ ] Assert `PROVIDER_MODE=fake` in `config/settings_test.py` (already pinned) and in the 3.4 test module's own
+  fixture/setup.
+- [ ] `pytest -q apps/runtime` — new/updated tests:
+  - [ ] **Dispatcher gate — open window**: `is_transfer_available`-eligible `AgentSetting` (enabled, destination
+    set, no restrictive hours) → `transfer_call` sets `state.pending_transfer == 'human'`, envelope is
+    `{'ok': True, 'data': {'transfer': 'human', 'status': 'connecting'}, 'error': None}`; zero `CallbackRequest`
+    rows created; `CallSession.transfer` untouched.
+  - [ ] **Dispatcher gate — off-hours**: `AgentSetting` with `transfer_enabled=True`, a non-blank
+    `transfer_phone_number`, and `transfer_working_hours` with every weekday `{'enabled': False}` (deterministic
+    regardless of real wall-clock time, no time-freezing needed) → `transfer_call` returns
+    `{'ok': True, 'data': {'transfer': None, 'status': 'off_hours', 'reopens_at': ''}, 'error': None}`;
+    `state.pending_transfer` stays `None`; exactly one `scheduling.CallbackRequest` row is created (tenant+
+    location scoped, `source='ai_phone'`); `CallSession.transfer.result == 'off_hours'` after a refresh.
+  - [ ] **Dispatcher gate — disabled/no-destination (regression guard)**: the two existing tests
+    (`test_transfer_refuses_when_transfer_is_disabled`, `test_transfer_refuses_when_enabled_but_destination_blank`
+    in `apps/runtime/tests/test_dispatcher.py`) still return `not_permitted` with **zero** `CallbackRequest` rows
+    and **zero** `CallSession.transfer` writes — this is the "not offered at all" path, and it must NOT be folded
+    into the off-hours callback fallback.
+  - [ ] **`transfer_call_spanish` skips the hours gate**: an `AgentSetting` with `transfer_secondary_number` set
+    but every weekday's `transfer_working_hours` disabled still sets `state.pending_transfer == 'spanish'` — the
+    hours restriction (which only ever applies to the primary/human line) must have zero effect on this branch.
+  - [ ] **Consumer transfer smoke** (`channels.testing.WebsocketCommunicator` against `config.asgi.application`,
+    mirroring `test_media_consumer.py`'s existing pattern): a scripted `FakeLlmBackend` call to `transfer_call`
+    during a live simulated call → the reply plays non-interruptible → `_execute_transfer()` runs →
+    `CallSession.status == STATUS_TRANSFERRED` and `CallSession.transfer['result'] == 'connected'` after the
+    socket closes; a second concurrent utterance arriving mid-transfer does not trigger a second
+    `redirect_call` invocation (assert the fake backend's call count is exactly 1 — the single-fire guard).
+  - [ ] **Consumer transfer — provider failure**: the fake backend scripted to return a failed outcome →
+    `CallSession.status == STATUS_TRANSFERRED` still (the call still ends), but
+    `CallSession.transfer['result'] == 'failed'`.
+  - [ ] **Consumer transfer — malformed destination/SID abort**: an `AgentSetting.transfer_phone_number` mangled
+    to a non-E.164 value (or a `CallSession.provider_call_sid` containing an XML-special character) →
+    `_execute_transfer()` never calls `redirect_call` at all (assert zero calls on the fake), writes
+    `transfer['result'] == 'failed'` with the invalid-input reason.
+  - [ ] **`get_backend()` handoff** (per the research's flagged gap): the existing
+    `test_agents_get_backend_still_falls_through_to_fake` and `test_no_get_backend_symbol_yet` assertions in
+    `apps/runtime/tests/test_providers.py` (lines ~69–78) now describe a STALE state once `telephony.get_backend`
+    exists — update or replace them with an assertion that `apps.agents.telephony.get_backend()` now returns an
+    instance of `apps.runtime.providers.telephony.FakeTelephonyBackend` (not `apps.agents.telephony`'s own base
+    class) under `PROVIDER_MODE != 'live'`, proving the delegation actually took effect end to end.
+  - [ ] **Envelope/PII discipline carried over**: `transfer_call`/`transfer_call_spanish` still never dial through
+    the dispatcher path alone (existing 3.3 "transfer tools never dial" test still holds — only
+    `_execute_transfer()`, reached via the consumer's deferred branch, ever calls `redirect_call`); the off-hours
+    log entry's `raw_json` carries no raw caller phone number (masked, matching `_redact_args`'s existing
+    convention) even though this write path is a direct `state.add_log` call, not routed through
+    `apply_tool_call`'s generic redaction wrapper — redact explicitly at the call site.
+  - [ ] `manage.py simulate_call --script transfer` runs to completion under `PROVIDER_MODE=fake` (invoked via
+    `call_command` in a test), exits 0, and leaves `CallSession.status == STATUS_TRANSFERRED` with
+    `transfer['result'] == 'connected'`.
+- [ ] Sidebar: Module 3 still shows Live via `'3.1'`; `'3.4'` present in `LIVE_LINKS` (empty dict, no new row).
+
+## Close-out
+
+- [ ] Review agents in order: code-reviewer → explorer → frontend-reviewer → performance-reviewer →
+  realtime-reviewer (the load-bearing one for this pass — single-fire guard correctness under concurrency,
+  async discipline on the new `LiveTelephonyBackend.redirect_call`'s `asyncio.to_thread` wrap, the two-write
+  sequencing into `CallSession.transfer` vs. `_finalize_session()`) → qa-smoke-tester → security-reviewer
+  (toll-fraud/injection-shape validation on `destination`/`call_sid` before REST interpolation, PII discipline
+  in the off-hours log entry, `retries=0` on the redirect) → test-writer.
+- [ ] **Update** (not re-author) `.claude/skills/runtime/SKILL.md`: flip 3.4's row to **BUILT**, add
+  `agent/transfer.py` to the backend layout tree, add the `redirect_call` adapter method + fake to **Realtime
+  surfaces**/**Tools & prompt surface** as appropriate, note the `CallSession.transfer` two-writer contract
+  (dispatcher off-hours path + consumer execution path, both through `build_transfer_record`) under **Conventions
+  & gotchas**, add `simulate_call --script transfer` under **Common tasks**.
+- [ ] **Update** `.claude/skills/voice-agent-runtime/SKILL.md` §9 (deferred cold transfer) and §12 (adapter shape)
+  to match the AS-BUILT shape rather than the pre-written spec: §9.3's outcome-recording step should read
+  `{result, reason, destination, initiated_at, duration_seconds, attempts}` (matching `CallSessions.py`'s
+  docstring, `_transfer_outcome.html` and `seed_calls.py`) — NOT the skill's original `{outcome, destination_kind,
+  at}` wording, which predates the model's finalized shape and was never the contract two already-shipped
+  sub-modules (5.1, 5.4) actually depend on. §12 should name `telephony.redirect_call(setting, call_sid,
+  destination)` as the as-built signature.
+- [ ] README — note Module 3's fourth sub-module shipped; the call runtime can now execute a human/Spanish-line
+  transfer end to end (hours-gated, single-fire, outcome-captured) or fall back to a logged callback when the
+  line is closed.
+
+## Later passes / deferred
+
+- **The Twilio `<Dial action="...">` status-callback webhook** — needed for a TRUE `connected`/`no_answer`
+  distinction with a real `duration_seconds`; this pass's redirect-accepted/failed outcome is the provisional
+  record. A new small view in `apps/runtime/webhooks.py` + a route in `apps/runtime/urls/InboundWebhook/`,
+  signature-verified against the resolving location's credentials, idempotent on `provider_call_sid`.
+- **Warm-transfer whisper/summary to the human side, three-way conferencing** — a materially larger build (a
+  second call leg, a conference, human detection); this product's own skill spec scopes this pass as cold-only.
+- **SIP REFER as an alternative to the REST `<Dial>` redirect** — needs SIP trunk/SBC infrastructure this
+  product's plain-PSTN-number model doesn't assume.
+- **A true primary→secondary waterfall for the plain human transfer** — blocked on a new `AgentSetting` field;
+  `transfer_secondary_number` is already claimed by `transfer_call_spanish`. `CallSession.transfer.attempts` stays
+  in the shape (a single-entry list this pass) for forward-compatibility only.
+- **Metering the bridged call's own carrier-minute cost** — no existing `usage` line covers post-redirect
+  minutes (the media stream, the thing `usage` is metered against, has already ended once Twilio redirects away
+  from it); flagged for 5.3/cost-reporting awareness, not solved here.
+- **A per-tenant/location transfer rate ceiling** beyond the existing call-duration/tool-iteration bounds — no
+  surveyed competitor documents an equivalent; the existing bounds are the shipped mitigation.
+- **Cross-worker `MAX_CONCURRENT_CALLS` enforcement, token single-use/replay guard** — carried over from 3.2's own
+  deferral, unrelated to transfer but tracked in the same 3.5 worker-health bucket.
+- **The fuller runtime diagnostics rebuild** (per-stage latency, ended-reason codes, live-call count,
+  `waveform_peaks`, consent-gated recording) → 3.5; this pass's diagnostics touch is limited to the
+  transfer-outcome summary named above.
+
+## Review notes
+
+(filled in at the end)
