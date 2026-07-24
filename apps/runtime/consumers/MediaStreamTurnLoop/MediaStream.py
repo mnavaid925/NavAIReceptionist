@@ -535,6 +535,14 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         """
         kind = self.state.pending_transfer
         reason = REASON_BY_KIND.get(kind, 'Transfer requested.')
+        # Stamp the ended-reason SYNCHRONOUSLY, before any await. A real <Dial>
+        # redirect ends the media stream, so Twilio's `stop` frame (or the socket
+        # `disconnect`) can race in WHILE this method is awaiting the drain/redirect;
+        # both those paths finalize with ended_reason='hangup' only when it is still
+        # None. Setting it here first means whichever path wins the _finalize()
+        # stamps the row 'transferred', not 'completed' — the transfer JSON's
+        # `result` still records whether the human actually got it.
+        self.state.ended_reason = 'transferred'
         try:
             record = await self._run_transfer_redirect(kind, reason)
         except Exception as exc:  # noqa: BLE001 — an armed transfer MUST still end the call
@@ -590,10 +598,13 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
         self.state.add_log(
             'info' if result == RESULT_CONNECTED else 'error', 'transfer',
             f'Transfer {result}', {'kind': kind, 'result': result})
+        # No `attempts` list for a single-try transfer — the reader renders the
+        # trail only for 2+ attempts, and the seeder convention is to omit it. A
+        # real primary→secondary waterfall (a deferred pass, needs a new field)
+        # would populate it.
         return build_transfer_record(
             result=result, reason=reason, destination=destination,
-            initiated_at=initiated_at, duration_seconds=0,
-            attempts=[{'destination': destination, 'result': result}])
+            initiated_at=initiated_at, duration_seconds=0)
 
     def _resolve_transfer_target(self, kind):
         """Sync ORM: re-resolve ``(setting, destination, call_sid)`` for the transfer.
@@ -641,18 +652,18 @@ class MediaStreamConsumer(AsyncWebsocketConsumer):
             cs.save(update_fields=['transfer', 'updated_at'])
 
     async def _record_and_end_transfer(self, record):
-        """Persist the transfer outcome, then finalize the call as 'transferred'."""
+        """Persist the transfer outcome, then finalize the call as 'transferred'.
+
+        `ended_reason` was already set to 'transferred' at `_execute_transfer` entry
+        (before any await, to win the finalize race). The `transfer` JSON write here
+        is SEPARATE from `_finalize_session`'s status/ended_at stamp — never one
+        `save()` — so a finalize failure cannot silently drop an outcome that
+        landed, and `_finalize_session`'s `!= IN_PROGRESS` guard leaves it untouched.
+        """
         try:
             await database_sync_to_async(self._stamp_transfer, thread_sensitive=False)(record)
         except Exception as exc:  # noqa: BLE001 — outcome capture must not crash teardown
             logger.error('transfer outcome write failed (%s)', type(exc).__name__)
-        # ended_reason='transferred' regardless of `result` — a failed redirect still
-        # ends the call (the media leg is gone either way); the transfer JSON's
-        # `result` is what tells a reader whether the human actually got it. The
-        # existing _finalize()/_finalize_session() path stamps status via
-        # _STATUS_BY_REASON['transferred'], and its `!= IN_PROGRESS` guard leaves the
-        # separate `transfer` write above untouched.
-        self.state.ended_reason = 'transferred'
         await self._finalize()
         await self.close(code=1000)
 
