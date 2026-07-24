@@ -40,6 +40,7 @@ from django.views.decorators.http import require_POST
 
 from apps.agents.models import AgentSetting
 from apps.calls.models import CallSession
+from apps.runtime.agent.transfer import looks_like_call_sid
 from apps.runtime.providers.telephony import (
     build_decline_twiml,
     build_stream_twiml,
@@ -126,9 +127,19 @@ def voice_webhook(request):
 
     # A genuine Twilio voice request always carries a CallSid; without it there is
     # no idempotency key. Malformed → 400, not a 500 and not a silent write.
-    if not call_sid:
+    #
+    # SHAPE-CHECKED, not merely present: this value is persisted as
+    # `provider_call_sid` and then reused downstream as data in contexts that give
+    # it authority — interpolated into the transfer REST path (3.4) and into the
+    # recording's storage path (3.5, `providers.recording.recording_path_for`). A
+    # SID carrying `../` would write a recording outside its own
+    # `private/calls/{tenant}/{location}/` prefix: `safe_join` only guards the
+    # PRIVATE_MEDIA_ROOT boundary, not the tenant/location partition inside it.
+    # Validating once here, at the point the value enters the system, is what
+    # keeps every later consumer of it safe. A real Twilio SID is `CA` + 32 hex.
+    if not looks_like_call_sid(call_sid):
         logger.info('Inbound webhook rejected (%s).', REASON_MISSING_CALLSID)
-        return HttpResponseBadRequest('Missing CallSid.')
+        return HttpResponseBadRequest('Missing or malformed CallSid.')
 
     # 3. Idempotent create. get_or_create + the unique provider_call_sid lets a
     #    redelivered webhook lose the race and return the existing row unchanged.
