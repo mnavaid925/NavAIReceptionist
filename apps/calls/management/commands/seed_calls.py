@@ -60,6 +60,21 @@ from apps.tenants.models import Location, Tenant
 # the demo data.
 DEMO_TENANT_SLUGS = ['acme', 'globex']
 
+# Terminal status -> the ended-reason the runtime would have stamped. The keys of
+# the values here are `apps.runtime.agent.state.ENDED_REASON_DISPLAY`'s, which is
+# what the diagnostics tally renders; `in_progress` is deliberately absent because
+# a live call has not ended and so has no reason yet.
+#
+# Several reasons map to one status in the real runtime ('hangup', 'max_duration'
+# and 'end_call' all complete a call), so this picks the ORDINARY one for each —
+# a demo row should read as the common case, not the edge.
+_ENDED_REASON_BY_STATUS = {
+    'completed': 'hangup',
+    'abandoned': 'idle_timeout',
+    'transferred': 'transferred',
+    'failed': 'error',
+}
+
 # The number the caller actually DIALLED, per location.
 #
 # Downtown, Uptown and Riverside echo `seed_agents`' `inbound_phone_number` for
@@ -1049,6 +1064,15 @@ class Command(BaseCommand):
             'agent_version': '2026.07.1',
             'provider_mode': 'fake',
         }
+        # `ended_reason` is what 3.5's runtime stamps at teardown and what the
+        # runtime diagnostics "Ended reasons" panel tallies. Seeded here too, or
+        # that panel renders empty on a freshly seeded demo while the real path
+        # populates it — the demo-rows-differ-from-real-rows drift this file's
+        # consent keys already exist to avoid. Derived from the spec's terminal
+        # status, so it can never contradict the row it sits on.
+        ended_reason = _ENDED_REASON_BY_STATUS.get(spec['status'])
+        if ended_reason:
+            metadata['ended_reason'] = ended_reason
         if spec['recorded']:
             metadata.update({
                 'recorded': True,
