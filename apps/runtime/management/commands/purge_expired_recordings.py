@@ -119,17 +119,17 @@ class Command(BaseCommand):
     def _purge(self, session):
         """Delete the file and clear the row. Returns whether the row was cleared.
 
-        The file delete comes FIRST and a missing file is not an error: the point
-        of this job is that the bytes are gone, and a path with nothing behind it
-        (a hand-deleted file, a seeded fiction) has already satisfied that. What
-        must not happen is clearing the row while the file survives — an orphaned
-        recording nothing points at is the one outcome a retention job cannot
-        report on.
+        The file delete comes FIRST: what must not happen is clearing the row
+        while the file survives, because this job walks ROWS — an orphaned
+        recording nothing points at is the one outcome it could never come back
+        for. A row whose delete fails is therefore left intact so the next run
+        retries it, and reported rather than silently counted as purged.
         """
         try:
+            # `FileSystemStorage.delete` already treats a missing file as success,
+            # so a hand-deleted file or a seeded path with nothing behind it needs
+            # no special case here — it has already satisfied "the bytes are gone".
             recording_storage.delete(session.recording_blob)
-        except FileNotFoundError:
-            pass
         except Exception as exc:  # noqa: BLE001 — one bad row must not stop the sweep
             # Type only: a storage error's text carries the path, which embeds the
             # tenant, the location and the call SID.
