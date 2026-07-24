@@ -709,29 +709,6 @@ def _transfer_eligible(state, destination_field, setting=_UNSET):
     return bool((getattr(setting, destination_field, '') or '').strip())
 
 
-def _write_transfer_record(state, tenant, location, record):
-    """Write ONLY the `transfer` column on this call's CallSession, row-locked.
-
-    Uses the same `select_for_update()`-inside-`atomic()` discipline the consumer's
-    `_flush_buffers`/`_finalize_session` use, and touches no other field — so this
-    off-hours write never races the consumer's transcript/logs/usage flush.
-    """
-    from django.db import transaction
-
-    from apps.calls.models import CallSession
-
-    with transaction.atomic():
-        cs = (
-            CallSession.objects.select_for_update()
-            .filter(pk=state.session_id, tenant=tenant, location=location)
-            .first()
-        )
-        if cs is None:
-            return
-        cs.transfer = record
-        cs.save(update_fields=['transfer', 'updated_at'])
-
-
 def _transfer_offhours_fallback(state, setting):
     """Gate FAIL for a human transfer: record `off_hours`, log a callback, keep the call.
 
@@ -740,35 +717,53 @@ def _transfer_offhours_fallback(state, setting):
     when closed"). It does NOT arm `pending_transfer`, so the transport never dials;
     the model speaks accurately from the returned envelope instead of promising a
     handoff the gate just refused.
+
+    Both writes — the `off_hours` record on `CallSession.transfer` and the
+    `CallbackRequest` — go in ONE `transaction.atomic()`. An `off_hours` transfer
+    record implies "a callback was logged", so a partial commit (record written,
+    callback lost to a DB blip) would be a silent integrity gap for exactly the
+    "keep the caller's request alive" promise this fallback exists to make. The
+    `select_for_update()` on the row matches the consumer's own flush discipline,
+    and touches only the `transfer` column so it never races that flush.
     """
+    from django.db import transaction
+
     from apps.agents import services as agent_services
+    from apps.calls.models import CallSession
     from apps.scheduling.models import CallbackRequest
 
     from apps.runtime.agent.transfer import RESULT_OFF_HOURS, build_transfer_record
 
     tenant, location = _scope(state)
     reopens = agent_services.next_transfer_window(setting) or ''
-
-    _write_transfer_record(state, tenant, location, build_transfer_record(
+    # contact is None when nobody was identified — Invariant 1 holds, no second
+    # identity table is invented for an anonymous caller.
+    contact = _identified_contact(state, tenant)
+    record = build_transfer_record(
         result=RESULT_OFF_HOURS,
         reason=('Transfer requested outside working hours'
                 + (f'; next opens {reopens}.' if reopens else '.')),
         destination='',
         duration_seconds=0,
-    ))
-
-    # Fall back to a callback so the caller's request survives the closed window,
-    # even if the model does not itself call create_callback_request. contact is
-    # None when nobody was identified — Invariant 1 holds, no second identity table.
-    contact = _identified_contact(state, tenant)
-    CallbackRequest.objects.create(
-        tenant=tenant, location=location, contact=contact,
-        caller_name=(contact.display_name if contact else ''),
-        caller_phone=(state.variables or {}).get('from_e164', '') or '',
-        reason='Caller asked to be transferred outside working hours.',
-        status=CallbackRequest.STATUS_PENDING,
-        source=CallbackRequest.SOURCE_AI_PHONE,
     )
+
+    with transaction.atomic():
+        cs = (
+            CallSession.objects.select_for_update()
+            .filter(pk=state.session_id, tenant=tenant, location=location)
+            .first()
+        )
+        if cs is not None:
+            cs.transfer = record
+            cs.save(update_fields=['transfer', 'updated_at'])
+        CallbackRequest.objects.create(
+            tenant=tenant, location=location, contact=contact,
+            caller_name=(contact.display_name if contact else ''),
+            caller_phone=(state.variables or {}).get('from_e164', '') or '',
+            reason='Caller asked to be transferred outside working hours.',
+            status=CallbackRequest.STATUS_PENDING,
+            source=CallbackRequest.SOURCE_AI_PHONE,
+        )
 
     # A distinct 'transfer'-category log row. This path does NOT go through
     # apply_tool_call's generic redaction wrapper, so the raw_json is kept
