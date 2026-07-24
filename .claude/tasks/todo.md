@@ -5824,6 +5824,38 @@ already shipped) needs **zero edits**: it already renders exactly the `result`/`
   `waveform_peaks`, consent-gated recording) → 3.5; this pass's diagnostics touch is limited to the
   transfer-outcome summary named above.
 
-## Review notes
+## Review notes — 3.4 build close-out (2026-07-24)
 
-(filled in at the end)
+**Shipped.** Sub-module 3.4, a SERVICE pass — **zero models, zero migrations** (`makemigrations runtime|scheduling|calls
+--check` → "No changes detected"). Repo-wide **1029 tests pass** (+42 new in `apps/runtime/tests/`, 270 in the
+runtime suite); `manage.py check` clean; `LIVE_LINKS['3.4'] = {}` (BUILT, no navigable page — same posture as 3.2/3.3).
+
+**What landed.** The dispatcher hours/target gate in `_transfer_call` (reusing `apps.agents.services`
+`is_transfer_available`/`resolve_transfer_number`/`next_transfer_window` — the **wrap-don't-reinvent** call the
+research made; 3.4 is their first caller under `apps/runtime/`); off-hours → an `off_hours` `CallSession.transfer`
+record + a de-duped `CallbackRequest` in one transaction, no arming; `transfer_call_spanish` skips the hours gate.
+The consumer's deferred `_execute_transfer` (single-fire `_transfer_started`, E.164/SID validation before any REST
+interpolation, `TRANSFER_DRAIN_SECONDS` drain, `call_bounded(retries=0)` around `redirect_call`, outcome →
+`CallSession.transfer` in the 5.4 reader shape, `ended_reason='transferred'`). The `get_backend()`/`redirect_call`
+telephony handoff (runtime backends subclass Module 2's). A diagnostics transfer-outcome summary + `simulate_call
+--script transfer`. One shape builder (`agent/transfer.py:build_transfer_record`) for both writers.
+
+**Review-agent findings applied.** code-reviewer → made the off-hours fallback atomic (transfer record + callback in
+one transaction), documented `RESULT_DISABLED` as declared-but-unwritten, dropped the redundant single-entry
+`attempts` list. explorer → PASS, no gaps. frontend-reviewer → diagnostics stat row `lg:grid-cols-4` (the 4th card
+was wrapping alone). performance-reviewer → no code change (one bounded extra diagnostics query; test-gap handed to
+test-writer). **realtime-reviewer (Critical)** → the finalize race: a racing `stop`/`disconnect` `_finalize()`
+cancelled the in-flight transfer task and `CancelledError` (a BaseException) skipped the outcome write, losing the
+`CallSession.transfer` JSON — fixed by not cancelling the turn_task while `_transfer_started`, flushing the transfer
+log, and defending the close; plus set `ended_reason='transferred'` before any await, and a spoken apology + callback
+on a failed redirect (no dead air). qa-smoke-tester (real bug) → `simulate_call --script transfer` crashed because
+3.4's consumer self-closes the socket; made `_drain` tolerate a `websocket.close` frame. security-reviewer (Low) →
+de-duped the off-hours callback per call via `CallState.offhours_callback_logged`. test-writer → 42 tests including
+the finalize-race regression and the injection-abort. Skills updated: `runtime/SKILL.md` (3.4 BUILT) and
+`voice-agent-runtime/SKILL.md` §9.3/§12/§16 reconciled to the as-built shape.
+
+**Tracked deferrals (carried to 3.5 / later).** The Twilio `<Dial action>` status-callback webhook (so `no_answer`
+is reachable and `duration_seconds` is real — until then a 2xx redirect is a provisional `connected`; the live
+redirect's timeout-vs-outcome ambiguity is tracked here too); warm-transfer whisper / three-way conferencing; SIP
+REFER; a true primary→secondary waterfall (needs a new `AgentSetting` field, a 2.3 call); metering the bridged
+call's carrier-minute cost (5.3); a transfer-specific rate ceiling.
