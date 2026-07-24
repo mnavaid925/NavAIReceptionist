@@ -66,6 +66,12 @@ class CallState:
     #: birth across a 15-minute call. The per-turn tool-iteration cap does not
     #: bound this — it resets every turn.
     search_attempts: int = 0
+    #: Set once the off-hours transfer fallback has logged its CallbackRequest, so a
+    #: model that calls `transfer_call` several times in one call (the tool-iteration
+    #: cap allows up to 4/turn) cannot spam near-duplicate callback rows — the same
+    #: per-call single-fire discipline `search_attempts` and the consumer's
+    #: `_transfer_started` use. 3.4 sets it; nothing else reads it.
+    offhours_callback_logged: bool = False
     #: Deferred transport signals. 3.3's `transfer_call`/`transfer_call_spanish`
     #: and `end_call` tools SET these and return an ack; the transport acts only
     #: after the turn's audio has finished playing (skill §9). 3.4 executes the
