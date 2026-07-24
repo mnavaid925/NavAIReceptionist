@@ -92,10 +92,13 @@ class Command(BaseCommand):
         parser.add_argument('--tenant', help='Tenant slug or customer_id (optional).')
         parser.add_argument('--location', help='Location slug (optional).')
         parser.add_argument(
-            '--script', choices=('chat', 'booking'), default='chat',
+            '--script', choices=('chat', 'booking', 'transfer'), default='chat',
             help="'chat' (default) is one plain conversational turn. 'booking' "
                  "drives a full tool round-trip through the real dispatcher: "
-                 "identify the caller, create them, find slots, book one.",
+                 "identify the caller, create them, find slots, book one. "
+                 "'transfer' scripts a transfer_call and drives 3.4's deferred "
+                 "human handoff through the real consumer to a 'transferred' "
+                 "session (fake redirect, no carrier).",
         )
 
     def handle(self, *args, **options):
@@ -108,6 +111,14 @@ class Command(BaseCommand):
             )
 
         setting = self._resolve_setting(options.get('tenant'), options.get('location'))
+
+        # The transfer scenario needs a location whose transfer line is enabled AND
+        # available right now — resolved BEFORE the session is created, since the
+        # chosen location owns the session. Falls back to 'chat' when none exists.
+        script = options.get('script') or 'chat'
+        if script == 'transfer':
+            setting, script = self._resolve_transfer_setting(setting)
+
         session = CallSession.objects.create(
             provider_call_sid=f'SIM-{uuid.uuid4().hex[:24]}',
             tenant=setting.tenant,
@@ -120,9 +131,10 @@ class Command(BaseCommand):
         )
         token = mint_stream_token(session.pk, session.tenant_id, session.location_id)
 
-        script = options.get('script') or 'chat'
         if script == 'booking':
             script = self._arm_booking_script(setting)
+        elif script == 'transfer':
+            self._arm_transfer_script(setting)
 
         self.stdout.write(
             f'Simulating a {script} call at {setting.location} '
@@ -182,6 +194,52 @@ class Command(BaseCommand):
             ],
         )
         return 'booking'
+
+    def _resolve_transfer_setting(self, setting):
+        """Pick a location whose transfer line is enabled AND available right now.
+
+        Prefers the already-resolved ``setting`` when it qualifies; otherwise
+        searches for any transfer-capable + currently-available one, so the demo
+        does not depend on which location ``_resolve_setting`` happened to pick or
+        on the wall-clock hour. Falls back to ``'chat'`` with a warning when none
+        exists — mirroring the booking scenario's no-service fallback, so a missing
+        prerequisite reports clearly rather than as a misleading transfer failure.
+        """
+        from apps.agents.services import is_transfer_available
+
+        def capable(candidate):
+            return bool(candidate.transfer_enabled and candidate.transfer_phone_number
+                        and is_transfer_available(candidate))
+
+        if capable(setting):
+            return setting, 'transfer'
+        chosen = next(
+            (s for s in AgentSetting.objects.select_related('tenant', 'location').filter(
+                enabled=True, transfer_enabled=True, inbound_phone_number__isnull=False)
+             if capable(s)),
+            None)
+        if chosen is None:
+            self.stdout.write(self.style.WARNING(
+                'No location has an available transfer line right now — falling '
+                'back to --script chat. Enable transfer on a location (with a '
+                'destination number and no restrictive transfer hours) to exercise '
+                'the transfer path.'))
+            return setting, 'chat'
+        return chosen, 'transfer'
+
+    def _arm_transfer_script(self, setting):
+        """Script the fake model to hand off to a person on the first turn.
+
+        One tool round (``transfer_call``) then a plain reply: the dispatcher gates
+        it (open → arms ``pending_transfer``), the consumer plays the
+        acknowledgement and then runs 3.4's ``_execute_transfer``, redirecting
+        through the FAKE telephony backend — no carrier, no credentials.
+        """
+        set_fake_script(
+            replies=['Of course — let me connect you with someone now. One moment.',
+                     'Connecting you now.'],
+            tool_calls=[[{'name': 'transfer_call', 'args': {}}], []],
+        )
 
     def _resolve_setting(self, tenant_hint, location_hint):
         qs = AgentSetting.objects.select_related('tenant', 'location').filter(
@@ -297,6 +355,20 @@ class Command(BaseCommand):
                 # actually persisted, which is the point of showing it.
                 line += f"  ok={raw.get('ok')} args={raw.get('arguments')}"
             self.stdout.write(line)
+
+        if script == 'transfer':
+            self.stdout.write('\n  transfer: '
+                              + json.dumps(session.transfer or {}, indent=2))
+            if session.status != CallSession.STATUS_TRANSFERRED:
+                raise CommandError(
+                    f'Expected a transferred session, got status={session.status}. '
+                    'The deferred transfer branch did not execute — check the '
+                    'transfer log entries above.')
+            if (session.transfer or {}).get('result') != 'connected':
+                raise CommandError(
+                    'The transfer did not connect (result='
+                    f"{(session.transfer or {}).get('result')!r}). The fake redirect "
+                    'should always connect under PROVIDER_MODE=fake.')
 
         if script == 'booking':
             from apps.scheduling.models import Appointment
