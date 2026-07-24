@@ -6304,5 +6304,75 @@ extension.
   with no file behind it) — Module 5's seeder to fix, if ever, not this pass's file to edit; the REAL runtime path
   this pass ships never repeats that gap.
 
-## Review notes
-(filled in at the end)
+## Review notes — 3.5 shipped (2026-07-25)
+
+**Built as planned, with three deliberate departures.** Everything in the plan shipped: `agent/consent.py`,
+`providers/recording.py`, the `WaveformAccumulator`, the five consumer touches, `purge_expired_recordings`, the
+four diagnostics panels, the extended `simulate_call` report and `LIVE_LINKS['3.5'] = {}`. `makemigrations --check`
+reports "No changes detected" — zero models, as the service shape requires. Tests went **1029 → 1113**.
+
+The departures, each from a review finding:
+
+1. **A two-party consent basis is a requirement, not a permission.** The plan's `should_record` was
+   `bool(consent_basis) and != not_recorded`. That would record a two-party call whose notice failed to synthesize —
+   the precise compliance failure this sub-module exists to prevent. `CallState.should_record` now returns False
+   until `consent_announced` is True in a two-party jurisdiction; the row then reads honestly
+   (`basis=announced_notice, announced=False, recorded=False`). This is the single most important change in the pass.
+2. **The recording write moved OUT of `transaction.atomic()`.** The plan put `get_recording_backend().finalize()`
+   inside the `select_for_update()` block, which holds a row lock across file I/O — and would hold it across a
+   network encode/upload once the live backend exists. It now runs before the transaction, with
+   `_discard_recording(blob)` deleting the orphan when the guarded write finds a vanished or already-terminal row.
+   The consent gate is untouched: it is about what lands in the DB write, and the path and its basis still land in
+   one `save()`.
+3. **The stream claim went off-loop after all.** The plan argued `cache.add` was safe to call directly because the
+   backend is `LocMemCache`. True today — but the documented fix for the cross-worker gap is a shared Redis cache,
+   which would have silently turned that line into a network call on every call's authorization path with nothing
+   to catch it. It now goes through `sync_to_async(..., thread_sensitive=False)`: one thread hop per call, correct
+   under any backend. Removing a footgun beats documenting one.
+
+**Two real bugs found outside the plan's scope and fixed:**
+
+- **A path traversal, verified by reproduction (security-reviewer, High).** `provider_call_sid` is provider-supplied
+  text that 3.5 interpolates into a storage path. `safe_join` guards the `PRIVATE_MEDIA_ROOT` boundary but **not**
+  the `private/calls/{tenant}/{location}/` partition inside it, so a `../`-bearing CallSid would have written a
+  recording into another tenant's id space. Fixed at ingestion (`webhooks.py` now shape-checks with the existing
+  `looks_like_call_sid`) and again in `recording_path_for` as defense in depth, with regression tests.
+- **A cross-thread race in the waveform binning (realtime-reviewer, Important).** `finalize()` runs on the teardown
+  worker thread while a cancelled playback can still be appending on the event loop, and `_bin` reads `len()`
+  repeatedly to compute slice boundaries — silently mis-shaping `waveform_peaks` on a mid-turn disconnect. Each lane
+  is now snapshotted with `list()` first, the same discipline `_flush` already uses.
+
+**Three pre-existing defects Module 3's completion exposed, fixed here rather than left:**
+
+- `apps/agents/views/_helpers.py` told staff to paste `/ws/runtime/media/` into Twilio for a route that is really
+  `/ws/media-stream/`, plus a `/runtime/status/` callback that does not exist. Both were string literals written
+  while Module 3 was unbuilt. Now resolved from `reverse()` / `media_stream_ws_url()`; the dead status row is gone.
+- `ui.py`'s `_CONSENT_BASIS_LABELS` mapped `two_party`/`one_party` — strings nothing produces — so a real one-party
+  call would have rendered the raw `one_party_notice` on a compliance badge. The label map now matches the real
+  vocabulary, and a test asserts it covers every `CONSENT_*` constant, because that drift fails silently.
+- `seed_calls` never wrote `metadata['ended_reason']`, so the new ended-reason panel would have read empty on a
+  freshly seeded demo while the real path populated it. Now derived from each spec's terminal status.
+
+**Verified beyond the test suite.** A real call was driven end to end against the seeded MySQL database at an IL
+location (announced, recorded, 60/60 waveform bins, blob with real bytes) and an OR location (one-party, no notice,
+recorded), the retention job was exercised through dry-run → purge → idempotent re-run, and the diagnostics page was
+swept as each tenant admin at each assigned location with cross-tenant and cross-location IDOR checks. The
+qa-smoke-tester's independent pass was 88/88 with no code changes needed. `temp/settings_devsmoke.py` exists because
+`config/settings.py` points `CHANNEL_LAYERS` at Redis, which is not running on this host — it swaps in
+`InMemoryChannelLayer` and changes nothing else.
+
+**Carried forward (unchanged from the deferred list above):** the live recording encode/store, cross-worker
+`MAX_CONCURRENT_CALLS` and stream claim (both need a shared cache this stack has not declared), the `<Dial action>`
+status callback, a per-location record toggle (2.1/2.3's call), a persistent webhook-health log, and LLM-driven
+`CallSession.analysis`. Three more were opened by the reviews and deliberately not taken:
+
+- **`purge_expired_recordings` saves per row rather than `bulk_update`-ing per chunk** (performance-reviewer, Minor).
+  Left as is: the file-delete-then-clear ordering must stay per row — that is the command's whole correctness
+  argument — and it runs offline on a schedule, not on a request.
+- **A caller utterance started in the gap between two back-to-back playbacks is discarded silently** by `_play`'s
+  `reset_listening()` (realtime-reviewer, Minor). Pre-existing to any two consecutive playbacks; 3.5 adds a second
+  occurrence at call open. A fix touches shared 3.2 semantics and wants its own pass.
+- **`_resolve()` raising (rather than returning None) strands a row at `in_progress`** (realtime-reviewer, Minor) —
+  a pre-existing 3.2 gap in the same area.
+
+**Module 3 is complete: 3.1–3.5 all built, and with 4 and 5 already done, all 26 sub-modules are now built.**
