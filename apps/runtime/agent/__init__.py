@@ -8,8 +8,20 @@ which module it lives in. Absolute imports only, per the backend-package rule.
 3.2 shipped the state, the prompt/variable rendering and the turn loop. 3.3 added
 ``tools.py`` (the 12 declarations + per-call ``active_tools``), ``envelope.py``
 (the one ``{ok, data, error}`` result shape and its closed code set) and
-``dispatcher.py`` (``apply_tool_call`` — identity from server state only).
+``dispatcher.py`` (``apply_tool_call`` — identity from server state only). 3.4
+added ``transfer.py`` (the outcome vocabulary and the dialable-value guards). 3.5
+added ``consent.py`` (the location-jurisdiction recording basis and the spoken
+announcement) and the ``ENDED_REASON_DISPLAY`` vocabulary on ``state.py``.
 """
+from apps.runtime.agent.consent import (
+    CONSENT_ANNOUNCEMENT_LINE,
+    CONSENT_NOT_RECORDED,
+    CONSENT_ONE_PARTY,
+    CONSENT_TWO_PARTY,
+    TWO_PARTY_CONSENT_STATES,
+    US_STATE_CODES,
+    resolve_consent,
+)
 from apps.runtime.agent.dispatcher import IDENTITY_KEYS, TOOL_HANDLERS, apply_tool_call
 from apps.runtime.agent.envelope import ERROR_CODES, err, ok
 from apps.runtime.agent.prompt import (
@@ -23,7 +35,11 @@ from apps.runtime.agent.prompt import (
     render_system_prompt,
     render_template,
 )
-from apps.runtime.agent.state import CallState
+from apps.runtime.agent.state import (
+    ENDED_REASON_DISPLAY,
+    ENDED_REASON_KEYS,
+    CallState,
+)
 from apps.runtime.agent.tools import (
     TOOL_DECLARATIONS,
     TOOL_NAMES,
@@ -90,4 +106,14 @@ __all__ = [
     'RESULT_OFF_HOURS',
     'RESULT_DISABLED',
     'RESULT_FAILED',
+    # -- 3.5 recording consent + ended-reason vocabulary ------------------- #
+    'resolve_consent',
+    'CONSENT_TWO_PARTY',
+    'CONSENT_ONE_PARTY',
+    'CONSENT_NOT_RECORDED',
+    'CONSENT_ANNOUNCEMENT_LINE',
+    'TWO_PARTY_CONSENT_STATES',
+    'US_STATE_CODES',
+    'ENDED_REASON_DISPLAY',
+    'ENDED_REASON_KEYS',
 ]
