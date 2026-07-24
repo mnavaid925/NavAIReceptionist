@@ -42,9 +42,12 @@ recording_storage = PrivateRecordingStorage(location=settings.PRIVATE_MEDIA_ROOT
 def recording_exists(path):
     """Whether real bytes sit behind a `recording_blob` path.
 
-    The path is data on a row Module 3 (unbuilt) writes, so it may be empty, or
-    set to a file that a `PROVIDER_MODE=fake` database never actually produced —
-    6 of the 11 seeded rows are exactly that. Never raises: an empty or malformed
+    The path is data on a row Module 3's recorder writes (3.5), so it may be
+    empty, or set to a file that never existed — the 6 seeded rows carrying a
+    fictional path are exactly that, though the REAL runtime path never produces
+    one (`simulate_call` hard-fails a `recorded` row whose blob has no bytes).
+    A purged row is the third case: the retention job clears the path when it
+    deletes the file. Never raises: an empty or malformed
     path is simply "no recording", which is a `False`, not an error, and a
     traversal attempt (`..`) is caught by the containment check rather than
     escaping the private root.
@@ -104,8 +107,9 @@ def recording_size(path):
 def save_recording(name, content):
     """Write a recording through the storage, and return its stored path.
 
-    The paved write path for Module 3's recorder (unbuilt), here now so that
-    module does not reinvent file placement with a raw `open(join(ROOT, name))` and
+    The paved write path for Module 3's recorder — used by
+    `apps.runtime.providers.recording` since 3.5, and written here first so that
+    module did not reinvent file placement with a raw `open(join(ROOT, name))` and
     bypass the one thing that makes writing safe: `FileSystemStorage.save` routes
     through `safe_join`, which raises `SuspiciousFileOperation` on a `..`-escape or
     an absolute path — the write-side mirror of the read-side containment guard in
