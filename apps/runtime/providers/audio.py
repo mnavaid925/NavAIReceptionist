@@ -268,9 +268,19 @@ class WaveformAccumulator:
         means "never computed", which is not the same claim as a silent call.
         ``bins`` is the wider of the two lanes: the reader draws each list
         independently, so it is the rendered width, not a shared time axis.
+
+        **Each channel is snapshotted before binning.** This runs on a worker
+        thread (the consumer's teardown is dispatched through
+        ``database_sync_to_async``), while a cancelled playback still unwinding on
+        the event-loop thread can be appending to the same lists. ``_bin`` reads
+        ``len()`` repeatedly to compute slice boundaries, so a list growing
+        underneath it yields an inconsistently shaped result — silently, since
+        Python slicing never raises. A ``list()`` copy is atomic under the GIL,
+        which is the same discipline the consumer's own ``_flush`` uses when it
+        captures-and-clears its buffers before awaiting.
         """
-        caller = self._bin(self._caller)
-        bot = self._bin(self._bot)
+        caller = self._bin(list(self._caller))
+        bot = self._bin(list(self._bot))
         if not caller and not bot:
             return None
         return {'caller': caller, 'bot': bot, 'bins': max(len(caller), len(bot))}
