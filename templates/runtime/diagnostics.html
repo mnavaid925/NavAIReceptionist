@@ -65,6 +65,12 @@
       <div class="stat-label">Agent status</div>
       <div class="stat-meta">{% if setting.enabled %}Answering enabled{% else %}Answering disabled{% endif %}</div>
     </div>
+    <div class="stat-card">
+      <span class="stat-icon purple" aria-hidden="true"><i data-lucide="phone-forwarded"></i></span>
+      <div class="stat-value">{{ stats.transferred }}</div>
+      <div class="stat-label">Transferred</div>
+      <div class="stat-meta">Handed off to a person</div>
+    </div>
   </div>
 
   <div class="grid gap-4 lg:grid-cols-3" style="margin-top: 16px;">
@@ -144,6 +150,22 @@
           </dl>
         </div>
       </div>
+
+      {% if transfer_outcomes %}
+        <div class="card">
+          <div class="card-header"><span>Transfer outcomes</span></div>
+          <div class="card-body">
+            <ul class="grid gap-2" style="margin: 0; padding: 0; list-style: none;">
+              {% for outcome in transfer_outcomes %}
+                <li class="flex items-center justify-between">
+                  <span class="badge {{ outcome.badge }}">{{ outcome.label }}</span>
+                  <span class="text-sm font-medium">{{ outcome.count }}</span>
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        </div>
+      {% endif %}
 
       {% if readiness_issues %}
         <div class="card">
