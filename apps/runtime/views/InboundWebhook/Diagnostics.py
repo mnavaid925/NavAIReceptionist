@@ -204,13 +204,25 @@ def runtime_diagnostics_view(request):
     # not the server's. `total_cost_usd` is the model's own derived property, so
     # cost is summed from `usage` by the one formula rather than a second one
     # reimplemented here that could drift from the call-detail page's figure.
+    #
+    # This is the one query on the page with no row cap — "today" is however many
+    # calls today had — so it is narrowed instead of bounded: `select_related(None)`
+    # + `only('pk', 'usage')` fetches ONE JSON column rather than the whole row
+    # (which carries `transcript` and `logs`, the largest columns on the table),
+    # and `.iterator()` streams rather than materializing a busy day's worth at
+    # once. `select_related` must be cleared BEFORE `only()` — a deferred field
+    # cannot also be traversed, the same rule the transfer tally above works around.
     total_cost_today = 0.0
     if location is not None:
         local_now = timezone.localtime(timezone.now(), location.tzinfo)  # noqa: F405
         midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
         total_cost_today = sum(
             session.total_cost_usd
-            for session in diagnostic.filter(started_at__gte=midnight)
+            for session in diagnostic
+            .filter(started_at__gte=midnight)
+            .select_related(None)
+            .only('pk', 'usage')
+            .iterator(chunk_size=200)
         )
 
     # The URL Twilio must POST the inbound call to. Built from the public tunnel
