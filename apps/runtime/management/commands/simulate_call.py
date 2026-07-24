@@ -12,6 +12,14 @@ end to end with **zero real credentials and no carrier**: it runs only under a
 non-``live`` ``PROVIDER_MODE`` and refuses ``live`` outright. It never touches the
 telephony redirect/TwiML helpers — only the websocket path — so it places no call.
 
+3.5 added the recording block to the report — the consent basis, whether the
+notice was announced, the retention window and the waveform bin counts — plus a
+hard failure when a row claims a recording that has no bytes behind it. No new
+``--script`` value: consent, recording and waveform are wired into every call's
+authorize/greet/finalize path, so every existing script already exercises them.
+Run it against locations in different states to see both consent branches (the
+seeded Downtown/Uptown are IL — two-party; Riverside/Lakeside are OR/CO).
+
     venv\\Scripts\\python.exe manage.py simulate_call
     venv\\Scripts\\python.exe manage.py simulate_call --tenant acme --location downtown
 """
@@ -359,6 +367,24 @@ class Command(BaseCommand):
         for turn in transcript:
             self.stdout.write(f"    [{turn.get('role')}] {turn.get('text')}")
 
+        # 3.5: what the teardown recorded. Printed for EVERY script, not behind a
+        # flag — consent, recording and waveform are wired into every call's
+        # authorize/greet/finalize path, so there is nothing to opt into.
+        metadata = session.metadata if isinstance(session.metadata, dict) else {}
+        self.stdout.write('\n  recording:')
+        self.stdout.write(f"    recorded          : {metadata.get('recorded')}")
+        self.stdout.write(f"    consent basis     : {metadata.get('consent_basis')}")
+        self.stdout.write(f"    notice announced  : {metadata.get('consent_announced')}")
+        self.stdout.write(f"    retention (days)  : {metadata.get('retention_days')}")
+        self.stdout.write(f"    ended reason      : {metadata.get('ended_reason')}")
+        self.stdout.write(f'    blob              : {session.recording_blob or "—"}')
+        peaks = session.waveform_peaks or {}
+        self.stdout.write(
+            '    waveform          : '
+            + (f"{len(peaks.get('caller') or [])} caller / "
+               f"{len(peaks.get('bot') or [])} agent bins"
+               if peaks else 'not computed'))
+
         usage = session.usage or []
         self.stdout.write(f'\n  usage ({len(usage)} turns): '
                           + json.dumps(usage, indent=2))
@@ -409,3 +435,20 @@ class Command(BaseCommand):
                 'The session is still in_progress after the call — the consumer '
                 'did not finalize it. That is a real defect, not a warning.'
             )
+
+        # 3.5's own hard failure, on every script rather than one opt-in scenario:
+        # a row claiming a recording must have bytes behind it. The seeded demo
+        # data has rows whose `recording_blob` points at nothing (Module 5's
+        # fiction, not this path's); the REAL runtime path must never produce one,
+        # or 5.4's player, its signed serve view and its Range handling are all
+        # untestable against a dev database.
+        if metadata.get('recorded'):
+            from apps.calls.storage import recording_exists
+
+            if not recording_exists(session.recording_blob):
+                raise CommandError(
+                    f'metadata.recorded is True but recording_blob '
+                    f'({session.recording_blob!r}) has no bytes behind it. The '
+                    'recorder did not write through apps.calls.storage — that is a '
+                    'real defect, not a warning.'
+                )
