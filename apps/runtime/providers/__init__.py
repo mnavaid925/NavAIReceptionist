@@ -10,9 +10,11 @@ Flat modules — import each directly (``from apps.runtime.providers.audio impor
 mulaw_to_pcm16``); this package is a namespace, not a re-export surface.
 
 * ``base``        — ``PROVIDER_MODE`` resolution and the fail-safe rule.
-* ``telephony``   — pure, provider-agnostic Twilio helpers: the exact public URL
-  to verify a signature against, signature verification, and the TwiML builders
-  for the media-stream connect and the spoken decline (3.1). **No network.**
+* ``telephony``   — the provider-agnostic Twilio helpers: the exact public URL to
+  verify a signature against, signature verification, and the TwiML builders for
+  the media-stream connect and the spoken decline (3.1, **no network**); plus the
+  transfer backend — ``get_backend()`` and ``redirect_call`` (3.4), the live human
+  handoff that Module 2's ``apps.agents.telephony.get_backend()`` now delegates to.
 * ``tokens``      — the signed, short-TTL, opaque stream token minted into the
   connect TwiML (3.1) and verified by the 3.2 media consumer in the ``start`` frame.
 * ``audio``       — μ-law ⇄ PCM codec, the stateful inbound ``Resampler``, 20 ms
@@ -26,6 +28,7 @@ mulaw_to_pcm16``); this package is a namespace, not a re-export surface.
   ``get_*_backend()`` resolvers (3.2). Non-live modes resolve to the fake; live
   refuses to initialize without a real integration.
 
-The media redirect + hangup live implementation and the ``get_backend()`` handoff
-arrive with 3.4; the 12-tool dispatcher with 3.3.
+The 12-tool dispatcher arrived with 3.3; the transfer redirect + ``get_backend()``
+handoff with 3.4. A live warm-transfer/whisper leg and a ``<Dial action>`` status
+callback (for a true ``no_answer`` vs ``connected`` outcome) remain deferred.
 """
