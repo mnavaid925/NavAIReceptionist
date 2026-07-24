@@ -150,3 +150,122 @@ def test_playback_tracker_accepts_int_lengths_too():
     tracker.mark(160)  # some callers may pass a byte count rather than the bytes
     assert tracker.bytes_sent == 160
     assert tracker.frames_sent == 1
+
+
+# --------------------------------------------------------------------------- #
+# WaveformAccumulator — per-call two-channel energy binning (3.5)
+# --------------------------------------------------------------------------- #
+
+def _mulaw_frame(amplitude=6000, hz=200, rate=8000, n=160):
+    """One 20 ms mu-law frame loud enough to bin above zero."""
+    return audio.pcm16_to_mulaw(_tone(amplitude=amplitude, hz=hz, rate=rate, n=n))
+
+
+def test_waveform_empty_input_finalize_returns_none():
+    acc = audio.WaveformAccumulator()
+    assert acc.finalize() is None
+
+
+def test_waveform_ignores_falsy_frames_and_stays_empty():
+    acc = audio.WaveformAccumulator()
+    acc.add_caller_frame(b'')
+    acc.add_caller_frame(None)
+    acc.add_bot_frame(b'')
+    acc.add_bot_frame(None)
+    assert acc.finalize() is None
+
+
+def test_waveform_a_few_frames_bin_count_and_values_are_bounded():
+    acc = audio.WaveformAccumulator()
+    for _ in range(5):
+        acc.add_caller_frame(_tone(amplitude=6000))
+        acc.add_bot_frame(_mulaw_frame())
+    result = acc.finalize()
+
+    assert result is not None
+    assert len(result['caller']) <= audio.WAVEFORM_TARGET_BINS
+    assert len(result['bot']) <= audio.WAVEFORM_TARGET_BINS
+    assert all(0.0 <= v <= 1.0 for v in result['caller'])
+    assert all(0.0 <= v <= 1.0 for v in result['bot'])
+    assert result['bins'] == max(len(result['caller']), len(result['bot']))
+
+
+def test_waveform_more_frames_than_bins_yields_exactly_target_bins():
+    acc = audio.WaveformAccumulator()
+    for i in range(audio.WAVEFORM_TARGET_BINS * 3):
+        acc.add_caller_frame(_tone(amplitude=4000 + (i % 50)))
+    result = acc.finalize()
+    assert len(result['caller']) == audio.WAVEFORM_TARGET_BINS
+    assert result['bins'] == audio.WAVEFORM_TARGET_BINS
+
+
+def test_waveform_short_call_is_never_zero_padded():
+    """Fewer frames than target bins -> fewer buckets, not padded to full width —
+    a zero is a real silence value here, and padding would draw silence the
+    call never contained."""
+    acc = audio.WaveformAccumulator()
+    for _ in range(3):
+        acc.add_caller_frame(_tone(amplitude=6000))
+    result = acc.finalize()
+    assert len(result['caller']) == 3
+    assert len(result['bot']) == 0  # no bot frames at all -> empty, not padded
+    assert result['bins'] == 3
+
+
+def test_waveform_bot_lane_reflects_only_frames_actually_passed_to_add_bot_frame():
+    """A barge-in-truncated playback must yield a SHORTER bot lane than the full
+    synthesis would — the lane is fed only from frames the consumer actually
+    put on the wire, not from what was synthesized."""
+    frame = _mulaw_frame()
+
+    full = audio.WaveformAccumulator()
+    for _ in range(40):
+        full.add_bot_frame(frame)
+    full_result = full.finalize()
+
+    truncated = audio.WaveformAccumulator()
+    for _ in range(10):  # imagine a barge-in cancelled the rest of playback
+        truncated.add_bot_frame(frame)
+    truncated_result = truncated.finalize()
+
+    assert len(truncated_result['bot']) < len(full_result['bot'])
+
+
+def test_waveform_caller_lane_independent_of_bot_lane():
+    """Only frames passed to `add_caller_frame` land in `caller`; bot frames
+    never leak into it and vice versa."""
+    acc = audio.WaveformAccumulator()
+    for _ in range(6):
+        acc.add_caller_frame(_tone(amplitude=6000))
+    result = acc.finalize()
+    assert len(result['caller']) == 6
+    assert result['bot'] == []
+
+
+def test_waveform_extreme_energy_is_clamped_to_one():
+    acc = audio.WaveformAccumulator()
+    loud = _tone(amplitude=30000)  # well above WAVEFORM_ENERGY_CEILING
+    for _ in range(5):
+        acc.add_caller_frame(loud)
+    result = acc.finalize()
+    assert all(v <= 1.0 for v in result['caller'])
+    assert max(result['caller']) == 1.0
+
+
+def test_waveform_silence_bins_to_zero():
+    acc = audio.WaveformAccumulator()
+    silence = b'\x00\x00' * 160
+    for _ in range(5):
+        acc.add_caller_frame(silence)
+    result = acc.finalize()
+    assert result['caller'] == [0.0] * 5
+
+
+def test_waveform_custom_target_bins_and_ceiling_are_honoured():
+    acc = audio.WaveformAccumulator(target_bins=4, ceiling=1000)
+    for _ in range(20):
+        acc.add_caller_frame(_tone(amplitude=6000))
+    result = acc.finalize()
+    assert len(result['caller']) == 4
+    # A low ceiling means even a moderate tone clamps to the max.
+    assert max(result['caller']) == 1.0
