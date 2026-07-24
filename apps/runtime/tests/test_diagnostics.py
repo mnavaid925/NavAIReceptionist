@@ -278,8 +278,14 @@ def test_diagnostics_view_direct_call_query_count_bounded(
     # The view's own cost — AgentSetting lookup (1) + the stats aggregate (1)
     # + the sessions select+prefetch (2) + the transfer-outcome tally (1) = 5
     # — plus the ONE query the sidebar/nav context processor adds for the
-    # signed-in user's assignable locations (`user.assigned_locations()`).
-    with django_assert_max_num_queries(6):
+    # signed-in user's assignable locations (`user.assigned_locations()`) = 6,
+    # plus 3.5's two additions: the ONE bounded sample the ended-reason /
+    # per-stage-latency / recent-errors panels all share (1) and today's spend
+    # (1). Both drop the call-log's `booked_appointments__service` prefetch —
+    # nothing on this page renders a booking — so each is a single query rather
+    # than a select+prefetch pair. Three new panels for two queries is the point
+    # of materializing the sample once; a per-panel query would have been three.
+    with django_assert_max_num_queries(8):
         response = runtime_diagnostics_view(request)
 
     assert response.status_code == 200
