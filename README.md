@@ -28,7 +28,9 @@ setup, calendar and staff are configured **per location**.
 >
 > Also built: `config/` (settings, ASGI + Channels, urls), the design system
 > (`static/css/theme.css`, `static/js/layout.js`, `templates/base.html` + partials), and the test suite
-> (`conftest.py` + `apps/scheduling/tests/` + `apps/calls/tests/` + `apps/runtime/tests/`, **1113 passing**).
+> (`conftest.py` + a `tests/` package in **every** app, **1855 passing**). Modules 0–2 were the last to get
+> suites; writing them surfaced five real defects in the foundation, including a manager-to-owner privilege
+> escalation and an unthrottled `/admin/` login — all fixed, all now regression-covered.
 >
 > **Build order note.** Module 3 is numbered before 4 and 5 but depends on both — it writes
 > `calls.CallSession` and `scheduling.Appointment`/`CallbackRequest`/`Contact`, and reads `Service` and
