@@ -6428,8 +6428,14 @@ in `__init__`.
 - **Live provider adapters** (STT/TTS/LLM/recording capture) — needs real credentials; the single biggest gap
   between this and a deployable product.
 - **The Twilio `<Dial action>` status callback** — would give a true `connected`/`no_answer` outcome.
-- **Webhook rate limiting** — `apps/runtime/webhooks.py` carries the note; the sizing question (not blocking
-  legitimate redelivery or concurrent calls) is the open part.
+- ~~**Webhook rate limiting**~~ — **DONE.** The sizing question that blocked it since 3.1 had the wrong shape: any
+  requests-per-minute cap keyed on IP, number or rate breaks real telephony, because Twilio redelivers, a busy
+  location takes concurrent calls, and Twilio's egress IPs are shared across its customer base. The answer is to
+  count only what legitimate traffic never produces — an unresolved dialed number or a failed signature — and to
+  clear the counter on any request that verifies. Verified traffic then cannot be throttled *by construction*, so
+  redelivery and burst concurrency need no tuning at all. The gate sits before the `AgentSetting` lookup so a
+  throttled source stops costing a query, and it fails OPEN on a cache outage (the signature is the security
+  control; the limit is a cost control). Own key namespace, so webhook abuse cannot spend the login budget.
 - **`CallSession.analysis` population** — the column and its shape exist, no job writes it; the trigger point is a
   design question, not just code.
 - **Contact CSV import/export and full contact merge** — both buildable now, nobody has picked them up.
