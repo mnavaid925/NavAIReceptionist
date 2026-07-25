@@ -207,6 +207,140 @@ def test_get_is_method_not_allowed(db):
 
 
 # --------------------------------------------------------------------------- #
+# Rate limiting. The endpoint is public, unauthenticated and csrf-exempt, so it
+# needs a bound — but the obvious shapes all break real telephony: Twilio
+# redelivers, a busy location takes concurrent calls, and Twilio's egress IPs are
+# shared across its whole customer base.
+#
+# The resolution is that ONLY unverified traffic is counted. These tests exist to
+# hold that line: the immunity of verified traffic is the property that makes a
+# limiter safe here at all, so it is asserted directly rather than assumed.
+# --------------------------------------------------------------------------- #
+
+def _post_unsigned(client=None, **params):
+    return (client or Client()).post(WEBHOOK_PATH, _params(**params))
+
+
+def test_repeated_unverified_requests_are_eventually_throttled(settings, db):
+    settings.WEBHOOK_FAILURE_LIMIT = 3
+    client = Client()
+    for _ in range(settings.WEBHOOK_FAILURE_LIMIT):
+        assert _post_unsigned(client).status_code in (200, 403)
+
+    response = _post_unsigned(client)
+    assert response.status_code == 429
+    assert response['Retry-After'] == str(settings.WEBHOOK_FAILURE_WINDOW_SECONDS)
+
+
+def test_the_throttle_gate_runs_before_any_database_work(
+    settings, django_assert_num_queries, db
+):
+    """The point of bounding an unauthenticated endpoint: a throttled source must
+    stop costing us a query, not merely stop getting a useful answer."""
+    settings.WEBHOOK_FAILURE_LIMIT = 2
+    client = Client()
+    for _ in range(settings.WEBHOOK_FAILURE_LIMIT):
+        _post_unsigned(client)
+
+    with django_assert_num_queries(0):
+        assert _post_unsigned(client).status_code == 429
+
+
+def test_a_verified_request_is_never_throttled(
+    settings, make_agent_setting, tenant_a, location_a1
+):
+    """The load-bearing property. Real Twilio traffic always verifies, so it never
+    increments the counter — burst concurrency and Twilio's own redelivery of a
+    failed webhook are structurally immune rather than merely tuned around."""
+    settings.WEBHOOK_FAILURE_LIMIT = 3
+    setting = make_agent_setting(tenant_a, location_a1)
+    client = Client()
+
+    # Far more verified calls than the failure ceiling — none may be refused.
+    for index in range(settings.WEBHOOK_FAILURE_LIMIT * 3):
+        params = _params(to=setting.inbound_phone_number, sid=f'CA{index:032d}')
+        assert _post_signed(client, setting.twilio_auth_token, params).status_code == 200
+
+    assert CallSession.objects.count() == settings.WEBHOOK_FAILURE_LIMIT * 3
+
+
+def test_redelivery_of_one_call_is_never_throttled(
+    settings, make_agent_setting, tenant_a, location_a1
+):
+    """Twilio retries a webhook it thinks failed. Refusing a retry would drop a
+    real call, and it must still yield exactly one session."""
+    settings.WEBHOOK_FAILURE_LIMIT = 2
+    setting = make_agent_setting(tenant_a, location_a1)
+    client = Client()
+    params = _params(to=setting.inbound_phone_number)
+
+    for _ in range(settings.WEBHOOK_FAILURE_LIMIT * 4):
+        assert _post_signed(client, setting.twilio_auth_token, params).status_code == 200
+
+    assert CallSession.objects.count() == 1
+
+
+def test_a_verified_request_clears_an_accumulated_failure_count(
+    settings, make_agent_setting, tenant_a, location_a1
+):
+    """The recovery case: a location briefly unmapped or disabled counts every one
+    of its calls as a failure, and must not stay throttled once it is fixed."""
+    settings.WEBHOOK_FAILURE_LIMIT = 3
+    setting = make_agent_setting(tenant_a, location_a1)
+    client = Client()
+
+    for _ in range(settings.WEBHOOK_FAILURE_LIMIT - 1):
+        _post_unsigned(client, to='+19995550000')      # unmapped → counted
+
+    params = _params(to=setting.inbound_phone_number)
+    assert _post_signed(client, setting.twilio_auth_token, params).status_code == 200
+
+    # Budget reset: another full run of failures is needed to trip it again.
+    for _ in range(settings.WEBHOOK_FAILURE_LIMIT - 1):
+        assert _post_unsigned(client, to='+19995550000').status_code == 200
+
+
+def test_webhook_abuse_does_not_consume_the_login_throttle_budget(settings, db):
+    """Separate key namespaces. A scanner on this public endpoint must not be able
+    to lock real users out of signing in."""
+    from apps.accounts import throttling
+
+    settings.WEBHOOK_FAILURE_LIMIT = 2
+    settings.LOGIN_ATTEMPT_LIMIT = 5
+    client = Client()
+    for _ in range(settings.WEBHOOK_FAILURE_LIMIT + 3):
+        _post_unsigned(client)
+
+    login_keys = throttling.build_keys('ACME', 'someone@example.test', '127.0.0.1')
+    assert not throttling.is_throttled(login_keys)
+
+
+def test_the_throttle_fails_open_when_the_cache_is_unavailable(
+    settings, monkeypatch, make_agent_setting, tenant_a, location_a1
+):
+    """A cache outage must not take the phone line down.
+
+    Every side effect is still gated on signature verification, so failing open
+    costs at most an indexed query per abusive request — while failing closed
+    would refuse every real inbound call in the business because a cache node
+    blipped.
+    """
+    from apps.accounts import throttling
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError('cache is down')
+
+    monkeypatch.setattr(throttling, 'is_throttled', _boom)
+    monkeypatch.setattr(throttling, 'register_failure', _boom)
+    monkeypatch.setattr(throttling, 'clear', _boom)
+
+    setting = make_agent_setting(tenant_a, location_a1)
+    params = _params(to=setting.inbound_phone_number)
+    assert _post_signed(Client(), setting.twilio_auth_token, params).status_code == 200
+    assert CallSession.objects.count() == 1
+
+
+# --------------------------------------------------------------------------- #
 # Reason-code logging — each termination branch logs its closed-set REASON_*
 # code, and NEVER the caller/dialed number or the signature (PII discipline).
 #
