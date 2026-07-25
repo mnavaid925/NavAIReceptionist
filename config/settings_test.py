@@ -25,6 +25,21 @@ CHANNEL_LAYERS = {
 # Never anything but "fake" in the test suite.
 PROVIDER_MODE = 'fake'
 
+# 3.4's pre-redirect drain exists to let a real carrier's jitter buffer flush the
+# handoff line's last frames before the media leg is cut, so the caller does not
+# lose the final word. A FAKE backend has no jitter buffer and no carrier, so the
+# wait buys nothing here.
+#
+# It is not merely wasted time, it is a RACE. The production default is 0.6s and
+# `simulate_call._drain` polls with a 0.6s quiet window — a dead heat. Whichever
+# side won decided the test: if the drain gave up first, the command sent `stop`
+# and disconnected, cancelling `_execute_transfer` before it had written
+# `CallSession.transfer`, and the transfer assertions failed. That is why the
+# transfer tests passed alone and intermittently failed in a loaded full-suite
+# run. Shortening it here makes the ordering deterministic instead of a coin
+# flip, and leaves the real 0.6s untouched where it actually does something.
+TRANSFER_DRAIN_SECONDS = 0.05
+
 # Fast, deliberately insecure hasher — test-only.
 PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 
