@@ -124,7 +124,7 @@ MIDDLEWARE = [
     # installed yet — a 500 on the exact path that is supposed to log you out
     # gracefully.
     'django.contrib.messages.middleware.MessageMiddleware',
-    # All three depend on request.user, so they sit AFTER AuthenticationMiddleware.
+    # All four depend on request.user, so they sit AFTER AuthenticationMiddleware.
     # SessionPolicyMiddleware runs first so an idle session is ended before any
     # tenant or location is resolved for it. TenantMiddleware then sets
     # request.tenant, and ActiveLocationMiddleware sets request.location and
@@ -133,6 +133,12 @@ MIDDLEWARE = [
     'apps.accounts.middleware.SessionPolicyMiddleware',
     'apps.accounts.middleware.TenantMiddleware',
     'apps.accounts.middleware.ActiveLocationMiddleware',
+    # Listed LAST of the four so it stamps headers on the way back out, after the
+    # others have finished with the response. Marks every authenticated response
+    # no-store: essentially every signed-in page here renders tenant PII, and a
+    # browser's back-forward cache restores such a page after logout with no
+    # authentication check — the shared-workstation leak.
+    'apps.accounts.middleware.PrivateCacheMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
