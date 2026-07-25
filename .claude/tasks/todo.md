@@ -6376,3 +6376,64 @@ status callback, a per-location record toggle (2.1/2.3's call), a persistent web
   a pre-existing 3.2 gap in the same area.
 
 **Module 3 is complete: 3.1–3.5 all built, and with 4 and 5 already done, all 26 sub-modules are now built.**
+
+---
+
+# Post-build pass — working the deferred list (2026-07-25)
+
+With all 26 sub-modules built, the accumulated `## Later passes / deferred` sections (16 of them) were swept and
+cross-checked against the current code, dropping everything a later sub-module had already closed. The headline
+finding was not on any of those lists:
+
+**Modules 0, 1 and 2 — `accounts`, `tenants`, `agents` — had ZERO tests and had never run the review agents.**
+All 1113 tests came from the three later modules. That is the foundation layer: the middleware that sets
+`request.tenant`/`request.location`, the location switcher that is the cross-location IDOR gate for the entire
+product, and the encrypted per-location Twilio credentials. Everything else's security rests on it.
+
+## Done this pass
+
+- **Foundation test suites** — `accounts` (304), `tenants` (206), `agents` (207). Suite **1113 → 1855**.
+- **Security review of all three**, plus fixes for everything it and the suites found.
+- **Shared cache is now a declared security surface** — `CACHE_URL` selects Redis; `accounts.E001` refuses to let a
+  non-DEBUG deployment start on a per-process cache.
+- **`PrivateCacheMiddleware`** — closes 5.2's own tracked note that only the two transcript pages were `no-store`.
+- **Seeded recordings have real bytes**, through Module 3's recorder, with `--flush` deleting the files.
+
+## Defects found and fixed (none of these were on any deferred list)
+
+1. **A manager could promote themselves to owner** (HIGH). `user_edit_view` is gated on `MANAGEMENT_TIERS`, which
+   includes `manager`, and the tier dropdown offered "Owner" — no POST tampering needed. The only tier guard checked
+   the opposite direction (demotion out of the last owner seat). Fixed in `UserAdminForm`: a non-owner may neither
+   grant the owner tier nor alter an existing owner's, the second closing the mirror image where a manager strips
+   the owners and empties the seat entirely.
+2. **`/admin/` login had no brute-force throttle** (HIGH). Every credential path was rate-limited except the one
+   authenticating tenant-less staff with Django-admin reach over *every* tenant — so the highest-value credential
+   in the system was the only one guessable at unlimited speed.
+3. **The last-owner self-demotion guard never fired**, at two levels. `form.is_valid()` runs `_post_clean()`, which
+   writes the submitted tier onto `form.instance` — the same object as `obj` — so the guard compared a value to
+   itself, and `_is_last_owner` then read that same mutated tier and returned False on exactly the demotion it
+   exists to catch. A sole owner really could lock their business out of its own user management.
+4. **`display_name` could never reach the username handle** — it fell back to `get_username()`, which returns the
+   email because `USERNAME_FIELD = 'email'`.
+5. **The secret mask rendered real plaintext** — `masked_auth_token` showed the true last four characters of the
+   decrypted Twilio auth token, contradicting this project's own binding contract ("display as prefix + hash"). Now
+   a `salted_hmac` fingerprint, keyed so it is safe even for a low-entropy secret.
+
+Worth noting about (3) and (1): the same `_post_clean()` mutation trap produced two separate live defects in one
+file. Wherever a guard compares a submitted value to a stored one on a `ModelForm`, the stored side must be captured
+in `__init__`.
+
+## Still open — deliberately not taken this pass
+
+- **Live provider adapters** (STT/TTS/LLM/recording capture) — needs real credentials; the single biggest gap
+  between this and a deployable product.
+- **The Twilio `<Dial action>` status callback** — would give a true `connected`/`no_answer` outcome.
+- **Webhook rate limiting** — `apps/runtime/webhooks.py` carries the note; the sizing question (not blocking
+  legitimate redelivery or concurrent calls) is the open part.
+- **`CallSession.analysis` population** — the column and its shape exist, no job writes it; the trigger point is a
+  design question, not just code.
+- **Contact CSV import/export and full contact merge** — both buildable now, nobody has picked them up.
+- **`purge_expired_recordings` saves per row rather than `bulk_update`** — the per-row file-delete-then-clear
+  ordering is the command's correctness argument, and it runs offline.
+- Nice-to-haves: call-log disposition icons, a booking-outcome filter, the primary→secondary transfer waterfall, a
+  per-location record toggle, carrier-minute metering, a persistent webhook-health log.
