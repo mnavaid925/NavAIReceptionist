@@ -341,3 +341,51 @@ def test_active_session_is_not_ended(client_a):
     no redirect."""
     response = client_a.get(reverse('accounts:dashboard'))
     assert response.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# PrivateCacheMiddleware — the shared-workstation back-button leak.
+#
+# A browser's back-forward cache restores a page with NO authentication check, so
+# after logout the next person at the same machine can press Back and read the
+# previous user's tenant data. 5.2 covered the two transcript pages with
+# `@never_cache` and noted the rest of the product had the same gap; this is the
+# shared fix, so these tests deliberately target pages that were NEVER decorated.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize('url_name', [
+    'accounts:dashboard',
+    'accounts:profile',
+    'accounts:user_list',
+    'accounts:my_locations',
+])
+def test_authenticated_pages_are_no_store(client_a, url_name):
+    response = client_a.get(reverse(url_name))
+    assert response.status_code == 200
+    assert 'no-store' in response['Cache-Control']
+
+
+def test_a_pii_list_page_that_was_never_decorated_is_covered(client_a):
+    """The call log LIST — the page 5.2's own comment flagged as still exposed.
+
+    It renders caller numbers and contact names, and it never carried
+    `@never_cache`. A per-view decorator fails silently for exactly this reason:
+    nothing complains when a new PII page ships without one.
+    """
+    response = client_a.get(reverse('calls:callsession_list'))
+    assert response.status_code == 200
+    assert 'no-store' in response['Cache-Control']
+
+
+def test_scheduling_pii_pages_are_covered(client_a):
+    for url_name in ('scheduling:contact_list', 'scheduling:appointment_list'):
+        response = client_a.get(reverse(url_name))
+        assert response.status_code == 200
+        assert 'no-store' in response['Cache-Control'], url_name
+
+
+def test_anonymous_responses_are_left_alone(client):
+    """Deliberately untouched: the login page carries no tenant data, and this
+    keeps the unauthenticated path (and dev static handling) unaffected."""
+    response = client.get(reverse('accounts:login'))
+    assert 'no-store' not in response.get('Cache-Control', '')
