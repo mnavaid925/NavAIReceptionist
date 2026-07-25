@@ -1,11 +1,12 @@
-"""Request-scoped tenant and location resolution, plus session policy.
+"""Request-scoped tenant and location resolution, plus session and cache policy.
 
-Three middlewares, all sitting AFTER `AuthenticationMiddleware` because they read
+Four middlewares, all sitting AFTER `AuthenticationMiddleware` because they read
 `request.user`:
 
 1. `SessionPolicyMiddleware` — ends idle sessions before anything else runs.
 2. `TenantMiddleware` — sets `request.tenant`.
 3. `ActiveLocationMiddleware` — sets `request.location`, re-validated every request.
+4. `PrivateCacheMiddleware` — marks every authenticated response no-store.
 
 Note what these do NOT cover. Channels consumers, Twilio webhooks and background
 tasks have no `request` and therefore no `request.tenant` / `request.location`.
@@ -153,3 +154,45 @@ class SessionPolicyMiddleware:
         if request.headers.get('HX-Request') == 'true':
             return False
         return 'text/html' in request.headers.get('Accept', 'text/html')
+
+
+class PrivateCacheMiddleware:
+    """Mark every AUTHENTICATED response no-store.
+
+    Essentially every signed-in page in this product renders tenant PII — a
+    caller's name and number, a transcript, an appointment. A browser's
+    back-forward cache will happily restore such a page after logout, so on a
+    shared clinic or salon workstation the next person can read the previous
+    receptionist's conversation by pressing Back. No authentication check runs on
+    a bfcache restore; the page is simply redisplayed from memory.
+
+    5.2 recognised this and put `@never_cache` on the two transcript-bearing
+    pages, noting in a comment that the list page and the rest of the product
+    carried the same latent gap and wanted a shared fix. This is that fix. Doing
+    it here rather than as a decorator per view is the point: the failure mode of
+    the decorator approach is silent — a new PII page ships uncovered and nothing
+    complains — whereas a middleware covers pages nobody remembered to annotate.
+    The existing `@never_cache` decorators are left in place; they set the same
+    directives, so they are now redundant rather than wrong, and they document
+    intent at the two most sensitive views.
+
+    Anonymous responses are deliberately untouched: the login page carries no
+    tenant data, and leaving them cacheable keeps the unauthenticated path (and
+    Django's own static handling in development) alone.
+    """
+
+    #: `no-store` is the directive that actually suppresses the back-forward
+    #: cache; the rest are belt-and-braces for intermediaries and older browsers.
+    CACHE_CONTROL = 'no-store, no-cache, must-revalidate, max-age=0, private'
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        user = getattr(request, 'user', None)
+        if user is not None and user.is_authenticated:
+            response['Cache-Control'] = self.CACHE_CONTROL
+            response['Pragma'] = 'no-cache'
+            response['Expires'] = '0'
+        return response
