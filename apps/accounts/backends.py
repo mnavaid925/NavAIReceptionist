@@ -38,7 +38,7 @@ class CustomerScopedBackend(BaseBackend):
         # id. Route that to the tenant-less staff accounts so /admin/ keeps working
         # without adding a second backend.
         if customer_id is None and identifier is None and username is not None:
-            return self._authenticate_platform_staff(username, password)
+            return self._authenticate_platform_staff(request, username, password)
 
         client_ip = _client_ip(request)
         keys = throttling.build_keys(customer_id, identifier, client_ip)
@@ -94,17 +94,41 @@ class CustomerScopedBackend(BaseBackend):
             .first()
         )
 
-    def _authenticate_platform_staff(self, username, password):
-        """The /admin/ path: tenant-less staff only, never a tenant user."""
+    def _authenticate_platform_staff(self, request, username, password):
+        """The /admin/ path: tenant-less staff only, never a tenant user.
+
+        Throttled on the SAME counters as the tenant path, and for a stronger
+        reason. This path authenticates the accounts with Django-admin reach over
+        EVERY tenant's data, and it was the one credential path here with no rate
+        limit at all — so the highest-value account in the system was the only one
+        an attacker could guess at unlimited speed, while a single tenant user was
+        capped at LOGIN_ATTEMPT_LIMIT. The `platform-staff` namespace keeps its
+        counter from colliding with a tenant login that happens to share an email.
+        """
         User = get_user_model()
+        username = (username or '').strip()
+        keys = throttling.build_keys('platform-staff', username, _client_ip(request))
+
+        # Checked BEFORE the credential comparison, exactly as above, so a
+        # throttled caller learns nothing about whether the credentials were right.
+        if throttling.is_throttled(keys):
+            logger.warning('Platform-staff login blocked by throttle for ip=%s',
+                           _client_ip(request))
+            return None
+
         user = User.objects.filter(
-            tenant__isnull=True, is_staff=True, email__iexact=(username or '').strip()
+            tenant__isnull=True, is_staff=True, email__iexact=username
         ).first()
         if user is None:
             check_password(password or '', _TIMING_EQUALISER)
+            throttling.register_failure(keys)
             return None
         if user.check_password(password or '') and user.is_active:
+            throttling.clear(keys)
             return user
+        # A wrong password AND an inactive-but-correct-password account both count,
+        # matching the tenant path's treatment.
+        throttling.register_failure(keys)
         return None
 
     def get_user(self, user_id):
