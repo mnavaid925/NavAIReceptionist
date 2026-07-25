@@ -224,8 +224,16 @@ class User(AbstractBaseUser, PermissionsMixin, TimeStamped):  # noqa: F405
 
     @property
     def display_name(self):
-        """The label shown in the topbar and anywhere a user is named."""
-        return self.full_name or self.get_username() or self.email
+        """The label shown in the topbar and anywhere a user is named.
+
+        Falls back `full_name` → `username` → `email`. The middle step reads
+        `self.username` DIRECTLY, not `get_username()`: `USERNAME_FIELD` is
+        `email`, so Django's `get_username()` returns the email address and the
+        optional login handle this model declares would never be reached — a user
+        with a username but no name would show their email address in the topbar
+        and the user directory, which is exactly what the third fallback is for.
+        """
+        return self.full_name or self.username or self.email
 
     @property
     def initials(self):
