@@ -265,12 +265,43 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = True
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'navai-default',
+# The cache is a SECURITY surface here, not just a speed one. Three mechanisms
+# ride on it, and every one of them is only as wide as the cache is shared:
+#
+#   * login throttling            (apps/accounts/throttling.py)
+#   * the media-stream single-use token claim (apps/runtime/consumers/…)
+#   * — and, adjacent to it, MAX_CONCURRENT_CALLS, which is worse still: a plain
+#     class attribute, so it is per-process no matter what the cache is.
+#
+# On `LocMemCache` all of these are PER WORKER PROCESS. An attacker spreading
+# login attempts across N workers gets N times the lockout ceiling, and a replayed
+# stream token lands on a different worker than the one holding the claim. That is
+# a real weakening, not a theoretical one — so it is opt-in by URL rather than a
+# silent default, and `accounts.E001` below refuses to let a non-DEBUG deployment
+# start on a per-process cache.
+#
+# `CACHE_URL` is deliberately separate from `REDIS_URL` (the channel layer's):
+# they can point at different databases on the same server, and conflating them
+# would make the channel layer's traffic evictable by cache pressure.
+CACHE_URL = env('CACHE_URL', '')
+
+if CACHE_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': CACHE_URL,
+        }
     }
-}
+else:
+    # Dev default. Keeps a bare `manage.py`/Daphne run working with no Redis
+    # process — which is the normal local setup here — and is inert for tests,
+    # which override CACHES in config/settings_test.py anyway.
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'navai-default',
+        }
+    }
 
 MESSAGE_STORAGE = 'django.contrib.messages.storage.session.SessionStorage'
 
