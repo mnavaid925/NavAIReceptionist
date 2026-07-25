@@ -26,6 +26,7 @@ import logging
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models
+from django.utils.crypto import salted_hmac
 
 logger = logging.getLogger(__name__)
 
@@ -101,18 +102,34 @@ def decrypt_value(stored):
         return ''
 
 
+#: Namespaces the mask's HMAC so the fingerprint cannot be replayed as any other
+#: keyed digest this project derives from SECRET_KEY.
+_MASK_SALT = 'apps.agents.fields.mask_secret'
+
+
 def mask_secret(raw, keep=4):
     """A safe-to-render hint that a secret exists, e.g. `••••••••3f2a`.
 
-    Shows only the LAST few characters. Never the first, which for many provider
-    keys encode the account and key type.
+    The suffix is a keyed FINGERPRINT of the secret, never a slice of it. This
+    used to render the real last four characters of the decrypted Twilio auth
+    token — common industry UX, but it put live secret material into page HTML,
+    browser history and any screenshot or session recording of that admin page,
+    and it handed anyone with a candidate token four real characters to confirm a
+    match against. The binding contract for this field
+    (`voice-agent-runtime` §"Display as prefix + hash") always said fingerprint;
+    the implementation simply predated it.
+
+    Keyed on ``SECRET_KEY`` via ``salted_hmac`` rather than a bare digest, so the
+    fingerprint is not brute-forceable even for a LOW-entropy secret — a plain
+    ``sha256`` of a short or guessable value is itself a confirmation oracle. It
+    stays stable for a given secret on a given deployment, which is what makes it
+    useful: two rows showing the same hint carry the same token, and the hint
+    changes when the token is rotated.
     """
     if not raw:
         return ''
-    text = str(raw)
-    if len(text) <= keep:
-        return '•' * 8
-    return '•' * 8 + text[-keep:]
+    digest = salted_hmac(_MASK_SALT, str(raw)).hexdigest()
+    return '•' * 8 + digest[:keep]
 
 
 class EncryptedCharField(models.CharField):
