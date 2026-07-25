@@ -233,6 +233,27 @@ AUTH_PASSWORD_VALIDATORS = [
 LOGIN_ATTEMPT_LIMIT = env_int('LOGIN_ATTEMPT_LIMIT', 5)
 LOGIN_ATTEMPT_WINDOW_SECONDS = env_int('LOGIN_ATTEMPT_WINDOW_SECONDS', 900)
 
+# The Twilio voice webhook is public, unauthenticated and `@csrf_exempt` — the
+# only endpoint here anyone on the internet can reach and make do work. These
+# bound the UNVERIFIED traffic only: the counter is incremented on a request that
+# fails to resolve a dialed number or fails signature verification, and it is
+# CLEARED by any request whose signature verifies.
+#
+# That is what makes the limit safe to impose on a telephony endpoint. Real Twilio
+# traffic always verifies, so it never increments the counter and can never be
+# throttled — a burst of concurrent calls at a busy location and Twilio's own
+# redelivery of a failed webhook are both structurally immune, which is the
+# property a naive requests-per-minute cap would have broken.
+#
+# Sized generously rather than tightly: the counter's real job is stopping an
+# unauthenticated scanner from making us do database work, not shaving a few
+# requests. It is deliberately loose enough that a genuinely misconfigured
+# deployment (a wrong TWILIO_WEBHOOK_BASE_URL fails every signature) still emits
+# plenty of `signature_invalid` log lines to diagnose from before any throttling
+# starts — and `runtime.E001` catches that misconfiguration at deploy time anyway.
+WEBHOOK_FAILURE_LIMIT = env_int('WEBHOOK_FAILURE_LIMIT', 20)
+WEBHOOK_FAILURE_WINDOW_SECONDS = env_int('WEBHOOK_FAILURE_WINDOW_SECONDS', 300)
+
 # Signed-token TTLs, in seconds.
 PASSWORD_RESET_TIMEOUT = env_int('PASSWORD_RESET_TIMEOUT', 3600)
 EMAIL_CHANGE_TOKEN_MAX_AGE = env_int('EMAIL_CHANGE_TOKEN_MAX_AGE', 3600)
