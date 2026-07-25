@@ -162,12 +162,42 @@ def test_has_auth_token_reflects_state_without_exposing_the_value(
     assert configured.has_auth_token is True
 
 
-def test_masked_auth_token_shows_only_the_tail(tenant_a, location_a1, make_agent_setting):
-    setting = make_agent_setting(tenant_a, location_a1, twilio_auth_token='abcdefgh1234wxyz')
+def test_masked_auth_token_contains_no_part_of_the_real_token(
+    tenant_a, location_a1, make_agent_setting
+):
+    """The hint is a keyed fingerprint, never a slice of the secret.
+
+    It used to render the token's real last four characters — live secret
+    material in page HTML, browser history and any screenshot of that admin page,
+    and four confirmed characters for anyone holding a candidate token.
+    """
+    token = 'abcdefgh1234wxyz'
+    setting = make_agent_setting(tenant_a, location_a1, twilio_auth_token=token)
     masked = setting.masked_auth_token
-    assert masked.endswith('wxyz')
-    assert 'abcdefgh1234' not in masked
+
     assert masked.startswith('•')
+    assert token not in masked
+    # No substring of the secret of any meaningful length survives into the hint.
+    for size in (4, 5, 6):
+        for start in range(len(token) - size + 1):
+            assert token[start:start + size] not in masked
+
+
+def test_masked_auth_token_is_stable_and_changes_on_rotation(
+    tenant_a, location_a1, location_a2, make_agent_setting
+):
+    """What the hint is actually FOR: comparing without disclosing.
+
+    Same token, same hint — so two rows can be told apart or matched at a glance;
+    rotate the token and the hint moves.
+    """
+    a = make_agent_setting(tenant_a, location_a1, twilio_auth_token='same-token-value')
+    b = make_agent_setting(tenant_a, location_a2, twilio_auth_token='same-token-value')
+    assert a.masked_auth_token == b.masked_auth_token
+
+    b.twilio_auth_token = 'rotated-token-value'
+    b.save(update_fields=['twilio_auth_token'])
+    assert b.masked_auth_token != a.masked_auth_token
 
 
 def test_masked_auth_token_empty_when_not_set(tenant_a, location_a1, make_agent_setting):
@@ -226,8 +256,18 @@ def test_decrypt_value_of_corrupted_ciphertext_degrades_to_empty_string():
     assert decrypt_value(f'{PREFIX}not-valid-fernet-data') == ''
 
 
-def test_mask_secret_shows_only_last_four_by_default():
-    assert mask_secret('abcdefgh1234') == '•' * 8 + '1234'
+def test_mask_secret_renders_a_fingerprint_not_a_slice():
+    secret = 'abcdefgh1234'
+    masked = mask_secret(secret)
+    assert masked.startswith('•' * 8)
+    assert len(masked) == 12          # 8 bullets + a 4-char fingerprint
+    assert not masked.endswith('1234')
+    assert secret not in masked
+
+
+def test_mask_secret_is_deterministic_for_one_value():
+    assert mask_secret('abcdefgh1234') == mask_secret('abcdefgh1234')
+    assert mask_secret('abcdefgh1234') != mask_secret('abcdefgh1235')
 
 
 def test_mask_secret_empty_is_empty():
@@ -236,7 +276,15 @@ def test_mask_secret_empty_is_empty():
 
 
 def test_mask_secret_short_value_never_leaks_any_of_it():
-    assert mask_secret('ab') == '•' * 8
+    """A short secret is the case a bare digest would betray.
+
+    The fingerprint is keyed on SECRET_KEY, so even a two-character value cannot
+    be recovered by hashing candidates — which is why this is `salted_hmac` and
+    not `sha256`.
+    """
+    masked = mask_secret('ab')
+    assert 'ab' not in masked
+    assert masked.startswith('•' * 8)
 
 
 # --------------------------------------------------------------------------- #
