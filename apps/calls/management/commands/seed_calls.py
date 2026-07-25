@@ -44,7 +44,7 @@ still prints neither a transcript body nor a caller number — the habit is the
 control, and a seeder that prints them teaches the wrong reflex to the next
 person who writes a management command against this table.
 """
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from datetime import datetime, time as dt_time, timedelta
@@ -708,6 +708,11 @@ class Command(BaseCommand):
             return
 
         if options['flush']:
+            # Delete the recording FILES before the rows that point at them. The
+            # retention job walks rows, so a file whose row is gone can never be
+            # reached again — flushing rows first would leak a demo recording onto
+            # disk permanently on every re-seed.
+            self._flush_recordings()
             # No ordering care needed here, unlike `seed_scheduling`'s flush:
             # the only thing pointing at a CallSession is
             # `Appointment.booked_by_session`, and that FK is SET_NULL, so
@@ -839,13 +844,11 @@ class Command(BaseCommand):
                     transfer=self._build_transfer(spec, location_slug, started_at),
                     waveform_peaks=self._build_waveform(spec),
                     metadata=self._build_metadata(spec, location),
-                    recording_blob=(
-                        f'private/calls/{tenant.slug}/{location_slug}/{sid}.mp3'
-                        if spec['recorded'] else ''
-                    ),
                     started_at=started_at,
                     ended_at=ended_at,
                 )
+                if spec['recorded']:
+                    self._write_recording(session)
                 created += 1
 
                 if spec.get('books'):
@@ -1047,6 +1050,56 @@ class Command(BaseCommand):
         bot = [0.66, 0.31, 0.14, 0.58, 0.79, 0.27, 0.15, 0.63,
                0.72, 0.29, 0.51, 0.38]
         return {'caller': caller, 'bot': bot, 'bins': len(caller)}
+
+    def _write_recording(self, session):
+        """Give a recorded demo row REAL bytes, through Module 3's own recorder.
+
+        This used to store a hand-built `private/calls/<slug>/<slug>/<sid>.mp3`
+        string with no file behind it, so 6 of the 11 seeded rows pointed at
+        nothing: 5.4's player rendered "no longer available", and its signed serve
+        view, its Range handling and the retention job had no demo subject to
+        exercise at all. A path that resolves to nothing is not demo data, it is a
+        broken link.
+
+        It routes through `apps.runtime.providers.recording.get_recording_backend()`
+        rather than writing a file here, so the seeded rows and the real runtime
+        path share ONE definition of where a recording lives and what it contains
+        — including the extension, which was `.mp3` here while the recorder has
+        always produced a WAV. Under any non-live `PROVIDER_MODE` that resolves to
+        the fake backend, which reaches no provider and needs no credentials; the
+        guard below refuses to run at all under live, because a seeder must never
+        touch a real provider.
+        """
+        from apps.runtime.providers.base import is_live
+        from apps.runtime.providers.recording import get_recording_backend
+
+        if is_live():
+            raise CommandError(
+                'seed_calls refuses to write recordings under PROVIDER_MODE=live '
+                '— a seeder must never reach a real provider. Run it with '
+                'PROVIDER_MODE=fake.'
+            )
+        session.recording_blob = get_recording_backend().finalize(
+            session, should_record=True)
+        session.save(update_fields=['recording_blob', 'updated_at'])
+
+    def _flush_recordings(self):
+        """Delete the demo recording files before their rows are deleted."""
+        from apps.calls.storage import recording_storage
+
+        removed = 0
+        for blob in (CallSession.objects
+                     .filter(tenant__slug__in=DEMO_TENANT_SLUGS)
+                     .exclude(recording_blob='')
+                     .values_list('recording_blob', flat=True)):
+            try:
+                recording_storage.delete(blob)
+                removed += 1
+            except Exception:  # noqa: BLE001 — a missing file is not a flush failure
+                continue
+        if removed:
+            self.stdout.write(self.style.WARNING(
+                f'Flushed {removed} demo recording file(s).'))
 
     def _build_metadata(self, spec, location):
         """Call-level detail that needs no column of its own.
