@@ -152,12 +152,20 @@ def user_create_view(request):
 def user_edit_view(request, pk):
     """Edit one user."""
     obj = get_object_or_404(_tenant_users(request), pk=pk)  # noqa: F405
+    # Captured BEFORE the form is bound and validated. `UserAdminForm` is a
+    # ModelForm over THIS instance, and `is_valid()` runs `_post_clean()`, which
+    # calls `construct_instance()` and mutates `form.instance` — the very same
+    # object as `obj` — in place. Reading `obj.tier` after validation therefore
+    # echoes the SUBMITTED tier, so the guard below compared a value to itself and
+    # could never fire: the last owner really could demote themselves and lock the
+    # business out of its own user management.
+    original_tier = obj.tier
     form = UserAdminForm(request.POST or None, instance=obj, request=request)
 
     if request.method == 'POST' and form.is_valid():
         # Guard against an owner demoting themselves out of the only owner seat and
         # locking the business out of its own user management.
-        if obj.pk == request.user.pk and form.cleaned_data['tier'] != obj.tier:
+        if obj.pk == request.user.pk and form.cleaned_data['tier'] != original_tier:
             if _is_last_owner(request, obj):
                 messages.error(  # noqa: F405
                     request,
@@ -213,8 +221,22 @@ def user_delete_view(request, pk):
 
 
 def _is_last_owner(request, obj):
-    """True when `obj` is the business's only remaining active owner."""
-    if obj.tier != User.TIER_OWNER or obj.status != User.STATUS_ACTIVE:
+    """True when `obj` is the business's only remaining active owner.
+
+    Reads the PERSISTED row rather than the in-memory instance, deliberately.
+    `user_edit_view` calls this after `form.is_valid()`, and Django's
+    `ModelForm._post_clean()` has already written the SUBMITTED tier and status
+    onto that very instance — so `obj.tier` there describes what the user is
+    trying to become, not what they currently are. Trusting it made this function
+    return False on exactly the demotion it exists to catch, silently disabling
+    the guard. One small query on a rare path buys an answer that is correct from
+    both call sites regardless of how dirty the instance is.
+    """
+    current = _tenant_users(request).filter(pk=obj.pk).values('tier', 'status').first()
+    if current is None:
+        return False
+    if (current['tier'] != User.TIER_OWNER
+            or current['status'] != User.STATUS_ACTIVE):
         return False
     others = _tenant_users(request).filter(
         tier=User.TIER_OWNER, status=User.STATUS_ACTIVE
