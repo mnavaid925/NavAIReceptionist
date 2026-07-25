@@ -265,11 +265,76 @@ def test_user_admin_form_save_stamps_the_given_tenant_never_from_posted_data(ten
     assert obj.tenant_id == tenant_a.pk
 
 
-def test_user_admin_form_editing_excludes_self_from_the_duplicate_check(tenant_a, admin_user):
+def test_user_admin_form_editing_excludes_self_from_the_duplicate_check(tenant_a, make_user):
+    staff = make_user(tenant_a, tier=User.TIER_STAFF, email='dup-check@acme-test.example')
     form = UserAdminForm({
-        'email': admin_user.email, 'tier': admin_user.tier, 'status': admin_user.status,
-    }, instance=admin_user, tenant=tenant_a)
+        'email': staff.email, 'tier': staff.tier, 'status': staff.status,
+    }, instance=staff, tenant=tenant_a)
     assert form.is_valid(), form.errors
+
+
+# --------------------------------------------------------------------------- #
+# The owner tier is owner-grantable only. The view gate is MANAGEMENT_TIERS,
+# which includes `manager`, so the gate cannot be what stops a manager minting
+# owners — the form has to.
+# --------------------------------------------------------------------------- #
+
+def _request_for(user, tenant):
+    """A request carrying the actor and their tenant.
+
+    `TenantModelForm` takes `request` OR `tenant`, never both — it reads
+    `request.tenant` when a request is given, so the tenant rides on the request
+    here rather than as a second kwarg.
+    """
+    from django.test import RequestFactory
+
+    request = RequestFactory().post('/')
+    request.user = user
+    request.tenant = tenant
+    return request
+
+
+def test_a_manager_may_not_grant_the_owner_tier(tenant_a, make_user):
+    manager = make_user(tenant_a, tier=User.TIER_MANAGER, email='mgr-form@acme-test.example')
+    target = make_user(tenant_a, tier=User.TIER_STAFF, email='tgt-form@acme-test.example')
+    form = UserAdminForm({
+        'email': target.email, 'tier': User.TIER_OWNER, 'status': target.status,
+    }, instance=target, request=_request_for(manager, tenant_a))
+    assert not form.is_valid()
+    assert 'tier' in form.errors
+
+
+def test_a_manager_may_not_alter_an_existing_owners_tier(tenant_a, make_user, admin_user):
+    manager = make_user(tenant_a, tier=User.TIER_MANAGER, email='mgr-form2@acme-test.example')
+    form = UserAdminForm({
+        'email': admin_user.email, 'tier': User.TIER_MANAGER, 'status': admin_user.status,
+    }, instance=admin_user, request=_request_for(manager, tenant_a))
+    assert not form.is_valid()
+    assert 'tier' in form.errors
+
+
+def test_an_owner_may_grant_the_owner_tier(tenant_a, make_user, admin_user):
+    target = make_user(tenant_a, tier=User.TIER_STAFF, email='tgt-form2@acme-test.example')
+    form = UserAdminForm({
+        'email': target.email, 'tier': User.TIER_OWNER, 'status': target.status,
+    }, instance=target, request=_request_for(admin_user, tenant_a))
+    assert form.is_valid(), form.errors
+
+
+def test_without_a_request_the_form_fails_closed_on_the_owner_tier(tenant_a, make_user):
+    """No actor means no authorization to cross the privilege boundary.
+
+    Both real call sites (`user_create_view`, `user_edit_view`) always pass
+    `request=`, so this only affects programmatic construction — and there the
+    safe direction is refusing, not assuming. If a future view forgets the kwarg
+    it degrades to "cannot grant owner" rather than "anyone can".
+    """
+    target = make_user(tenant_a, tier=User.TIER_STAFF, email='tgt-form3@acme-test.example')
+    form = UserAdminForm({
+        'email': target.email, 'tier': User.TIER_OWNER, 'status': target.status,
+    }, instance=target, tenant=tenant_a)
+    assert not form.is_valid()
+    assert 'tier' in form.errors
 
 
 # --------------------------------------------------------------------------- #
