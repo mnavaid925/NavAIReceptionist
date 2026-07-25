@@ -190,7 +190,14 @@ redacted by an **allow-list** (`_LOG_SAFE_ARGS`): ids/counts/dates verbatim, pho
   `twilio_auth_token` (via `providers.telephony.verify_twilio_signature`, Twilio's `RequestValidator`, constant-time)
   **before any side effect**; `@csrf_exempt` is paired with it. Idempotent on `provider_call_sid`. Returns
   `<Connect><Stream>` TwiML (`application/xml`, never a redirect) carrying the **opaque signed stream token** — never
-  cleartext tenant/location ids.
+  cleartext tenant/location ids. **Rate-limited on UNVERIFIED traffic only** (`WEBHOOK_FAILURE_LIMIT` /
+  `WEBHOOK_FAILURE_WINDOW_SECONDS`): the counter increments on an unresolved dialed number or a failed signature and
+  is cleared by any request that verifies. That is the whole trick — real Twilio traffic always verifies, so burst
+  concurrency at a busy location and Twilio's own redelivery are structurally immune rather than tuned around, which
+  is what 3.1 deferred the limit over. The gate runs BEFORE the `AgentSetting` lookup (a throttled source stops
+  costing a query) and **fails OPEN** on a cache outage — the signature is the security control, the limit is a cost
+  control, and refusing every real call because a cache node blipped is the worse failure. Its counter lives in its
+  own key namespace via `accounts.throttling.scoped_ip_keys`, never the login one.
 - **Stream token** — `providers/tokens.py`. The media stream has no session and no user; this signed, short-TTL
   (300s) token IS its credential. Payload `{sid, ten, loc}` lives *inside* the signed blob.
 - **Media-stream consumer (built, 3.2)** — `apps/runtime/consumers/MediaStreamTurnLoop/MediaStream.py`,
