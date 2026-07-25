@@ -135,6 +135,25 @@ def make_bookable_service(db):
 
 
 @pytest.fixture(autouse=True)
+def _clear_runtime_cache():
+    """Clear the process-wide cache around each test.
+
+    Module 3 now has TWO cache-backed mechanisms, and neither is covered by the
+    per-test database transaction: the webhook's unverified-attempt counter (its
+    key is the client IP, and every test posts from the same one) and 3.5's
+    single-use stream-token claim (its key is the session id, and SQLite reuses
+    primary keys across rolled-back tests). Without this, both would make results
+    depend on test ORDER — a counter or a claim left behind by one test silently
+    changing the next one's outcome.
+    """
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_media_stream_capacity():
     """Zero the consumer's process-global live-call counter around each test.
 
