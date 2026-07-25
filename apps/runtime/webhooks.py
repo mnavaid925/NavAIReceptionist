@@ -21,23 +21,35 @@ downstream inherits them. The order below is load-bearing and is the contract in
 caller number, a signature, or a request body logged at INFO — a voice webhook's
 POST params are PII.
 
-**WARNING — rate limiting is a tracked follow-up, not shipped in 3.1.** The skill
-(§2 item 7) calls for a rate-limited webhook. It is deferred deliberately rather
-than added naively: a per-number or per-source-IP throttle risks blocking
-*legitimate* traffic — Twilio redelivers, a busy location takes concurrent calls,
-and Twilio's egress IPs are shared — so the limit has to be sized against real
-call-volume telemetry (the 3.5 diagnostics/cost pass) rather than guessed at now.
-Until then the abuse surface is bounded: an unmapped or disabled number writes
-nothing, and a forged signature costs one indexed `AgentSetting` lookup plus a
-constant-time HMAC before a 403. Tracked in `.claude/tasks/todo.md`.
+**Rate limiting bounds UNVERIFIED traffic only.** 3.1 deferred this because the
+obvious shapes are all wrong for a telephony endpoint: Twilio redelivers a failed
+webhook, a busy location takes concurrent calls, and Twilio's egress IPs are
+shared across its whole customer base — so a requests-per-minute cap keyed on any
+of those blocks real calls.
+
+The resolution is to count only what legitimate traffic never produces. The
+counter increments on a request that fails to resolve a dialed number or fails
+signature verification, and is CLEARED by any request whose signature verifies.
+Real Twilio traffic always verifies, so it never increments the counter and can
+never be throttled — burst concurrency and redelivery are structurally immune
+rather than merely tuned around. What is left bounded is the scanner: the gate is
+checked BEFORE the `AgentSetting` lookup, so a throttled source stops costing a
+database query at all.
+
+The counter lives in its own key namespace (`accounts.throttling.scoped_ip_keys`),
+never the login one — otherwise a scanner on this public endpoint could lock real
+users out of signing in.
 """
 import logging
 
+from django.conf import settings
 from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
+from apps.accounts import throttling
+from apps.accounts.views._helpers import get_client_ip
 from apps.agents.models import AgentSetting
 from apps.calls.models import CallSession
 from apps.runtime.agent.transfer import looks_like_call_sid
@@ -69,6 +81,59 @@ REASON_DISABLED = 'disabled'
 REASON_SIGNATURE_INVALID = 'signature_invalid'
 REASON_MISSING_CALLSID = 'missing_callsid'
 REASON_DUPLICATE = 'duplicate_delivery'
+REASON_THROTTLED = 'throttled'
+
+#: Namespace for the webhook's own failure counter. NEVER the login namespace —
+#: see the module docstring.
+THROTTLE_SCOPE = 'webhook'
+
+
+def _is_throttled(keys):
+    """Whether this source has exhausted its unverified-attempt budget.
+
+    FAILS OPEN. If the cache is unreachable, the call is allowed through rather
+    than refused: every side effect downstream is still gated on Twilio signature
+    verification, so the worst case of failing open is that an abusive source
+    keeps costing us one indexed query — while the worst case of failing closed is
+    refusing every real inbound call in the business, on a telephony endpoint,
+    because a cache node blipped. The rate limit is a cost control; the signature
+    is the security control, and it is unaffected.
+    """
+    if not keys:
+        return False
+    try:
+        return throttling.is_throttled(keys, limit=settings.WEBHOOK_FAILURE_LIMIT)
+    except Exception as exc:  # noqa: BLE001 — a cache outage must not drop calls
+        logger.error('Webhook throttle unavailable (%s); allowing the request.',
+                     type(exc).__name__)
+        return False
+
+
+def _clear_failures(keys):
+    """Reset the counter after a verified request. Never raises (see above)."""
+    if not keys:
+        return
+    try:
+        throttling.clear(keys)
+    except Exception as exc:  # noqa: BLE001
+        logger.error('Webhook throttle counter unavailable (%s).', type(exc).__name__)
+
+
+def _register_failure(keys):
+    """Count one unverified attempt against the webhook's own IP counter.
+
+    A cache hiccup must never take the voice webhook down with it: failing to
+    record an attempt degrades the rate limit, which is a bounded loss, whereas
+    raising here would drop a real inbound call — a far worse outcome than the
+    one this counter exists to prevent.
+    """
+    if not keys:
+        return
+    try:
+        throttling.register_failure(
+            keys, window=settings.WEBHOOK_FAILURE_WINDOW_SECONDS)
+    except Exception as exc:  # noqa: BLE001 — never fail a call over the counter
+        logger.error('Webhook throttle counter unavailable (%s).', type(exc).__name__)
 
 
 def _twiml(body, status=200):
@@ -101,6 +166,18 @@ def voice_webhook(request):
     from_number = (params.get('From') or params.get('Caller') or '').strip()
     call_sid = (params.get('CallSid') or '').strip()
 
+    # 0. Throttle gate, BEFORE the AgentSetting lookup — so a source that has
+    #    already failed repeatedly stops costing a database query, which is the
+    #    whole point of bounding an unauthenticated endpoint. Only unverified
+    #    traffic ever reaches the counter (see the module docstring), so a real
+    #    Twilio request cannot be refused here.
+    throttle_keys = throttling.scoped_ip_keys(THROTTLE_SCOPE, get_client_ip(request))
+    if _is_throttled(throttle_keys):
+        logger.warning('Inbound webhook rejected (%s).', REASON_THROTTLED)
+        response = HttpResponse('Too many requests.', status=429)
+        response['Retry-After'] = str(settings.WEBHOOK_FAILURE_WINDOW_SECONDS)
+        return response
+
     # 1. Resolve the dialed number. Unmapped OR disabled → decline, ZERO writes.
     #    Both take the same branch on purpose: the decline reveals nothing about
     #    which of the two it was, and neither has a verified caller yet, so
@@ -113,6 +190,10 @@ def voice_webhook(request):
             'Inbound webhook declined (%s).',
             REASON_UNMAPPED if setting is None else REASON_DISABLED,
         )
+        # Counted: this is the scanner's path. It is also a real caller dialling a
+        # decommissioned number, which is why the ceiling is generous — a handful
+        # of genuine calls to an unmapped line must never reach it.
+        _register_failure(throttle_keys)
         return _twiml(build_decline_twiml())
 
     # 2. Verify the signature against THIS location's token, before any side
@@ -123,7 +204,15 @@ def voice_webhook(request):
                                    setting.twilio_auth_token):
         # No number, no body — logging either would defeat the point.
         logger.warning('Rejected an inbound webhook (%s).', REASON_SIGNATURE_INVALID)
+        _register_failure(throttle_keys)
         return HttpResponseForbidden('Invalid signature.')
+
+    # VERIFIED: this is genuinely Twilio. Clear the counter, so a location that was
+    # briefly unmapped or disabled — every one of whose calls counted as a failure
+    # above — is not left throttled for the rest of the window once it is fixed.
+    # Nothing legitimate accumulates failures, so there is normally nothing here to
+    # clear; this exists for the recovery case, not the steady state.
+    _clear_failures(throttle_keys)
 
     # A genuine Twilio voice request always carries a CallSid; without it there is
     # no idempotency key. Malformed → 400, not a 500 and not a silent write.
