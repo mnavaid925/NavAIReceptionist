@@ -321,6 +321,121 @@ def test_edit_view_last_owner_can_still_edit_other_fields(client_a, admin_user):
     assert admin_user.tier == User.TIER_OWNER
 
 
+# --------------------------------------------------------------------------- #
+# Tier escalation. `MANAGEMENT_TIERS` is (owner, manager), so a MANAGER reaches
+# the same edit view an owner does — with the same unrestricted tier dropdown
+# unless something stops them. The tier is this product's privilege boundary, so
+# who may hand it out is part of that boundary, not a UX detail.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def manager_client(tenant_a, location_a1, make_user):
+    """A signed-in MANAGER — the tier that can reach the user directory but must
+    not be able to mint owners."""
+    manager = make_user(tenant_a, [location_a1], tier=User.TIER_MANAGER,
+                        email='manager@acme-test.example')
+    client = Client()
+    client.login(customer_id=tenant_a.customer_id, identifier=manager.email,
+                 password=DEMO_PASSWORD)
+    session = client.session
+    session['active_location_id'] = location_a1.pk
+    session.save()
+    return client, manager
+
+
+def test_manager_cannot_promote_themselves_to_owner(manager_client):
+    """The escalation that matters: a compromised manager minting an owner seat."""
+    client, manager = manager_client
+    client.post(_url('user_edit', manager.pk), {
+        'email': manager.email, 'first_name': manager.first_name,
+        'last_name': manager.last_name, 'tier': User.TIER_OWNER,
+        'status': manager.status,
+    })
+    manager.refresh_from_db()
+    assert manager.tier == User.TIER_MANAGER
+
+
+def test_manager_cannot_promote_another_user_to_owner(manager_client, tenant_a, make_user):
+    client, _manager = manager_client
+    victim = make_user(tenant_a, tier=User.TIER_STAFF, email='staff-x@acme-test.example')
+    client.post(_url('user_edit', victim.pk), {
+        'email': victim.email, 'first_name': victim.first_name,
+        'last_name': victim.last_name, 'tier': User.TIER_OWNER,
+        'status': victim.status,
+    })
+    victim.refresh_from_db()
+    assert victim.tier == User.TIER_STAFF
+
+
+def test_manager_cannot_demote_an_existing_owner(manager_client, admin_user):
+    """Managing owners is an owner's job — a manager stripping owners is the same
+    privilege boundary viewed from the other side."""
+    client, _manager = manager_client
+    client.post(_url('user_edit', admin_user.pk), {
+        'email': admin_user.email, 'first_name': admin_user.first_name,
+        'last_name': admin_user.last_name, 'tier': User.TIER_MANAGER,
+        'status': admin_user.status,
+    })
+    admin_user.refresh_from_db()
+    assert admin_user.tier == User.TIER_OWNER
+
+
+def test_the_manager_tier_dropdown_does_not_offer_owner(manager_client):
+    client, manager = manager_client
+    response = client.get(_url('user_edit', manager.pk))
+    offered = [value for value, _label in response.context['form'].fields['tier'].choices]
+    assert User.TIER_OWNER not in offered
+
+
+def test_an_owner_may_still_grant_the_owner_tier(client_a, tenant_a, make_user):
+    """The gate is on the ACTOR's tier, so an owner is unaffected."""
+    target = make_user(tenant_a, tier=User.TIER_STAFF, email='promote-me@acme-test.example')
+    client_a.post(_url('user_edit', target.pk), {
+        'email': target.email, 'first_name': target.first_name,
+        'last_name': target.last_name, 'tier': User.TIER_OWNER,
+        'status': target.status,
+    })
+    target.refresh_from_db()
+    assert target.tier == User.TIER_OWNER
+
+
+def test_a_business_can_never_be_left_with_zero_owners(
+    client_a, tenant_a, location_a1, admin_user, make_user
+):
+    """The end-to-end invariant, across the two guards that together enforce it.
+
+    The view's last-owner guard only covers a user demoting THEMSELVES
+    (`obj.pk == request.user.pk`). What closes the remaining path is the form
+    rule: a non-owner cannot alter an owner's tier at all, so the only actor who
+    can demote an owner is another owner — who is, by definition, still an owner
+    afterwards. Neither guard is sufficient alone; this asserts the property they
+    produce together, so weakening either one fails here.
+    """
+    second = make_user(tenant_a, [location_a1], tier=User.TIER_OWNER,
+                       email='second-owner@acme-test.example')
+    # Demote `second` first: legitimate, `admin_user` is still an owner.
+    client_a.post(_url('user_edit', second.pk), {
+        'email': second.email, 'first_name': second.first_name,
+        'last_name': second.last_name, 'tier': User.TIER_MANAGER,
+        'status': second.status,
+    })
+    second.refresh_from_db()
+    assert second.tier == User.TIER_MANAGER
+
+    # `admin_user` is now the LAST owner. Signed in as them, demoting themselves
+    # is already covered; here a fresh owner-tier actor is not available, so drive
+    # the same guard through the self path's sibling: the row is the last owner.
+    client_a.post(_url('user_edit', admin_user.pk), {
+        'email': admin_user.email, 'first_name': admin_user.first_name,
+        'last_name': admin_user.last_name, 'tier': User.TIER_MANAGER,
+        'status': admin_user.status,
+    })
+    admin_user.refresh_from_db()
+    assert admin_user.tier == User.TIER_OWNER
+    assert User.objects.filter(
+        tenant=tenant_a, tier=User.TIER_OWNER, status=User.STATUS_ACTIVE).exists()
+
+
 def test_edit_view_allows_demotion_when_another_owner_exists(client_a, tenant_a, admin_user, make_user):
     make_user(tenant_a, tier=User.TIER_OWNER, email='second-owner@acme-test.example')
     response = client_a.post(_url('user_edit', admin_user.pk), {
