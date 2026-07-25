@@ -173,3 +173,53 @@ def test_navigation_context_processor_optional_urls_resolve_defensively():
         'switch_location', 'profile', 'change_password', 'change_email', 'logout', 'user_list',
     }
     assert all(context['nav_urls'].values())
+
+
+# --------------------------------------------------------------------------- #
+# accounts.E001 — the per-process-cache guard.
+#
+# Login throttling and the media-stream single-use token claim are both
+# cache-backed, so on a per-process cache each is enforced per WORKER rather than
+# per deployment. Neither fails visibly: both behave correctly in a single-process
+# dev run and in every test here, which is precisely why the check exists and why
+# it needs its own test — an unexercised system check rots silently.
+# --------------------------------------------------------------------------- #
+
+_LOCMEM = 'django.core.cache.backends.locmem.LocMemCache'
+_REDIS = 'django.core.cache.backends.redis.RedisCache'
+
+
+@pytest.mark.parametrize('backend', [
+    _LOCMEM,
+    'django.core.cache.backends.dummy.DummyCache',
+])
+def test_per_process_cache_is_an_error_outside_debug(settings, backend):
+    from apps.accounts.apps import _check_shared_cache
+
+    settings.DEBUG = False
+    settings.CACHES = {'default': {'BACKEND': backend}}
+
+    errors = _check_shared_cache(None)
+
+    assert [e.id for e in errors] == ['accounts.E001']
+    # The hint must name the fix, not just the problem.
+    assert 'CACHE_URL' in errors[0].hint
+
+
+def test_per_process_cache_is_fine_under_debug(settings):
+    """A local run with no Redis process is the normal setup — stay silent."""
+    from apps.accounts.apps import _check_shared_cache
+
+    settings.DEBUG = True
+    settings.CACHES = {'default': {'BACKEND': _LOCMEM}}
+
+    assert _check_shared_cache(None) == []
+
+
+def test_a_shared_cache_passes_outside_debug(settings):
+    from apps.accounts.apps import _check_shared_cache
+
+    settings.DEBUG = False
+    settings.CACHES = {'default': {'BACKEND': _REDIS, 'LOCATION': 'redis://x/1'}}
+
+    assert _check_shared_cache(None) == []
