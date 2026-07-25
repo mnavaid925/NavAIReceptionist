@@ -4,7 +4,10 @@ TWO forms over ONE table, and the split is the security control, not an
 organisational nicety:
 
 * `UserAdminForm` exposes `tier`, `status` and `is_provider`. It is reachable only
-  from the tier-gated management views.
+  from the tier-gated management views — but that gate is `MANAGEMENT_TIERS`,
+  which includes `manager`, so the form itself restricts WHO may grant or revoke
+  the `owner` tier. A gate that lets managers in cannot also be the thing that
+  stops managers minting owners.
 * `OwnProfileForm` exposes name and phone ONLY. Every signed-in user reaches it,
   so any privileged field listed there would be a self-service promotion to owner.
 
@@ -47,6 +50,55 @@ class UserAdminForm(TenantModelForm):  # noqa: F405
         # password through the reset flow; an admin-typed password would have to be
         # transmitted to the user out of band, which is worse than the invite.
         self.fields['email'].required = True
+
+        # The tier this row ALREADY has, captured before validation can move it.
+        # `_post_clean()` writes the submitted tier onto `self.instance` during
+        # `is_valid()`, so reading `instance.tier` from `clean_tier` would echo the
+        # submission rather than the stored value — the same trap that silently
+        # disabled the view's last-owner guard.
+        self._original_tier = self.instance.tier if self.instance.pk else None
+
+        # OWNER IS OWNER-GRANTABLE ONLY. This view is gated on MANAGEMENT_TIERS,
+        # which includes `manager` — so without this a manager could open their own
+        # edit page and select "Owner" from an unrestricted dropdown. `tier` is
+        # this product's privilege boundary; who may hand it out is part of that
+        # boundary. Dropping the choice is the UX half (a ChoiceField also
+        # validates against its choices, so this alone rejects a tampered POST);
+        # `clean_tier` below is the authoritative half, so re-widening these
+        # choices later cannot silently re-open the hole.
+        if not self._actor_is_owner():
+            self.fields['tier'].choices = [
+                choice for choice in self.fields['tier'].choices
+                if choice[0] != User.TIER_OWNER
+            ]
+
+    def _actor_is_owner(self):
+        """Whether the signed-in user performing this edit is an owner."""
+        actor = getattr(self.request, 'user', None) if self.request else None
+        return getattr(actor, 'tier', None) == User.TIER_OWNER
+
+    def clean_tier(self):
+        """Only an owner may grant the owner tier, or alter an existing owner's.
+
+        Two directions, one boundary. Granting is the escalation: a manager minting
+        an owner seat for themselves. Revoking is the same boundary from the other
+        side — a manager stripping the owners would leave the business with nobody
+        able to reach owner-only surfaces, and combined with the last-owner guard
+        (which only covers a user demoting THEMSELVES) it is the path that could
+        empty the owner seat entirely.
+        """
+        tier = self.cleaned_data.get('tier')
+        if self._actor_is_owner():
+            return tier
+        if tier == User.TIER_OWNER:
+            raise ValidationError(  # noqa: F405
+                'Only an owner can grant the owner role.'
+            )
+        if self._original_tier == User.TIER_OWNER:
+            raise ValidationError(  # noqa: F405
+                "Only an owner can change another owner's role."
+            )
+        return tier
 
     def clean_email(self):
         email = (self.cleaned_data.get('email') or '').strip()
