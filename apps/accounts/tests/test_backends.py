@@ -122,6 +122,60 @@ def test_platform_staff_path_rejects_unknown_email(backend):
     assert backend.authenticate(None, username='ghost@platform.example', password='whatever') is None
 
 
+def test_platform_staff_path_is_throttled(backend, settings):
+    """The /admin/ path had NO rate limit while the tenant path was capped.
+
+    That was the wrong way round: these are the accounts with Django-admin reach
+    over every tenant's data, so the highest-value credential in the system was
+    the only one guessable at unlimited speed. A throttled caller is refused even
+    when the password is subsequently correct — the check runs before the
+    comparison, so it leaks nothing about the credentials.
+    """
+    settings.LOGIN_ATTEMPT_LIMIT = 3
+    superuser = User.objects.create_superuser(
+        email='root-throttle@platform.example', password='pw12345678')
+
+    for _ in range(settings.LOGIN_ATTEMPT_LIMIT):
+        assert backend.authenticate(None, username=superuser.email, password='wrong') is None
+
+    assert backend.authenticate(
+        None, username=superuser.email, password='pw12345678') is None
+
+
+def test_platform_staff_throttle_clears_on_a_successful_login(backend, settings):
+    settings.LOGIN_ATTEMPT_LIMIT = 3
+    superuser = User.objects.create_superuser(
+        email='root-clear@platform.example', password='pw12345678')
+
+    # One short of the ceiling, then a success — the counter must reset.
+    for _ in range(settings.LOGIN_ATTEMPT_LIMIT - 1):
+        backend.authenticate(None, username=superuser.email, password='wrong')
+    assert backend.authenticate(
+        None, username=superuser.email, password='pw12345678') == superuser
+
+    for _ in range(settings.LOGIN_ATTEMPT_LIMIT - 1):
+        backend.authenticate(None, username=superuser.email, password='wrong')
+    assert backend.authenticate(
+        None, username=superuser.email, password='pw12345678') == superuser
+
+
+def test_platform_staff_throttle_does_not_collide_with_a_tenant_login(
+    backend, tenant_a, admin_user, settings
+):
+    """The `platform-staff` namespace keeps the two counters apart.
+
+    A tenant user and a platform-staff account can share an email address, and
+    burning the admin counter must not lock that person out of their business.
+    """
+    settings.LOGIN_ATTEMPT_LIMIT = 3
+    for _ in range(settings.LOGIN_ATTEMPT_LIMIT + 1):
+        backend.authenticate(None, username=admin_user.email, password='wrong')
+
+    assert backend.authenticate(
+        None, customer_id=tenant_a.customer_id, identifier=admin_user.email,
+        password=DEMO_PASSWORD) == admin_user
+
+
 # --------------------------------------------------------------------------- #
 # get_user()
 # --------------------------------------------------------------------------- #
