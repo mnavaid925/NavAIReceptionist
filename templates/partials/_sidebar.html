@@ -54,9 +54,19 @@
               </li>
             {% endfor %}
           {% elif submodule.is_live %}
+            {% comment %}
+              Built, but owns no page. `is-embedded` is what stops this reading as
+              a dead link: a bare `.nav-link` span takes the same hover highlight
+              and pointer cursor as the real anchors above it. The hint says where
+              the surface actually lives.
+            {% endcomment %}
             <li>
-              <span class="nav-link" title="Built — no page to open from here">
-                <span class="nav-text">{{ submodule.title }}</span>
+              <span class="nav-link is-embedded"
+                    title="{% if submodule.hint %}{{ submodule.hint }}{% else %}Built — no page to open from here{% endif %}">
+                <span class="nav-text">
+                  {{ submodule.title }}
+                  {% if submodule.hint %}<span class="nav-hint">{{ submodule.hint }}</span>{% endif %}
+                </span>
               </span>
             </li>
           {% else %}
