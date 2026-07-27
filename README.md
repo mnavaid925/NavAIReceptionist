@@ -125,14 +125,15 @@ Windows PowerShell. Note the `;` separator — `&&` is not valid PowerShell and 
 `ParserError`.
 
 > **Run step 1 before your first Claude Code session in this repo.** `.claude/settings.json` wires its
-> hooks to `venv\Scripts\python.exe`, which does not exist in a fresh checkout — until the virtual
+> hooks to `python`, which does not exist in a fresh checkout — until the virtual
 > environment is created and the requirements installed, every hook fails to launch.
 
 ```powershell
-# 1. Virtual environment — do this FIRST (the .claude hooks invoke venv\Scripts\python.exe)
+# 1. Virtual environment — do this FIRST (the .claude hooks invoke python)
 python -m venv venv
-venv\Scripts\python.exe -m pip install --upgrade pip
-venv\Scripts\python.exe -m pip install -r requirements.txt
+venv\Scripts\Activate.ps1
+python.exe -m pip install --upgrade pip
+pip install -r requirements.txt
 
 # 2. Environment file
 Copy-Item .env.example .env
@@ -142,16 +143,17 @@ Copy-Item .env.example .env
 C:\xampp\mysql\bin\mysql.exe -u root -e "CREATE DATABASE IF NOT EXISTS navai_receptionist CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # 4. Migrate
-venv\Scripts\python.exe manage.py check; venv\Scripts\python.exe manage.py migrate
+python manage.py check
+python manage.py migrate
 
 # 5. Seed demo data — seed_accounts calls seed_tenants automatically if no business exists
-venv\Scripts\python.exe manage.py seed_accounts
-venv\Scripts\python.exe manage.py seed_agents
-venv\Scripts\python.exe manage.py seed_scheduling
-venv\Scripts\python.exe manage.py seed_calls
+python manage.py seed_accounts
+python manage.py seed_agents
+python manage.py seed_scheduling
+python manage.py seed_calls
 
 # 6. Run it (Daphne, never runserver)
-venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
+python -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
 ```
 
 Then open **http://127.0.0.1:8000/login/** and sign in with one of the demo accounts below.
@@ -188,7 +190,7 @@ Module 3 seeds nothing of its own — it writes the same `CallSession` rows. Its
 are management commands, both safe on a dev machine because neither can reach a carrier:
 
 ```bash
-venv\Scripts\python.exe manage.py simulate_call --location downtown
+python manage.py simulate_call --location downtown
 ```
 
 `simulate_call` drives one full fake call through the *real* consumer under `PROVIDER_MODE=fake` —
@@ -200,7 +202,7 @@ Illinois, a two-party state, so the agent speaks a recording notice; Riverside i
 without one. `--script booking` and `--script transfer` drive the tool and handoff paths.
 
 ```bash
-venv\Scripts\python.exe manage.py purge_expired_recordings --dry-run
+python manage.py purge_expired_recordings --dry-run
 ```
 
 `purge_expired_recordings` enforces the retention window: it deletes recordings past **their own row's**
@@ -276,7 +278,7 @@ during development, restart the server — the counters live in the local-memory
 ## Running the server
 
 ```powershell
-venv\Scripts\python.exe -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
+python -m daphne -b 127.0.0.1 -p 8000 config.asgi:application
 ```
 
 ⚠️ **Two hazards, both of which cost hours if you hit them cold:**
@@ -331,8 +333,8 @@ deployed environment, and unset again.
 ## Testing
 
 ```powershell
-venv\Scripts\python.exe -m pytest -q
-venv\Scripts\python.exe -m pytest -q apps/calls
+python -m pytest -q
+python -m pytest -q apps/calls
 ```
 
 The suite runs against `config.settings_test` (SQLite in-memory, fast password hasher, locmem email,
