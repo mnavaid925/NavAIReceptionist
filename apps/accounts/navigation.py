@@ -129,6 +129,28 @@ LIVE_LINKS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# WHERE AN EMBEDDED SUB-MODULE ACTUALLY LIVES.
+# ---------------------------------------------------------------------------
+# A sub-module with a LIVE_LINKS key but an EMPTY dict is built and owns no page
+# of its own. The sidebar still renders its row, and without a hint that row is
+# an unexplained dead end: it looks exactly like the links above it and does
+# nothing when clicked. These one-liners are rendered under the title and as the
+# row's tooltip, so the row answers "then where is it?" instead of reading as a
+# broken link. A key here is documentation only — it never makes a row
+# clickable, and a sub-module with real links ignores it.
+EMBEDDED_HINTS = {
+    '0.1': 'Sign-in, sign-out and password reset — reached before you log in',
+    '3.2': 'Runs during a live call — watch it on Runtime Diagnostics',
+    '3.3': 'Runs during a live call — traced in a call’s event log',
+    '3.4': 'Runs during a live call — outcome shown on the call detail page',
+    '3.5': 'Recording and teardown — totals on Runtime Diagnostics',
+    '5.2': 'Transcript and analysis — open any row under Call Logs',
+    '5.3': 'Event log and cost — open any row under Call Logs',
+    '5.4': 'Recording and transfer outcome — open any row under Call Logs',
+}
+
+
 @lru_cache(maxsize=1)
 def parse_catalog():
     """Return the module tree parsed from `NavAIReceptionist.md`.
@@ -269,6 +291,9 @@ def build_sidebar(current_path=''):
                 'title': submodule['title'],
                 'links': links,
                 'is_live': is_live,
+                # Only meaningful for a built sub-module that produced no links —
+                # that is the row the hint exists to explain.
+                'hint': EMBEDDED_HINTS.get(submodule['key'], '') if is_live and not links else '',
                 'is_active': any(link['is_active'] for link in links),
             })
 
