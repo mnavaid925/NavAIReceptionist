@@ -44,32 +44,51 @@
   {% include "partials/_empty_state.html" with icon="map-pin" title="Choose a location" message="Runtime diagnostics are scoped to one location. Pick an active location to see how its inbound calls are being resolved." %}
 {% else %}
 
-  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+  {% comment %}
+    `.stat-card` is a FLEX ROW of exactly two children: the icon, then ONE wrapper
+    holding value/label/meta stacked. Emitting the three text divs as direct
+    children instead makes them three more flex items, so the value, the label and
+    the meta line up horizontally beside the icon and the card blows out. Keep the
+    wrapper `<div>` — that is the contract every other stat card in the app uses.
+
+    Column tiers match the rest of the app (2 up / 3 up). Five cards at
+    `xl:grid-cols-5` squeezed each one under ~200px inside the sidebar-inset
+    content column, which wrapped the uppercase labels and the 4-dp spend figure.
+  {% endcomment %}
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
     <div class="stat-card">
       <span class="stat-icon blue" aria-hidden="true"><i data-lucide="radio"></i></span>
-      <div class="stat-value">{{ stats.active }}</div>
-      <div class="stat-label">Calls in progress</div>
-      <div class="stat-meta">Live right now at {{ active_location.name }}</div>
+      <div>
+        <div class="stat-value">{{ stats.active }}</div>
+        <div class="stat-label">Calls in progress</div>
+        <div class="stat-meta">Live right now at {{ active_location.name }}</div>
+      </div>
     </div>
     <div class="stat-card">
       <span class="stat-icon slate" aria-hidden="true"><i data-lucide="phone-call"></i></span>
-      <div class="stat-value">{{ stats.total }}</div>
-      <div class="stat-label">Calls logged</div>
-      <div class="stat-meta">All time at this location</div>
+      <div>
+        <div class="stat-value">{{ stats.total }}</div>
+        <div class="stat-label">Calls logged</div>
+        <div class="stat-meta">All time at this location</div>
+      </div>
     </div>
     <div class="stat-card">
       <span class="stat-icon {% if setting and setting.is_ready %}green{% else %}orange{% endif %}" aria-hidden="true">
         <i data-lucide="{% if setting and setting.is_ready %}check-circle{% else %}alert-triangle{% endif %}"></i>
       </span>
-      <div class="stat-value">{% if setting and setting.is_ready %}Ready{% else %}Not ready{% endif %}</div>
-      <div class="stat-label">Agent status</div>
-      <div class="stat-meta">{% if setting.enabled %}Answering enabled{% else %}Answering disabled{% endif %}</div>
+      <div>
+        <div class="stat-value">{% if setting and setting.is_ready %}Ready{% else %}Not ready{% endif %}</div>
+        <div class="stat-label">Agent status</div>
+        <div class="stat-meta">{% if setting.enabled %}Answering enabled{% else %}Answering disabled{% endif %}</div>
+      </div>
     </div>
     <div class="stat-card">
       <span class="stat-icon purple" aria-hidden="true"><i data-lucide="phone-forwarded"></i></span>
-      <div class="stat-value">{{ stats.transferred }}</div>
-      <div class="stat-label">Transferred</div>
-      <div class="stat-meta">Handed off to a person</div>
+      <div>
+        <div class="stat-value">{{ stats.transferred }}</div>
+        <div class="stat-label">Transferred</div>
+        <div class="stat-meta">Handed off to a person</div>
+      </div>
     </div>
     {% comment %}
       Five cards is a prime count, so at the 2-column tier the last one would sit
@@ -78,9 +97,11 @@
     {% endcomment %}
     <div class="stat-card sm:col-span-2 lg:col-span-1">
       <span class="stat-icon green" aria-hidden="true"><i data-lucide="circle-dollar-sign"></i></span>
-      <div class="stat-value">${{ total_cost_today|floatformat:4 }}</div>
-      <div class="stat-label">Spend today</div>
-      <div class="stat-meta">Calls started today at this location</div>
+      <div>
+        <div class="stat-value">${{ total_cost_today|floatformat:4 }}</div>
+        <div class="stat-label">Spend today</div>
+        <div class="stat-meta">Calls started today at this location</div>
+      </div>
     </div>
   </div>
 
